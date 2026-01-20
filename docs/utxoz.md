@@ -1,12 +1,19 @@
-# UTXO-Z: High-Performance UTXO Database for Bitcoin Cash
-
-# Abstract
-
+---
+title: "UTXO-Z: High-Performance UTXO Database for Bitcoin Cash"
+author:
+  - Fernando Pelliccioni
+date: 2025-08-13
+abstract: | 
   UTXO-Z is a purpose-built database system designed to overcome the performance bottlenecks that prevent Bitcoin Cash from scaling to global payment volumes. As transaction validation requires rapid access to unspent outputs (UTXOs), traditional key-value stores like LevelDB become the primary bottleneck when processing thousands of transactions per second—a requirement for worldwide adoption.
 
   This paper presents UTXO-Z, which replaces general-purpose databases with a domain-specific architecture optimized for UTXO access patterns. The system employs cache-optimized data structures, value-based segmentation, and generational storage to minimize memory indirection and maximize throughput. By storing complete output data inline and leveraging temporal locality through deferred lookups, UTXO-Z eliminates the performance penalties of pointer-based storage systems.
 
   Benchmarks demonstrate that UTXO-Z achieves 2.5× higher throughput than LevelDB during blockchain synchronization, processing up to 290,000 inputs and 320,000 outputs per second on a single thread. Under concurrent access, the system reaches 33 million lookups per second for recent outputs (45× faster than LevelDB) and 1.5 million lookups per second for the complete pipeline (2× faster). These performance gains, achieved through careful attention to memory layout and cache efficiency, provide the foundation necessary for Bitcoin Cash to scale as a global payment system serving billions of users.
+geometry: margin=2.5cm
+fontsize: 11pt
+toc: true
+linkcolor: blue
+---
 
 # 1. Introduction
 

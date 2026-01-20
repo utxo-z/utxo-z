@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: 🐧 Linux x86_64 GCC 15
+            configure-preset: conan-release
+            build-preset: conan-release
+          - os: macos-15
+            name: 🍎 macOS arm64 Apple Clang 17
+            configure-preset: conan-release
+            build-preset: conan-release
+          - os: windows-2025
+            name: 🪟 Windows x64 MSVC 2025
+            configure-preset: conan-default
+            build-preset: conan-release
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan
+          conan --version
+
+      - name: 🔧 Configure Conan
+        run: |
+          conan profile detect --force
+
+      - name: 📦 Install dependencies
+        run: |
+          conan install . -of build --build=missing -s build_type=Release -s compiler.cppstd=23
+
+      - name: ⚙️ Configure CMake
+        run: |
+          cmake --preset ${{ matrix.configure-preset }}
+
+      - name: 🔨 Build
+        run: |
+          cmake --build --preset ${{ matrix.build-preset }} --parallel
+
+      - name: 🧪 Run tests
+        run: |
+          ctest --preset ${{ matrix.build-preset }} --output-on-failure
