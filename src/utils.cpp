@@ -20,15 +20,7 @@
 namespace utxoz {
 
 void print_key(key_t const& key) {
-    // First 32 bytes are the transaction hash, print in hex reversed
-    for (size_t i = 0; i < 32; ++i) {
-        detail::log_print("{:02x}", key[31 - i]);
-    }
-    
-    // The last 4 bytes are the output index, print as integer
-    uint32_t output_index = 0;
-    std::memcpy(&output_index, key.data() + 32, sizeof(uint32_t));
-    detail::log_print(":{}\n", output_index);
+    log::debug("{}", key_to_string(key));
 }
 
 std::string key_to_string(key_t const& key) {

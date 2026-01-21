@@ -29,14 +29,16 @@ class UtxozConan(ConanFile):
         "fPIC": [True, False],
         "with_tests": [True, False],
         "with_examples": [True, False],
-        "with_benchmarks": [True, False]
+        "with_benchmarks": [True, False],
+        "log": ["custom", "spdlog", "none"]
     }
     default_options = {
         "shared": False,
         "fPIC": True,
         "with_tests": True,
         "with_examples": False,
-        "with_benchmarks": False
+        "with_benchmarks": False,
+        "log": "custom"
     }
 
     # Sources are located in the same place as this recipe
@@ -57,6 +59,8 @@ class UtxozConan(ConanFile):
     def requirements(self):
         self.requires("boost/1.90.0", transitive_headers=True, transitive_libs=True)
         self.requires("fmt/12.0.0", transitive_headers=True, transitive_libs=True)
+        if self.options.log == "spdlog":
+            self.requires("spdlog/1.16.0", transitive_headers=True, transitive_libs=True)
 
     def build_requirements(self):
         if self.options.with_tests:
@@ -79,6 +83,7 @@ class UtxozConan(ConanFile):
         tc.variables["UTXOZ_BUILD_TESTS"] = self.options.with_tests
         tc.variables["UTXOZ_BUILD_EXAMPLES"] = self.options.with_examples
         tc.variables["UTXOZ_BUILD_BENCHMARKS"] = self.options.with_benchmarks
+        tc.variables["UTXOZ_LOG_BACKEND"] = str(self.options.log)
         tc.generate()
 
     def build(self):
@@ -96,6 +101,8 @@ class UtxozConan(ConanFile):
         self.cpp_info.includedirs = ["include"]
 
         self.cpp_info.requires = ["boost::headers", "boost::filesystem", "boost::interprocess", "fmt::fmt"]
+        if self.options.log == "spdlog":
+            self.cpp_info.requires.append("spdlog::spdlog")
 
         if self.settings.os in ["Linux", "FreeBSD"]:
             self.cpp_info.system_libs.extend(["pthread", "rt"])

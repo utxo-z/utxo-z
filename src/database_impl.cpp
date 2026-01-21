@@ -108,7 +108,7 @@ template<size_t Index>
 size_t database_impl::find_optimal_buckets(std::string const& file_path,
                                            size_t file_size,
                                            size_t initial_buckets) {
-    log_print("Finding optimal buckets for container {} (file size: {})...\n", Index, file_size);
+    log::debug("Finding optimal buckets for container {} (file size: {})...", Index, file_size);
 
     size_t left = 1;
     size_t right = initial_buckets;
@@ -132,7 +132,7 @@ size_t database_impl::find_optimal_buckets(std::string const& file_path,
             // Success - try more buckets
             best_buckets = mid;
             left = mid + 1;
-            log_print("  {} buckets OK, trying more...\n", mid);
+            log::trace("  {} buckets OK, trying more...", mid);
         } catch (boost::interprocess::bad_alloc const&) {
             // Too many - try fewer
             right = mid - 1;
@@ -141,7 +141,7 @@ size_t database_impl::find_optimal_buckets(std::string const& file_path,
         fs::remove(temp_file);
     }
 
-    log_print("Optimal buckets for container {}: {}\n", Index, best_buckets);
+    log::debug("Optimal buckets for container {}: {}", Index, best_buckets);
     return best_buckets;
 }
 
@@ -189,7 +189,7 @@ void database_impl::new_version() {
     file_metadata_[Index][current_versions_[Index]] = file_metadata{};
 
     open_or_create_container<Index>(current_versions_[Index]);
-    log_print("Container {} rotated to version {}\n", Index, current_versions_[Index]);
+    log::debug("Container {} rotated to version {}", Index, current_versions_[Index]);
 }
 
 template<size_t Index>
@@ -357,7 +357,7 @@ size_t database_impl::size() const {
 bool database_impl::insert(key_t const& key, value_span_t value, uint32_t height) {
     size_t const index = get_index_from_size(value.size());
     if (index >= container_count) {
-        log_print("insert: Invalid index {} for value size {}\n", index, value.size());
+        log::error("insert: Invalid index {} for value size {}", index, value.size());
         throw std::out_of_range("Value size too large");
     }
 
@@ -370,7 +370,7 @@ template<size_t Index>
 bool database_impl::insert_in_index(key_t const& key, value_span_t value, uint32_t height) {
     // Check if rotation needed
     if (!can_insert_safely<Index>()) {
-        log_print("Rotating container {} due to safety constraints\n", Index);
+        log::debug("Rotating container {} due to safety constraints", Index);
         new_version<Index>();
     }
 
@@ -403,13 +403,13 @@ bool database_impl::insert_in_index(key_t const& key, value_span_t value, uint32
             return inserted;
 
         } catch (boost::interprocess::bad_alloc const& e) {
-            log_print("Error inserting into container {}: {}\n", Index, e.what());
+            log::error("Error inserting into container {}: {}", Index, e.what());
             new_version<Index>();
         }
         --max_retries;
     }
 
-    log_print("Failed to insert after 3 retries\n");
+    log::error("Failed to insert after 3 retries");
     throw boost::interprocess::bad_alloc();
 }
 
@@ -580,7 +580,7 @@ size_t database_impl::erase_from_cached_files_only(key_t const& key, uint32_t he
                         result = 1;
                     }
                 } catch (std::exception const& e) {
-                    log_print("Error accessing cached file ({}, v{}): {}\n",
+                    log::error("Error accessing cached file ({}, v{}): {}",
                               container_index, version, e.what());
                 }
             }
@@ -627,7 +627,7 @@ std::pair<uint32_t, std::vector<key_t>> database_impl::process_pending_deletions
     ++deferred_stats_.processing_runs;
 
     size_t initial_size = deferred_deletions_.size();
-    log_print("Processing {} deferred deletions...\n", initial_size);
+    log::debug("Processing {} deferred deletions...", initial_size);
 
     size_t successful_deletions = 0;
 
@@ -684,7 +684,7 @@ std::pair<uint32_t, std::vector<key_t>> database_impl::process_pending_deletions
     deferred_stats_.successfully_processed += successful_deletions;
     deferred_stats_.failed_to_delete += failed_deletions.size();
 
-    log_print("Deferred deletion complete: {} successful, {} failed\n",
+    log::debug("Deferred deletion complete: {} successful, {} failed",
               successful_deletions, failed_deletions.size());
 
     return {static_cast<uint32_t>(successful_deletions), std::move(failed_deletions)};
@@ -722,7 +722,7 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
             return successful_deletions;
 
         } catch (std::exception const& e) {
-            log_print("Error processing file ({}, v{}): {}\n", container_index, version, e.what());
+            log::error("Error processing file ({}, v{}): {}", container_index, version, e.what());
             return 0;
         }
     };
@@ -742,7 +742,7 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
 
 template<size_t Index>
 void database_impl::compact_container() {
-    log_print("Starting compaction for container {}...\n", Index);
+    log::debug("Starting compaction for container {}...", Index);
 
     size_t files_deleted = 0;
     size_t entries_moved = 0;
@@ -751,7 +751,7 @@ void database_impl::compact_container() {
 
     size_t total_versions = count_versions_for_container(Index);
     if (total_versions <= 1) {
-        log_print("Container {} has {} files, no compaction needed\n", Index, total_versions);
+        log::trace("Container {} has {} files, no compaction needed", Index, total_versions);
         open_or_create_container<Index>(total_versions > 0 ? total_versions - 1 : 0);
         return;
     }
@@ -770,7 +770,7 @@ void database_impl::compact_container() {
 
         while (it != source_map->end()) {
             if (!can_insert_safely_in_map<Index>(*target_map, *target_segment)) {
-                log_print("Target file {} is full, rotating...\n", target_idx);
+                log::trace("Target file {} is full, rotating...", target_idx);
 
                 target_segment.reset();
                 target_idx = source_idx;
@@ -834,18 +834,18 @@ void database_impl::compact_container() {
     current_versions_[Index] = total_versions > 0 ? total_versions - 1 : 0;
     open_or_create_container<Index>(current_versions_[Index]);
 
-    log_print("Compaction complete for container {}: {} files deleted, {} entries moved\n",
+    log::debug("Compaction complete for container {}: {} files deleted, {} entries moved",
               Index, files_deleted, entries_moved);
 }
 
 void database_impl::compact_all() {
-    log_print("Starting full database compaction...\n");
+    log::info("Starting full database compaction...");
 
     for_each_index<container_count>([&](auto I) {
         compact_container<I>();
     });
 
-    log_print("Full database compaction complete\n");
+    log::info("Full database compaction complete");
 }
 
 // =============================================================================
@@ -924,30 +924,30 @@ database_statistics database_impl::get_statistics() {
 void database_impl::print_statistics() {
     auto stats = get_statistics();
 
-    log_print("\n=== UTXO Database Statistics ===\n");
-    log_print("Total entries: {}\n", stats.total_entries);
-    log_print("Total inserts: {}\n", stats.total_inserts);
-    log_print("Total deletes: {}\n", stats.total_deletes);
+    log::info("=== UTXO Database Statistics ===");
+    log::info("Total entries: {}", stats.total_entries);
+    log::info("Total inserts: {}", stats.total_inserts);
+    log::info("Total deletes: {}", stats.total_deletes);
 
-    log_print("\n--- Container Statistics ---\n");
+    log::info("--- Container Statistics ---");
     for (size_t i = 0; i < container_count; ++i) {
-        log_print("Container {} (size <= {} bytes):\n", i, container_sizes[i]);
-        log_print("  Current entries: {}\n", stats.containers[i].current_size);
-        log_print("  Total inserts: {}\n", stats.containers[i].total_inserts);
-        log_print("  Total deletes: {}\n", stats.containers[i].total_deletes);
-        log_print("  File rotations: {}\n", stats.rotations_per_container[i]);
-        log_print("  Est. memory: {:.2f} MB\n", stats.memory_usage_per_container[i] / (1024.0*1024.0));
+        log::info("Container {} (size <= {} bytes):", i, container_sizes[i]);
+        log::info("  Current entries: {}", stats.containers[i].current_size);
+        log::info("  Total inserts: {}", stats.containers[i].total_inserts);
+        log::info("  Total deletes: {}", stats.containers[i].total_deletes);
+        log::info("  File rotations: {}", stats.rotations_per_container[i]);
+        log::info("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[i] / (1024.0*1024.0));
     }
 
-    log_print("\n--- Cache Statistics ---\n");
-    log_print("Cache hit rate: {:.2f}%\n", stats.cache_hit_rate * 100);
-    log_print("Cached files: {}\n", stats.cached_files_count);
+    log::info("--- Cache Statistics ---");
+    log::info("Cache hit rate: {:.2f}%", stats.cache_hit_rate * 100);
+    log::info("Cached files: {}", stats.cached_files_count);
 
-    log_print("\n--- Search Performance ---\n");
-    log_print("Hit rate: {:.2f}%\n", stats.search.hit_rate * 100);
-    log_print("Avg depth: {:.2f}\n", stats.search.avg_depth);
+    log::info("--- Search Performance ---");
+    log::info("Hit rate: {:.2f}%", stats.search.hit_rate * 100);
+    log::info("Avg depth: {:.2f}", stats.search.avg_depth);
 
-    log_print("\n================================\n");
+    log::info("================================");
 }
 
 void database_impl::reset_all_statistics() {

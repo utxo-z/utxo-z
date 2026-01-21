@@ -32,9 +32,37 @@ option(UTXOZ_BUILD_EXAMPLES "Build examples" ON)
 option(UTXOZ_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(UTXOZ_BUILD_DOCS "Build documentation" OFF)
 
+# Log backend: custom, spdlog, none
+if(NOT DEFINED UTXOZ_LOG_BACKEND)
+    set(UTXOZ_LOG_BACKEND "custom")
+endif()
+message(STATUS "Log backend: ${UTXOZ_LOG_BACKEND}")
+
+# Set variables for config.hpp generation
+set(UTXOZ_LOG_CUSTOM OFF)
+set(UTXOZ_LOG_SPDLOG OFF)
+set(UTXOZ_LOG_NONE OFF)
+if(UTXOZ_LOG_BACKEND STREQUAL "custom")
+    set(UTXOZ_LOG_CUSTOM ON)
+elseif(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
+    set(UTXOZ_LOG_SPDLOG ON)
+elseif(UTXOZ_LOG_BACKEND STREQUAL "none")
+    set(UTXOZ_LOG_NONE ON)
+endif()
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/utxoz/config.hpp.in
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/utxoz/config.hpp
+)
+
 # Find dependencies
 find_package(Boost REQUIRED)
 find_package(fmt REQUIRED)
+
+# Conditionally find spdlog
+if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
+    find_package(spdlog REQUIRED)
+endif()
 
 # Create main library
 add_library(utxoz)
@@ -65,6 +93,13 @@ target_link_libraries(utxoz
         Boost::headers
         fmt::fmt
 )
+
+# Log backend configuration (defines are in config.hpp)
+if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
+    target_link_libraries(utxoz PRIVATE spdlog::spdlog)
+elseif(NOT UTXOZ_LOG_BACKEND STREQUAL "custom" AND NOT UTXOZ_LOG_BACKEND STREQUAL "none")
+    message(FATAL_ERROR "Invalid UTXOZ_LOG_BACKEND: ${UTXOZ_LOG_BACKEND}. Must be custom, spdlog, or none.")
+endif()
 
 # Compiler settings
 target_compile_features(utxoz PUBLIC cxx_std_23)

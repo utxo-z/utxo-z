@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <utxoz/config.hpp>
 #include <utxoz/database.hpp>
+#include <utxoz/logging.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 #include <utxoz/utils.hpp>

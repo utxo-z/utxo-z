@@ -18,3 +18,7 @@ target_link_libraries(blockchain_processing PRIVATE utxoz::utxoz)
 # Adapted benchmark
 add_executable(adapted_benchmark adapted_benchmark.cpp)
 target_link_libraries(adapted_benchmark PRIVATE utxoz::utxoz)
+
+# Logging example
+add_executable(logging_example logging_example.cpp)
+target_link_libraries(logging_example PRIVATE utxoz::utxoz)

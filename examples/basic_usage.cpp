@@ -3,131 +3,133 @@
  * @brief Basic usage example of UTXO database
  */
 
-#include <chrono>
-#include <iostream>
+#include <array>
 #include <random>
+#include <vector>
+
+#include <fmt/core.h>
 
 #include <utxoz/database.hpp>
 #include <utxoz/utils.hpp>
 
 int main() {
     try {
-        std::cout << "UTXO Database Basic Usage Example\n";
-        std::cout << "==================================\n\n";
+        fmt::println("UTXO Database Basic Usage Example");
+        fmt::println("==================================\n");
 
         // Create and configure database
         utxoz::db db;
         db.configure("./example_utxo_data", true); // Remove existing data
-        
-        std::cout << "Database configured successfully\n";
-        std::cout << "Initial size: " << db.size() << " UTXOs\n\n";
-        
+
+        fmt::println("Database configured successfully");
+        fmt::println("Initial size: {} UTXOs\n", db.size());
+
         // Generate some sample data
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
         std::uniform_int_distribution<uint32_t> height_dist(700000, 800000);
         std::uniform_int_distribution<size_t> value_size_dist(25, 100);
-        
+
         // Insert some UTXOs
-        std::cout << "Inserting sample UTXOs...\n";
+        fmt::println("Inserting sample UTXOs...");
         std::vector<utxoz::key_t> inserted_keys;
-        
+
         for (int i = 0; i < 1000; ++i) {
             // Generate random transaction hash
             std::array<uint8_t, 32> tx_hash;
             for (auto& byte : tx_hash) {
                 byte = byte_dist(gen);
             }
-            
+
             // Create key
             uint32_t output_index = i % 10;
             auto key = utxoz::make_key(tx_hash, output_index);
             inserted_keys.push_back(key);
-            
+
             // Generate random value
             size_t value_size = value_size_dist(gen);
             std::vector<uint8_t> value(value_size);
             for (auto& byte : value) {
                 byte = byte_dist(gen);
             }
-            
+
             // Insert UTXO
             uint32_t height = height_dist(gen);
             bool inserted = db.insert(key, value, height);
-            
+
             if (!inserted) {
-                std::cout << "Warning: UTXO already exists\n";
+                fmt::println("Warning: UTXO already exists");
             }
-            
+
             if (i % 100 == 0) {
-                std::cout << "Inserted " << i << " UTXOs...\n";
+                fmt::println("Inserted {} UTXOs...", i);
             }
         }
-        
-        std::cout << "Inserted " << inserted_keys.size() << " UTXOs\n";
-        std::cout << "Database size: " << db.size() << " UTXOs\n\n";
-        
+
+        fmt::println("Inserted {} UTXOs", inserted_keys.size());
+        fmt::println("Database size: {} UTXOs\n", db.size());
+
         // Find some UTXOs
-        std::cout << "Testing UTXO lookups...\n";
+        fmt::println("Testing UTXO lookups...");
         size_t found_count = 0;
-        
+
         for (size_t i = 0; i < std::min(size_t(10), inserted_keys.size()); ++i) {
             auto result = db.find(inserted_keys[i], 800000);
             if (result) {
                 ++found_count;
-                std::cout << "Found UTXO " << i << ", size: " << result->size() << " bytes\n";
+                fmt::println("Found UTXO {}, size: {} bytes", i, result->size());
             } else {
-                std::cout << "UTXO " << i << " not found\n";
+                fmt::println("UTXO {} not found", i);
             }
         }
-        
-        std::cout << "Found " << found_count << " out of 10 UTXOs\n\n";
-        
+
+        fmt::println("Found {} out of 10 UTXOs\n", found_count);
+
         // Erase some UTXOs
-        std::cout << "Testing UTXO deletion...\n";
+        fmt::println("Testing UTXO deletion...");
         size_t erased_count = 0;
-        
+
         for (size_t i = 0; i < std::min(size_t(100), inserted_keys.size()); i += 2) {
             size_t erased = db.erase(inserted_keys[i], 800000);
             erased_count += erased;
         }
-        
-        std::cout << "Erased " << erased_count << " UTXOs\n";
-        std::cout << "Database size after erasure: " << db.size() << " UTXOs\n\n";
-        
+
+        fmt::println("Erased {} UTXOs", erased_count);
+        fmt::println("Database size after erasure: {} UTXOs\n", db.size());
+
         // Process pending deletions
-        std::cout << "Processing pending deletions...\n";
+        fmt::println("Processing pending deletions...");
         auto [deleted, failed] = db.process_pending_deletions();
-        std::cout << "Successfully deleted: " << deleted << "\n";
-        std::cout << "Failed deletions: " << failed.size() << "\n\n";
-        
+        fmt::println("Successfully deleted: {}", deleted);
+        fmt::println("Failed deletions: {}\n", failed.size());
+
         // Show statistics
-        std::cout << "Database Statistics:\n";
-        std::cout << "===================\n";
+        fmt::println("Database Statistics:");
+        fmt::println("===================");
         db.print_statistics();
-        
+
         // Test compaction
-        std::cout << "\nRunning database compaction...\n";
+        fmt::println("\nRunning database compaction...");
         db.compact_all();
-        std::cout << "Compaction completed\n\n";
-        
+        fmt::println("Compaction completed\n");
+
         // Final statistics
         auto stats = db.get_statistics();
-        std::cout << "Final Statistics:\n";
-        std::cout << "Total entries: " << stats.total_entries << "\n";
-        std::cout << "Total inserts: " << stats.total_inserts << "\n";
-        std::cout << "Total deletes: " << stats.total_deletes << "\n";
-        std::cout << "Cache hit rate: " << (stats.cache_hit_rate * 100) << "%\n";
-        
+        fmt::println("Final Statistics:");
+        fmt::println("Total entries: {}", stats.total_entries);
+        fmt::println("Total inserts: {}", stats.total_inserts);
+        fmt::println("Total deletes: {}", stats.total_deletes);
+        fmt::println("Cache hit rate: {}%", stats.cache_hit_rate * 100);
+
         // Close database
         db.close();
-        std::cout << "\nDatabase closed successfully\n";
-        
+        fmt::println("\nDatabase closed successfully");
+
     } catch (std::exception const& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        fmt::println(stderr, "Error: {}", e.what());
         return 1;
     }
-    
+
     return 0;
 }
