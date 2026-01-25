@@ -62,7 +62,7 @@ size_t db::erase(key_t const& key, uint32_t height) {
     return impl_->erase(key, height);
 }
 
-std::pair<uint32_t, std::vector<key_t>> db::process_pending_deletions() {
+std::pair<uint32_t, std::vector<deferred_deletion_entry>> db::process_pending_deletions() {
     if (!impl_) {
         return {0, {}};
     }

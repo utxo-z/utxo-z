@@ -72,6 +72,10 @@ int main() {
 
     // Process deferred deletions periodically
     auto [deleted, failed] = db.process_pending_deletions();
+    for (auto const& entry : failed) {
+        // entry.key   - the UTXO key that failed to delete
+        // entry.height - the block height that requested the deletion
+    }
 
     // Compact periodically for optimal performance
     db.compact_all();
@@ -123,7 +127,7 @@ utxoz::set_log_prefix("utxoz");  // Messages will show as "[utxoz] ..."
 | `insert(key, value, height)` | Insert UTXO, returns success |
 | `find(key, height)` | Find UTXO, returns optional value |
 | `erase(key, height)` | Erase UTXO (may be deferred) |
-| `process_pending_deletions()` | Process deferred deletes |
+| `process_pending_deletions()` | Process deferred deletes, returns (count, failed entries with height) |
 | `compact_all()` | Optimize storage |
 | `get_statistics()` | Get performance stats |
 | `print_statistics()` | Log formatted stats |

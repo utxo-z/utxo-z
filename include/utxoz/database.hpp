@@ -104,9 +104,10 @@ struct db {
 
     /**
      * @brief Process all pending deferred deletions
-     * @return Pair of (successful_deletions_count, failed_deletion_keys)
+     * @return Pair of (successful_deletions_count, failed_deletions)
+     *         Each failed deletion includes the key and the block height that requested it
      */
-    [[nodiscard]] std::pair<uint32_t, std::vector<key_t>> process_pending_deletions();
+    [[nodiscard]] std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
 
     /**
      * @brief Get the number of pending deferred deletions
