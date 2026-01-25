@@ -52,7 +52,7 @@ struct database_impl {
     std::optional<std::vector<uint8_t>> find(key_t const& key, uint32_t height);
     size_t erase(key_t const& key, uint32_t height);
 
-    std::pair<uint32_t, std::vector<key_t>> process_pending_deletions();
+    std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
     size_t deferred_deletions_size() const;
 
     void compact_all();

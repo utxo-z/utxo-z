@@ -620,7 +620,7 @@ size_t database_impl::deferred_deletions_size() const {
     return deferred_deletions_.size();
 }
 
-std::pair<uint32_t, std::vector<key_t>> database_impl::process_pending_deletions() {
+std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process_pending_deletions() {
     if (deferred_deletions_.empty()) return {};
 
     auto const start_time = std::chrono::steady_clock::now();
@@ -668,11 +668,11 @@ std::pair<uint32_t, std::vector<key_t>> database_impl::process_pending_deletions
         });
     }
 
-    // Collect failed deletions
-    std::vector<key_t> failed_deletions;
+    // Collect failed deletions (includes key and block height that requested it)
+    std::vector<deferred_deletion_entry> failed_deletions;
     failed_deletions.reserve(deferred_deletions_.size());
     for (auto const& entry : deferred_deletions_) {
-        failed_deletions.push_back(entry.key);
+        failed_deletions.push_back(entry);
     }
 
     deferred_deletions_.clear();
