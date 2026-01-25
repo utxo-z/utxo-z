@@ -42,7 +42,7 @@ class UtxozConan(ConanFile):
     }
 
     # Sources are located in the same place as this recipe
-    exports_sources = "CMakeLists.txt", "cmake/*", "src/*", "include/*", "examples/*", "tests/*", "LICENSE", "README.md"
+    exports_sources = "CMakeLists.txt", "src/*", "include/*", "examples/*", "tests/*", "LICENSE", "README.md"
 
     def validate(self):
         if self.info.settings.compiler.cppstd:
@@ -55,6 +55,7 @@ class UtxozConan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+        self.options["fmt/*"].header_only = True
 
     def requirements(self):
         self.requires("boost/1.90.0", transitive_headers=True, transitive_libs=True)
@@ -84,6 +85,7 @@ class UtxozConan(ConanFile):
         tc.variables["UTXOZ_BUILD_EXAMPLES"] = self.options.with_examples
         tc.variables["UTXOZ_BUILD_BENCHMARKS"] = self.options.with_benchmarks
         tc.variables["UTXOZ_LOG_BACKEND"] = str(self.options.log)
+        tc.variables["UTXOZ_CONAN_BUILD"] = True
         tc.generate()
 
     def build(self):
@@ -100,7 +102,7 @@ class UtxozConan(ConanFile):
         self.cpp_info.libs = ["utxoz"]
         self.cpp_info.includedirs = ["include"]
 
-        self.cpp_info.requires = ["boost::headers", "boost::filesystem", "boost::interprocess", "fmt::fmt"]
+        self.cpp_info.requires = ["boost::headers", "boost::filesystem", "fmt::fmt"]
         if self.options.log == "spdlog":
             self.cpp_info.requires.append("spdlog::spdlog")
 

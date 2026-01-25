@@ -31,6 +31,7 @@ option(UTXOZ_BUILD_TESTS "Build tests" ON)
 option(UTXOZ_BUILD_EXAMPLES "Build examples" ON)
 option(UTXOZ_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(UTXOZ_BUILD_DOCS "Build documentation" OFF)
+option(UTXOZ_CONAN_BUILD "Building via Conan (skip cmake config generation)" OFF)
 
 # Log backend: custom, spdlog, none
 if(NOT DEFINED UTXOZ_LOG_BACKEND)
@@ -91,7 +92,7 @@ target_include_directories(utxoz
 target_link_libraries(utxoz
     PUBLIC
         Boost::headers
-        fmt::fmt
+        fmt::fmt-header-only
 )
 
 # Log backend configuration (defines are in config.hpp)
@@ -156,26 +157,28 @@ install(EXPORT utxoz-targets
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/utxoz
 )
 
-# Create config file
-include(CMakePackageConfigHelpers)
+# Create config file (only for non-Conan builds)
+if(NOT UTXOZ_CONAN_BUILD)
+    include(CMakePackageConfigHelpers)
 
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/utxoz-config.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config.cmake"
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/utxoz
-)
+    configure_package_config_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/utxoz-config.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config.cmake"
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/utxoz
+    )
 
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config-version.cmake"
-    VERSION ${UTXOZ_VERSION}
-    COMPATIBILITY SameMajorVersion
-)
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config-version.cmake"
+        VERSION ${UTXOZ_VERSION}
+        COMPATIBILITY SameMajorVersion
+    )
 
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config-version.cmake"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/utxoz
-)
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/utxoz-config-version.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/utxoz
+    )
+endif()
 
 # Package config
 set(CPACK_PACKAGE_NAME "utxoz")
