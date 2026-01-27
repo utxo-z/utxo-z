@@ -10,8 +10,9 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 BUILD_TYPE="${1:-Release}"
 LOG_BACKEND="${2:-custom}"
+STATISTICS="${3:-True}"
 
-echo "Building utxoz (${BUILD_TYPE}, log=${LOG_BACKEND})"
+echo "Building utxoz (${BUILD_TYPE}, log=${LOG_BACKEND}, statistics=${STATISTICS})"
 
 cd "${PROJECT_DIR}"
 
@@ -22,7 +23,7 @@ if [ ! -f "build/build/${BUILD_TYPE}/CMakeCache.txt" ]; then
     # Install dependencies if needed
     if [ ! -d "build" ]; then
         echo "Installing Conan dependencies..."
-        conan install . -of build --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o with_examples=True
+        conan install . -of build --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_examples=True
     fi
 
     cmake --preset conan-release
