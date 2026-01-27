@@ -58,6 +58,7 @@ class UtxozConan(ConanFile):
         if self.options.shared:
             self.options.rm_safe("fPIC")
         self.options["fmt/*"].header_only = True
+        self.options["spdlog/*"].header_only = True
 
     def requirements(self):
         self.requires("boost/1.90.0", transitive_headers=True, transitive_libs=True)
