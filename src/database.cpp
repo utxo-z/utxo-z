@@ -48,7 +48,7 @@ bool db::insert(key_t const& key, value_span_t value, uint32_t height) {
     return impl_->insert(key, value, height);
 }
 
-std::optional<std::vector<uint8_t>> db::find(key_t const& key, uint32_t height) {
+bytes_opt db::find(key_t const& key, uint32_t height) const {
     if (!impl_) {
         return std::nullopt;
     }
@@ -71,6 +71,17 @@ std::pair<uint32_t, std::vector<deferred_deletion_entry>> db::process_pending_de
 
 size_t db::deferred_deletions_size() const {
     return impl_ ? impl_->deferred_deletions_size() : 0;
+}
+
+std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> db::process_pending_lookups() {
+    if (!impl_) {
+        return {};
+    }
+    return impl_->process_pending_lookups();
+}
+
+size_t db::deferred_lookups_size() const {
+    return impl_ ? impl_->deferred_lookups_size() : 0;
 }
 
 void db::compact_all() {

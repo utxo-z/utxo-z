@@ -15,7 +15,6 @@
 #include <vector>
 #include <optional>
 #include <chrono>
-#include <map>
 
 #include <boost/container_hash/hash.hpp>
 
@@ -106,15 +105,34 @@ struct search_record {
 struct deferred_deletion_entry {
     key_t key;         ///< UTXO key to delete
     uint32_t height;   ///< Block height when deletion was requested
-    
-    deferred_deletion_entry(key_t const& k, uint32_t h) 
+
+    deferred_deletion_entry(key_t const& k, uint32_t h)
         : key(k), height(h) {}
-    
+
     bool operator==(deferred_deletion_entry const& other) const {
         return key == other.key;
     }
 
     friend std::size_t hash_value(deferred_deletion_entry const& entry) {
+        return boost::hash<key_t>{}(entry.key);
+    }
+};
+
+/**
+ * @brief Deferred lookup entry
+ */
+struct deferred_lookup_entry {
+    key_t key;         ///< UTXO key to lookup
+    uint32_t height;   ///< Block height when lookup was requested
+
+    deferred_lookup_entry(key_t const& k, uint32_t h)
+        : key(k), height(h) {}
+
+    bool operator==(deferred_lookup_entry const& other) const {
+        return key == other.key;
+    }
+
+    friend std::size_t hash_value(deferred_lookup_entry const& entry) {
         return boost::hash<key_t>{}(entry.key);
     }
 };
@@ -142,6 +160,16 @@ struct std::hash<utxoz::key_t> {
 template<>
 struct std::hash<utxoz::deferred_deletion_entry> {
     std::size_t operator()(utxoz::deferred_deletion_entry const& entry) const noexcept {
+        return std::hash<utxoz::key_t>{}(entry.key);
+    }
+};
+
+/**
+ * @brief Hash function for deferred_lookup_entry
+ */
+template<>
+struct std::hash<utxoz::deferred_lookup_entry> {
+    std::size_t operator()(utxoz::deferred_lookup_entry const& entry) const noexcept {
         return std::hash<utxoz::key_t>{}(entry.key);
     }
 };

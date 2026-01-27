@@ -10,8 +10,9 @@
 #pragma once
 
 #include <chrono>
-#include <map>
 #include <vector>
+
+#include <boost/unordered/unordered_flat_map.hpp>
 
 #include <utxoz/types.hpp>
 
@@ -35,7 +36,8 @@ struct search_stats {
     void add_record(uint32_t access_height, uint32_t insertion_height,
                     uint32_t depth, bool cache_hit, bool found, char operation);
     void reset();
-    [[nodiscard]] search_summary get_summary() const;
+    [[nodiscard]]
+    search_summary get_summary() const;
 
 private:
     std::vector<search_record> records_;
@@ -50,8 +52,9 @@ struct container_stats {
     size_t current_size = 0;         ///< Current number of entries
     size_t failed_deletes = 0;       ///< Failed deletion attempts
     size_t deferred_deletes = 0;     ///< Deferred deletions
+    size_t deferred_lookups = 0;     ///< Deferred lookups
     size_t rehash_count = 0;         ///< Number of hash table rehashes
-    std::map<size_t, size_t> value_size_distribution; ///< Value size -> count
+    boost::unordered_flat_map<size_t, size_t> value_size_distribution; ///< Value size -> count
 };
 
 /**
@@ -64,7 +67,8 @@ struct deferred_stats {
     size_t max_queue_size = 0;               ///< Maximum queue size reached
     size_t processing_runs = 0;              ///< Number of processing runs
     std::chrono::milliseconds total_processing_time{0}; ///< Total processing time
-    std::map<size_t, size_t> deletions_by_depth; ///< Depth -> deletion count
+    boost::unordered_flat_map<size_t, size_t> deletions_by_depth; ///< Depth -> deletion count
+    boost::unordered_flat_map<size_t, size_t> lookups_by_depth;   ///< Depth -> lookup count
 };
 
 /**
@@ -74,14 +78,14 @@ struct not_found_stats {
     size_t total_not_found = 0;      ///< Total not found operations
     size_t total_search_depth = 0;   ///< Cumulative search depth
     size_t max_search_depth = 0;     ///< Maximum search depth encountered
-    std::map<size_t, size_t> depth_distribution; ///< Depth -> count
+    boost::unordered_flat_map<size_t, size_t> depth_distribution; ///< Depth -> count
 };
 
 /**
  * @brief UTXO lifetime statistics
  */
 struct utxo_lifetime_stats {
-    std::map<uint32_t, size_t> age_distribution; ///< Age in blocks -> count
+    boost::unordered_flat_map<uint32_t, size_t> age_distribution; ///< Age in blocks -> count
     uint32_t max_age = 0;            ///< Maximum UTXO age observed
     double average_age = 0.0;        ///< Average UTXO age
     size_t total_spent = 0;          ///< Total UTXOs spent
