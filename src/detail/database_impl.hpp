@@ -48,14 +48,14 @@ struct database_impl {
     void close();
     size_t size() const;
 
-    bool insert(key_t const& key, value_span_t value, uint32_t height);
-    bytes_opt find(key_t const& key, uint32_t height) const;
-    size_t erase(key_t const& key, uint32_t height);
+    bool insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+    bytes_opt find(raw_outpoint const& key, uint32_t height) const;
+    size_t erase(raw_outpoint const& key, uint32_t height);
 
     std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
     size_t deferred_deletions_size() const;
 
-    std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+    std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
     size_t deferred_lookups_size() const;
 
     void compact_all();
@@ -90,25 +90,25 @@ private:
 
     // Core operations implementation
     template<size_t Index>
-    bool insert_in_index(key_t const& key, value_span_t value, uint32_t height);
+    bool insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height);
 
     // Find helpers
-    bytes_opt find_in_latest_version(key_t const& key, uint32_t height) const;
-    bytes_opt find_in_previous_versions(key_t const& key, uint32_t height);
+    bytes_opt find_in_latest_version(raw_outpoint const& key, uint32_t height) const;
+    bytes_opt find_in_previous_versions(raw_outpoint const& key, uint32_t height);
 
     template<size_t Index>
-    bytes_opt find_in_prev_versions(key_t const& key, uint32_t height);
+    bytes_opt find_in_prev_versions(raw_outpoint const& key, uint32_t height);
 
     // Erase helpers
-    size_t erase_in_latest_version(key_t const& key, uint32_t height);
-    size_t erase_from_cached_files_only(key_t const& key, uint32_t height, size_t& search_depth);
-    void add_to_deferred_deletions(key_t const& key, uint32_t height);
+    size_t erase_in_latest_version(raw_outpoint const& key, uint32_t height);
+    size_t erase_from_cached_files_only(raw_outpoint const& key, uint32_t height, size_t& search_depth);
+    void add_to_deferred_deletions(raw_outpoint const& key, uint32_t height);
     size_t process_deferred_deletions_in_file(size_t container_index, size_t version, bool is_cached);
 
     // Deferred lookup helpers
-    void add_to_deferred_lookups(key_t const& key, uint32_t height) const;
+    void add_to_deferred_lookups(raw_outpoint const& key, uint32_t height) const;
     void process_deferred_lookups_in_file(size_t container_index, size_t version, bool is_cached,
-                                          flat_map<key_t, bytes>& successful_lookups);
+                                          flat_map<raw_outpoint, bytes>& successful_lookups);
 
     // File management
     template<size_t Index>
@@ -155,7 +155,7 @@ private:
     void configure_internal(std::string_view path, bool remove_existing);
 
     // Metadata management
-    void update_metadata_on_insert(size_t index, size_t version, key_t const& key, uint32_t height);
+    void update_metadata_on_insert(size_t index, size_t version, raw_outpoint const& key, uint32_t height);
     void update_metadata_on_delete(size_t index, size_t version);
     void save_metadata_to_disk(size_t index, size_t version);
     void load_metadata_from_disk(size_t index, size_t version);

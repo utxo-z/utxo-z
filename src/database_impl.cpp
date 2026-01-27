@@ -124,9 +124,9 @@ size_t database_impl::find_optimal_buckets(std::string const& file_path,
             // Just test if construction succeeds - we don't need the pointer
             (void)segment.find_or_construct<utxo_map<container_sizes[Index]>>("temp_map")(
                 mid,
-                key_hash{},
-                key_equal{},
-                segment.get_allocator<std::pair<key_t const, utxo_value<container_sizes[Index]>>>()
+                outpoint_hash{},
+                outpoint_equal{},
+                segment.get_allocator<std::pair<raw_outpoint const, utxo_value<container_sizes[Index]>>>()
             );
 
             // Success - try more buckets
@@ -159,8 +159,8 @@ void database_impl::open_or_create_container(size_t version) {
     auto* segment = segments_[Index].get();
     containers_[Index] = segment->find_or_construct<utxo_map<container_sizes[Index]>>("db_map")(
         min_buckets_ok_[Index],
-        key_hash{},
-        key_equal{},
+        outpoint_hash{},
+        outpoint_equal{},
         segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>()
     );
 
@@ -270,7 +270,7 @@ float database_impl::next_load_factor() const {
 // =============================================================================
 
 void database_impl::update_metadata_on_insert(size_t index, size_t version,
-                                               key_t const& key, uint32_t height) {
+                                               raw_outpoint const& key, uint32_t height) {
     if (file_metadata_[index].size() <= version) {
         file_metadata_[index].resize(version + 1);
     }
@@ -354,7 +354,7 @@ size_t database_impl::size() const {
 // database_impl - Insert
 // =============================================================================
 
-bool database_impl::insert(key_t const& key, value_span_t value, uint32_t height) {
+bool database_impl::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     size_t const index = get_index_from_size(value.size());
     if (index >= container_count) {
         log::error("insert: Invalid index {} for value size {}", index, value.size());
@@ -367,7 +367,7 @@ bool database_impl::insert(key_t const& key, value_span_t value, uint32_t height
 }
 
 template<size_t Index>
-bool database_impl::insert_in_index(key_t const& key, value_span_t value, uint32_t height) {
+bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height) {
     // Check if rotation needed
     if (!can_insert_safely<Index>()) {
         log::debug("Rotating container {} due to safety constraints", Index);
@@ -417,7 +417,7 @@ bool database_impl::insert_in_index(key_t const& key, value_span_t value, uint32
 // database_impl - Find
 // =============================================================================
 
-bytes_opt database_impl::find(key_t const& key, uint32_t height) const {
+bytes_opt database_impl::find(raw_outpoint const& key, uint32_t height) const {
     // Try current version first
     if (auto res = find_in_latest_version(key, height); res) {
         return res;
@@ -428,7 +428,7 @@ bytes_opt database_impl::find(key_t const& key, uint32_t height) const {
     return std::nullopt;
 }
 
-bytes_opt database_impl::find_in_latest_version(key_t const& key,
+bytes_opt database_impl::find_in_latest_version(raw_outpoint const& key,
                                                                            uint32_t height) const {
     bytes_opt result;
 
@@ -446,7 +446,7 @@ bytes_opt database_impl::find_in_latest_version(key_t const& key,
     return result;
 }
 
-bytes_opt database_impl::find_in_previous_versions(key_t const& key,
+bytes_opt database_impl::find_in_previous_versions(raw_outpoint const& key,
                                                                               uint32_t height) {
     bytes_opt result;
 
@@ -464,7 +464,7 @@ bytes_opt database_impl::find_in_previous_versions(key_t const& key,
 }
 
 template<size_t Index>
-bytes_opt database_impl::find_in_prev_versions(key_t const& key,
+bytes_opt database_impl::find_in_prev_versions(raw_outpoint const& key,
                                                                           uint32_t height) {
     for (size_t v = current_versions_[Index]; v-- > 0;) {
         // Check metadata first
@@ -489,7 +489,7 @@ bytes_opt database_impl::find_in_prev_versions(key_t const& key,
 // database_impl - Erase
 // =============================================================================
 
-size_t database_impl::erase(key_t const& key, uint32_t height) {
+size_t database_impl::erase(raw_outpoint const& key, uint32_t height) {
     size_t search_depth = 0;
 
     // Try current version first
@@ -516,7 +516,7 @@ size_t database_impl::erase(key_t const& key, uint32_t height) {
     return 0;
 }
 
-size_t database_impl::erase_in_latest_version(key_t const& key, uint32_t height) {
+size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t height) {
     size_t result = 0;
 
     for_each_index<container_count>([&](auto I) {
@@ -547,7 +547,7 @@ size_t database_impl::erase_in_latest_version(key_t const& key, uint32_t height)
     return result;
 }
 
-size_t database_impl::erase_from_cached_files_only(key_t const& key, uint32_t height,
+size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint32_t height,
                                                     size_t& search_depth) {
     size_t result = 0;
 
@@ -604,7 +604,7 @@ size_t database_impl::erase_from_cached_files_only(key_t const& key, uint32_t he
 // database_impl - Deferred deletions
 // =============================================================================
 
-void database_impl::add_to_deferred_deletions(key_t const& key, uint32_t height) {
+void database_impl::add_to_deferred_deletions(raw_outpoint const& key, uint32_t height) {
     auto [it, inserted] = deferred_deletions_.emplace(key, height);
     if (inserted) {
         ++deferred_stats_.total_deferred;
@@ -741,7 +741,7 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
 // database_impl - Deferred lookups
 // =============================================================================
 
-void database_impl::add_to_deferred_lookups(key_t const& key, uint32_t height) const {
+void database_impl::add_to_deferred_lookups(raw_outpoint const& key, uint32_t height) const {
     deferred_lookups_.emplace(key, height);
 }
 
@@ -749,10 +749,10 @@ size_t database_impl::deferred_lookups_size() const {
     return deferred_lookups_.size();
 }
 
-std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> database_impl::process_pending_lookups() {
+std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> database_impl::process_pending_lookups() {
     if (deferred_lookups_.empty()) return {};
 
-    flat_map<key_t, bytes> successful_lookups;
+    flat_map<raw_outpoint, bytes> successful_lookups;
 
     auto const start_time = std::chrono::steady_clock::now();
     ++deferred_stats_.processing_runs;
@@ -822,7 +822,7 @@ std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> database_i
 void database_impl::process_deferred_lookups_in_file(size_t container_index,
                                                       size_t version,
                                                       [[maybe_unused]] bool is_cached,
-                                                      flat_map<key_t, bytes>& successful_lookups) {
+                                                      flat_map<raw_outpoint, bytes>& successful_lookups) {
     if (deferred_lookups_.empty()) return;
 
     auto process_with_container = [&]<size_t Index>(std::integral_constant<size_t, Index>) {
@@ -1123,14 +1123,14 @@ template void database_impl::compact_container<1>();
 template void database_impl::compact_container<2>();
 template void database_impl::compact_container<3>();
 
-template bool database_impl::insert_in_index<0>(key_t const&, value_span_t, uint32_t);
-template bool database_impl::insert_in_index<1>(key_t const&, value_span_t, uint32_t);
-template bool database_impl::insert_in_index<2>(key_t const&, value_span_t, uint32_t);
-template bool database_impl::insert_in_index<3>(key_t const&, value_span_t, uint32_t);
+template bool database_impl::insert_in_index<0>(raw_outpoint const&, output_data_span, uint32_t);
+template bool database_impl::insert_in_index<1>(raw_outpoint const&, output_data_span, uint32_t);
+template bool database_impl::insert_in_index<2>(raw_outpoint const&, output_data_span, uint32_t);
+template bool database_impl::insert_in_index<3>(raw_outpoint const&, output_data_span, uint32_t);
 
-template bytes_opt database_impl::find_in_prev_versions<0>(key_t const&, uint32_t);
-template bytes_opt database_impl::find_in_prev_versions<1>(key_t const&, uint32_t);
-template bytes_opt database_impl::find_in_prev_versions<2>(key_t const&, uint32_t);
-template bytes_opt database_impl::find_in_prev_versions<3>(key_t const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<0>(raw_outpoint const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<1>(raw_outpoint const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<2>(raw_outpoint const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<3>(raw_outpoint const&, uint32_t);
 
 } // namespace utxoz::detail

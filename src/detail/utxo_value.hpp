@@ -32,8 +32,8 @@ namespace bip = boost::interprocess;
 // =============================================================================
 
 using segment_manager_t = bip::managed_mapped_file::segment_manager;
-using key_hash = boost::hash<key_t>;
-using key_equal = std::equal_to<key_t>;
+using outpoint_hash = boost::hash<raw_outpoint>;
+using outpoint_equal = std::equal_to<raw_outpoint>;
 
 // =============================================================================
 // UTXO value storage
@@ -62,11 +62,11 @@ struct utxo_value {
 
 template<size_t Size>
 using utxo_map = boost::unordered_flat_map<
-    key_t,
+    raw_outpoint,
     utxo_value<Size>,
-    key_hash,
-    key_equal,
-    bip::allocator<std::pair<key_t const, utxo_value<Size>>, segment_manager_t>
+    outpoint_hash,
+    outpoint_equal,
+    bip::allocator<std::pair<raw_outpoint const, utxo_value<Size>>, segment_manager_t>
 >;
 
 } // namespace utxoz::detail

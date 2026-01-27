@@ -26,8 +26,8 @@ namespace utxoz::detail {
 struct file_metadata {
     uint32_t min_block_height = std::numeric_limits<uint32_t>::max();
     uint32_t max_block_height = 0;
-    key_t min_key;
-    key_t max_key;
+    raw_outpoint min_key;
+    raw_outpoint max_key;
     size_t entry_count = 0;
     size_t container_index = 0;
     size_t version = 0;
@@ -37,7 +37,7 @@ struct file_metadata {
         max_key.fill(0x00);
     }
 
-    bool key_in_range(key_t const& key) const {
+    bool key_in_range(raw_outpoint const& key) const {
         return entry_count > 0 && key >= min_key && key <= max_key;
     }
 
@@ -46,7 +46,7 @@ struct file_metadata {
                height >= min_block_height && height <= max_block_height;
     }
 
-    void update_on_insert(key_t const& key, uint32_t height) {
+    void update_on_insert(raw_outpoint const& key, uint32_t height) {
         if (entry_count == 0) {
             min_key = max_key = key;
             min_block_height = max_block_height = height;

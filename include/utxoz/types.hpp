@@ -21,19 +21,38 @@
 namespace utxoz {
 
 /**
- * @brief Size of UTXO key in bytes (32 bytes transaction hash + 4 bytes output index)
+ * @brief Size of outpoint in bytes (32 bytes txid + 4 bytes output index)
  */
-inline constexpr size_t key_size = 36;
+inline constexpr size_t outpoint_size = 36;
 
 /**
- * @brief UTXO key type - consists of transaction hash + output index
+ * @brief Raw outpoint - 36-byte array representing a Bitcoin outpoint
+ *
+ * Layout: [txid: 32 bytes][output_index: 4 bytes]
+ *
+ * Typical encoding:
+ * - txid: Internal byte order (as stored in Bitcoin's internal representation)
+ * - output_index: Little-endian uint32_t
+ *
+ * However, the database is agnostic to the specific encoding used.
+ * Users may encode the outpoint in any format, as long as the same
+ * encoding is used consistently across all operations.
+ *
+ * @see make_outpoint() for constructing outpoints
+ * @see get_txid(), get_output_index() for extracting components
  */
-using key_t = std::array<uint8_t, key_size>;
+using raw_outpoint = std::array<uint8_t, outpoint_size>;
 
 /**
- * @brief Span of bytes for value data
+ * @brief Span of bytes representing UTXO output data
+ *
+ * Typically contains the serialized transaction output:
+ * - Amount in satoshis (8 bytes, little-endian)
+ * - scriptPubKey (variable length)
+ *
+ * The database stores this data as-is without interpreting its contents.
  */
-using value_span_t = std::span<uint8_t const>;
+using output_data_span = std::span<uint8_t const>;
 
 /**
  * @brief Container sizes for different UTXO value sizes
@@ -103,10 +122,10 @@ struct search_record {
  * @brief Deferred deletion entry
  */
 struct deferred_deletion_entry {
-    key_t key;         ///< UTXO key to delete
+    raw_outpoint key;         ///< UTXO key to delete
     uint32_t height;   ///< Block height when deletion was requested
 
-    deferred_deletion_entry(key_t const& k, uint32_t h)
+    deferred_deletion_entry(raw_outpoint const& k, uint32_t h)
         : key(k), height(h) {}
 
     bool operator==(deferred_deletion_entry const& other) const {
@@ -114,7 +133,7 @@ struct deferred_deletion_entry {
     }
 
     friend std::size_t hash_value(deferred_deletion_entry const& entry) {
-        return boost::hash<key_t>{}(entry.key);
+        return boost::hash<raw_outpoint>{}(entry.key);
     }
 };
 
@@ -122,10 +141,10 @@ struct deferred_deletion_entry {
  * @brief Deferred lookup entry
  */
 struct deferred_lookup_entry {
-    key_t key;         ///< UTXO key to lookup
+    raw_outpoint key;         ///< UTXO key to lookup
     uint32_t height;   ///< Block height when lookup was requested
 
-    deferred_lookup_entry(key_t const& k, uint32_t h)
+    deferred_lookup_entry(raw_outpoint const& k, uint32_t h)
         : key(k), height(h) {}
 
     bool operator==(deferred_lookup_entry const& other) const {
@@ -133,7 +152,7 @@ struct deferred_lookup_entry {
     }
 
     friend std::size_t hash_value(deferred_lookup_entry const& entry) {
-        return boost::hash<key_t>{}(entry.key);
+        return boost::hash<raw_outpoint>{}(entry.key);
     }
 };
 
@@ -143,8 +162,8 @@ struct deferred_lookup_entry {
  * @brief Hash function for UTXO key
  */
 template<>
-struct std::hash<utxoz::key_t> {
-    std::size_t operator()(utxoz::key_t const& key) const noexcept {
+struct std::hash<utxoz::raw_outpoint> {
+    std::size_t operator()(utxoz::raw_outpoint const& key) const noexcept {
         // Simple hash combination
         std::size_t seed = 0;
         for (auto byte : key) {
@@ -160,7 +179,7 @@ struct std::hash<utxoz::key_t> {
 template<>
 struct std::hash<utxoz::deferred_deletion_entry> {
     std::size_t operator()(utxoz::deferred_deletion_entry const& entry) const noexcept {
-        return std::hash<utxoz::key_t>{}(entry.key);
+        return std::hash<utxoz::raw_outpoint>{}(entry.key);
     }
 };
 
@@ -170,6 +189,6 @@ struct std::hash<utxoz::deferred_deletion_entry> {
 template<>
 struct std::hash<utxoz::deferred_lookup_entry> {
     std::size_t operator()(utxoz::deferred_lookup_entry const& entry) const noexcept {
-        return std::hash<utxoz::key_t>{}(entry.key);
+        return std::hash<utxoz::raw_outpoint>{}(entry.key);
     }
 };
