@@ -18,7 +18,11 @@
 
 #include <boost/container_hash/hash.hpp>
 
+#include <utxoz/literals.hpp>
+
 namespace utxoz {
+
+using namespace literals;
 
 /**
  * @brief Size of outpoint in bytes (32 bytes txid + 4 bytes output index)
@@ -62,40 +66,17 @@ inline constexpr std::array<size_t, 4> container_sizes = {44, 128, 512, 10240};
 /**
  * @brief File sizes for each container type (production)
  */
-inline constexpr std::array<size_t, 4> file_sizes = {
-    2ULL * 1024 * 1024 * 1024, // 2 GiB
-    2ULL * 1024 * 1024 * 1024, // 2 GiB
-    100ULL * 1024 * 1024,      // 100 MiB
-    50ULL * 1024 * 1024        // 50 MiB
-};
+inline constexpr std::array<size_t, 4> file_sizes = {2_gib, 2_gib, 100_mib, 50_mib};
 
 /**
  * @brief File sizes for each container type (testing - much smaller)
  */
-inline constexpr std::array<size_t, 4> test_file_sizes = {
-    10ULL * 1024 * 1024,       // 10 MiB
-    10ULL * 1024 * 1024,       // 10 MiB
-    10ULL * 1024 * 1024,       // 10 MiB
-    10ULL * 1024 * 1024        // 10 MiB
-};
+inline constexpr std::array<size_t, 4> test_file_sizes = {10_mib, 10_mib, 10_mib, 10_mib};
 
 /**
  * @brief Number of container types
  */
 inline constexpr size_t container_count = container_sizes.size();
-
-/**
- * @brief Memory size literals
- */
-namespace literals {
-    constexpr size_t operator""_mib(unsigned long long n) {
-        return static_cast<size_t>(n) * 1024 * 1024;
-    }
-
-    constexpr size_t operator""_gib(unsigned long long n) {
-        return static_cast<size_t>(n) * 1024 * 1024 * 1024;
-    }
-} // namespace literals
 
 /**
  * @brief Search operation record for performance tracking
