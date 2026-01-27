@@ -103,7 +103,7 @@ target_link_libraries(utxoz
 
 # Log backend configuration (defines are in config.hpp)
 if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
-    target_link_libraries(utxoz PRIVATE spdlog::spdlog)
+    target_link_libraries(utxoz PRIVATE spdlog::spdlog_header_only)
 elseif(NOT UTXOZ_LOG_BACKEND STREQUAL "custom" AND NOT UTXOZ_LOG_BACKEND STREQUAL "none")
     message(FATAL_ERROR "Invalid UTXOZ_LOG_BACKEND: ${UTXOZ_LOG_BACKEND}. Must be custom, spdlog, or none.")
 endif()
