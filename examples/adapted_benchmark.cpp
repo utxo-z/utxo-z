@@ -36,15 +36,15 @@ struct adapted_output {
 };
 
 struct adapted_input {
-    utxoz::key_t previous_key;
+    utxoz::raw_outpoint previous_key;
 };
 
 struct adapted_transaction {
-    utxoz::key_t tx_hash;
+    utxoz::raw_outpoint tx_hash;
     std::vector<adapted_output> outputs;
     std::vector<adapted_input> inputs;
 
-    utxoz::key_t hash() const {
+    utxoz::raw_outpoint hash() const {
         return tx_hash;
     }
 };
@@ -60,14 +60,14 @@ size_t calculate_buckets(size_t n) {
 
 // Process a block of transactions (adapted version)
 std::tuple<
-    std::unordered_map<utxoz::key_t, adapted_output>,
-    std::unordered_map<utxoz::key_t, adapted_input>,
+    std::unordered_map<utxoz::raw_outpoint, adapted_output>,
+    std::unordered_map<utxoz::raw_outpoint, adapted_input>,
     size_t
 >
 process_in_block(std::vector<adapted_transaction>& txs, uint32_t height) {
-    using to_insert_utxos_t = std::unordered_map<utxoz::key_t, adapted_output>;
-    using to_delete_utxos_t = std::unordered_map<utxoz::key_t, adapted_input>;
-    using op_return_utxos_t = std::unordered_set<utxoz::key_t>;
+    using to_insert_utxos_t = std::unordered_map<utxoz::raw_outpoint, adapted_output>;
+    using to_delete_utxos_t = std::unordered_map<utxoz::raw_outpoint, adapted_input>;
+    using op_return_utxos_t = std::unordered_set<utxoz::raw_outpoint>;
 
     to_insert_utxos_t to_insert;
     op_return_utxos_t op_returns_to_store;
@@ -75,7 +75,7 @@ process_in_block(std::vector<adapted_transaction>& txs, uint32_t height) {
     // Insert all outputs
     for (auto const& tx : txs) {
         auto tx_hash = tx.hash();
-        utxoz::key_t current_key = tx_hash;
+        utxoz::raw_outpoint current_key = tx_hash;
 
         size_t output_index = 0;
         for (auto&& output : tx.outputs) {
@@ -98,13 +98,13 @@ process_in_block(std::vector<adapted_transaction>& txs, uint32_t height) {
     // Process inputs
     for (auto const& tx : txs) {
         for (auto&& input : tx.inputs) {
-            auto const& key_to_remove = input.previous_key;
+            auto const& raw_outpointo_remove = input.previous_key;
 
-            auto removed = to_insert.erase(key_to_remove);
+            auto removed = to_insert.erase(raw_outpointo_remove);
             if (removed == 0) {
-                removed = op_returns_to_store.erase(key_to_remove);
+                removed = op_returns_to_store.erase(raw_outpointo_remove);
                 if (removed == 0) {
-                    to_delete.emplace(key_to_remove, std::move(input));
+                    to_delete.emplace(raw_outpointo_remove, std::move(input));
                 } else {
                     in_block_utxos += removed;
                 }
@@ -160,7 +160,7 @@ int run_adapted_benchmark() {
             for (int i = 0; i < 100; ++i) {
                 std::array<uint8_t, 32> tx_hash{};
                 tx_hash[0] = static_cast<uint8_t>(i);
-                auto key = utxoz::make_key(tx_hash, static_cast<uint32_t>(i));
+                auto key = utxoz::make_outpoint(tx_hash, static_cast<uint32_t>(i));
                 std::vector<uint8_t> value{1, 2, 3, 4, 5}; // sample data
                 [[maybe_unused]] auto inserted = db.insert(key, value, static_cast<uint32_t>(height));
             }

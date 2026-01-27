@@ -28,8 +28,8 @@ namespace {
 // Atomic counter for unique test directories
 inline std::atomic<uint64_t> test_counter{0};
 
-utxoz::key_t make_test_key(uint32_t tx_id, uint32_t output_index) {
-    utxoz::key_t key{};
+utxoz::raw_outpoint make_test_key(uint32_t tx_id, uint32_t output_index) {
+    utxoz::raw_outpoint key{};
     for (size_t i = 0; i < 32; ++i) {
         key[i] = static_cast<uint8_t>((tx_id >> (i % 4 * 8)) & 0xFF);
     }
@@ -139,7 +139,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Erase operations", "[database]") {
 
 TEST_CASE_METHOD(DatabaseFixture, "Deferred deletions", "[database]") {
     // Insert multiple UTXOs
-    std::vector<utxoz::key_t> keys;
+    std::vector<utxoz::raw_outpoint> keys;
     for (int i = 0; i < 10; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto value = make_test_value(50);
@@ -196,9 +196,9 @@ TEST_CASE("Key utilities", "[utils]") {
     std::iota(tx_hash.begin(), tx_hash.end(), 0);
     uint32_t output_index = 42;
 
-    auto key = utxoz::make_key(tx_hash, output_index);
+    auto key = utxoz::make_outpoint(tx_hash, output_index);
 
-    auto extracted_hash = utxoz::get_tx_hash(key);
+    auto extracted_hash = utxoz::get_txid(key);
     auto extracted_index = utxoz::get_output_index(key);
 
     CHECK(std::equal(tx_hash.begin(), tx_hash.end(), extracted_hash.begin()));
@@ -207,7 +207,7 @@ TEST_CASE("Key utilities", "[utils]") {
 
 TEST_CASE_METHOD(DatabaseFixture, "Large data set", "[database][.slow]") {
     constexpr size_t num_utxos = 1000;
-    std::vector<utxoz::key_t> keys;
+    std::vector<utxoz::raw_outpoint> keys;
     keys.reserve(num_utxos);
 
     // Insert large number of UTXOs

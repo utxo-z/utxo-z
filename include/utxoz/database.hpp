@@ -81,7 +81,7 @@ struct db {
      * @return true if inserted successfully, false if already exists
      */
     [[nodiscard]]
-    bool insert(key_t const& key, value_span_t value, uint32_t height);
+    bool insert(raw_outpoint const& key, output_data_span value, uint32_t height);
 
     /**
      * @brief Find a UTXO by key
@@ -90,7 +90,7 @@ struct db {
      * @return UTXO value if found, std::nullopt otherwise
      */
     [[nodiscard]]
-    bytes_opt find(key_t const& key, uint32_t height) const;
+    bytes_opt find(raw_outpoint const& key, uint32_t height) const;
 
     /**
      * @brief Erase a UTXO by key
@@ -103,7 +103,7 @@ struct db {
      * @return Number of UTXOs erased (0 if not found, 1 if found and erased)
      */
     [[nodiscard]]
-    size_t erase(key_t const& key, uint32_t height);
+    size_t erase(raw_outpoint const& key, uint32_t height);
 
     /**
      * @brief Process all pending deferred deletions
@@ -130,7 +130,7 @@ struct db {
      *         - failed_lookups: entries that could not be found (includes key and height)
      */
     [[nodiscard]]
-    std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+    std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
 
     /**
      * @brief Get the number of pending deferred lookups

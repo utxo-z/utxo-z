@@ -33,7 +33,7 @@ int main() {
 
         // Insert some UTXOs
         fmt::println("Inserting sample UTXOs...");
-        std::vector<utxoz::key_t> inserted_keys;
+        std::vector<utxoz::raw_outpoint> inserted_keys;
 
         for (int i = 0; i < 1000; ++i) {
             // Generate random transaction hash
@@ -44,7 +44,7 @@ int main() {
 
             // Create key
             uint32_t output_index = i % 10;
-            auto key = utxoz::make_key(tx_hash, output_index);
+            auto key = utxoz::make_outpoint(tx_hash, output_index);
             inserted_keys.push_back(key);
 
             // Generate random value

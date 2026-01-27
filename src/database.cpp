@@ -41,21 +41,21 @@ size_t db::size() const {
     return impl_ ? impl_->size() : 0;
 }
 
-bool db::insert(key_t const& key, value_span_t value, uint32_t height) {
+bool db::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     if (!impl_) {
         throw std::runtime_error("Database not configured");
     }
     return impl_->insert(key, value, height);
 }
 
-bytes_opt db::find(key_t const& key, uint32_t height) const {
+bytes_opt db::find(raw_outpoint const& key, uint32_t height) const {
     if (!impl_) {
         return std::nullopt;
     }
     return impl_->find(key, height);
 }
 
-size_t db::erase(key_t const& key, uint32_t height) {
+size_t db::erase(raw_outpoint const& key, uint32_t height) {
     if (!impl_) {
         return 0;
     }
@@ -73,7 +73,7 @@ size_t db::deferred_deletions_size() const {
     return impl_ ? impl_->deferred_deletions_size() : 0;
 }
 
-std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> db::process_pending_lookups() {
+std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> db::process_pending_lookups() {
     if (!impl_) {
         return {};
     }

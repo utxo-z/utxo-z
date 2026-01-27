@@ -79,16 +79,16 @@ struct mock_output {
 };
 
 struct mock_input {
-    utxoz::key_t previous_key;
+    utxoz::raw_outpoint previous_key;
     std::vector<uint8_t> script_sig;
 };
 
 struct mock_transaction {
-    utxoz::key_t tx_key;
+    utxoz::raw_outpoint tx_key;
     std::vector<mock_output> outputs;
     std::vector<mock_input> inputs;
 
-    utxoz::key_t hash() const {
+    utxoz::raw_outpoint hash() const {
         return tx_key; // Simplified
     }
 };
@@ -208,9 +208,9 @@ int main() {
             auto transactions = generate_mock_block(transactions_per_block, block_height);
 
             // Process transactions
-            std::unordered_map<utxoz::key_t, mock_output> to_insert;
-            std::unordered_set<utxoz::key_t> to_delete;
-            std::unordered_set<utxoz::key_t> op_returns;
+            std::unordered_map<utxoz::raw_outpoint, mock_output> to_insert;
+            std::unordered_set<utxoz::raw_outpoint> to_delete;
+            std::unordered_set<utxoz::raw_outpoint> op_returns;
 
             // First pass: collect all outputs
             for (auto const& tx : transactions) {

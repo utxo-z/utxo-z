@@ -16,47 +16,47 @@
 namespace utxoz {
 
 /**
- * @brief Print a UTXO key in human-readable format
- * 
- * Prints the transaction hash in reversed hex format followed by the output index.
+ * @brief Print an outpoint in human-readable format
+ *
+ * Prints the txid in reversed hex format followed by the output index.
  * Format: "deadbeef...abcd1234:5"
- * 
- * @param key UTXO key to print
+ *
+ * @param outpoint Outpoint to print
  */
-void print_key(key_t const& key);
+void print_outpoint(raw_outpoint const& outpoint);
 
 /**
- * @brief Convert UTXO key to string representation
- * @param key UTXO key to convert
- * @return String representation of the key
+ * @brief Convert outpoint to string representation
+ * @param outpoint Outpoint to convert
+ * @return String representation of the outpoint
  */
 [[nodiscard]]
-std::string key_to_string(key_t const& key);
+std::string outpoint_to_string(raw_outpoint const& outpoint);
 
 /**
- * @brief Create UTXO key from transaction hash and output index
- * @param tx_hash Transaction hash (32 bytes)
+ * @brief Create outpoint from txid and output index
+ * @param txid Transaction ID (32 bytes)
  * @param output_index Output index (4 bytes)
- * @return Constructed UTXO key
+ * @return Constructed outpoint
  */
 [[nodiscard]]
-key_t make_key(std::span<uint8_t const, 32> tx_hash, uint32_t output_index);
+raw_outpoint make_outpoint(std::span<uint8_t const, 32> txid, uint32_t output_index);
 
 /**
- * @brief Extract transaction hash from UTXO key
- * @param key UTXO key
- * @return Span pointing to the transaction hash portion (first 32 bytes)
+ * @brief Extract txid from outpoint
+ * @param outpoint Outpoint
+ * @return Span pointing to the txid portion (first 32 bytes)
  */
 [[nodiscard]]
-std::span<uint8_t const, 32> get_tx_hash(key_t const& key);
+std::span<uint8_t const, 32> get_txid(raw_outpoint const& outpoint);
 
 /**
- * @brief Extract output index from UTXO key
- * @param key UTXO key
+ * @brief Extract output index from outpoint
+ * @param outpoint Outpoint
  * @return Output index (last 4 bytes interpreted as uint32_t)
  */
 [[nodiscard]]
-uint32_t get_output_index(key_t const& key);
+uint32_t get_output_index(raw_outpoint const& outpoint);
 
 /**
  * @brief Calculate optimal bucket count for hash table
