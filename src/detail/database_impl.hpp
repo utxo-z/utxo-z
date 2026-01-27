@@ -13,12 +13,12 @@
 #include <array>
 #include <filesystem>
 #include <memory>
-#include <optional>
 #include <variant>
-#include <vector>
 
 #include <boost/unordered/unordered_flat_set.hpp>
+#include <boost/unordered/concurrent_flat_set.hpp>
 
+#include <utxoz/aliases.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
@@ -49,11 +49,14 @@ struct database_impl {
     size_t size() const;
 
     bool insert(key_t const& key, value_span_t value, uint32_t height);
-    std::optional<std::vector<uint8_t>> find(key_t const& key, uint32_t height);
+    bytes_opt find(key_t const& key, uint32_t height) const;
     size_t erase(key_t const& key, uint32_t height);
 
     std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
     size_t deferred_deletions_size() const;
+
+    std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+    size_t deferred_lookups_size() const;
 
     void compact_all();
 
@@ -90,17 +93,22 @@ private:
     bool insert_in_index(key_t const& key, value_span_t value, uint32_t height);
 
     // Find helpers
-    std::optional<std::vector<uint8_t>> find_in_latest_version(key_t const& key, uint32_t height);
-    std::optional<std::vector<uint8_t>> find_in_previous_versions(key_t const& key, uint32_t height);
+    bytes_opt find_in_latest_version(key_t const& key, uint32_t height) const;
+    bytes_opt find_in_previous_versions(key_t const& key, uint32_t height);
 
     template<size_t Index>
-    std::optional<std::vector<uint8_t>> find_in_prev_versions(key_t const& key, uint32_t height);
+    bytes_opt find_in_prev_versions(key_t const& key, uint32_t height);
 
     // Erase helpers
     size_t erase_in_latest_version(key_t const& key, uint32_t height);
     size_t erase_from_cached_files_only(key_t const& key, uint32_t height, size_t& search_depth);
     void add_to_deferred_deletions(key_t const& key, uint32_t height);
     size_t process_deferred_deletions_in_file(size_t container_index, size_t version, bool is_cached);
+
+    // Deferred lookup helpers
+    void add_to_deferred_lookups(key_t const& key, uint32_t height) const;
+    void process_deferred_lookups_in_file(size_t container_index, size_t version, bool is_cached,
+                                          flat_map<key_t, bytes>& successful_lookups);
 
     // File management
     template<size_t Index>
@@ -169,9 +177,10 @@ private:
     std::array<std::vector<file_metadata>, container_count> file_metadata_;
     std::unique_ptr<file_cache> file_cache_;
 
-    // Statistics
-    search_stats search_stats_;
+    // Statistics (mutable to allow const find operations)
+    mutable search_stats search_stats_;
     boost::unordered_flat_set<deferred_deletion_entry> deferred_deletions_;
+    mutable boost::concurrent_flat_set<deferred_lookup_entry> deferred_lookups_;
     std::array<container_stats, container_count> container_stats_;
     deferred_stats deferred_stats_;
     not_found_stats not_found_stats_;

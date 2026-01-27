@@ -417,19 +417,20 @@ bool database_impl::insert_in_index(key_t const& key, value_span_t value, uint32
 // database_impl - Find
 // =============================================================================
 
-std::optional<std::vector<uint8_t>> database_impl::find(key_t const& key, uint32_t height) {
+bytes_opt database_impl::find(key_t const& key, uint32_t height) const {
     // Try current version first
     if (auto res = find_in_latest_version(key, height); res) {
         return res;
     }
 
-    // Search previous versions
-    return find_in_previous_versions(key, height);
+    // Defer lookup to batch processing for efficiency
+    add_to_deferred_lookups(key, height);
+    return std::nullopt;
 }
 
-std::optional<std::vector<uint8_t>> database_impl::find_in_latest_version(key_t const& key,
-                                                                           uint32_t height) {
-    std::optional<std::vector<uint8_t>> result;
+bytes_opt database_impl::find_in_latest_version(key_t const& key,
+                                                                           uint32_t height) const {
+    bytes_opt result;
 
     for_each_index<container_count>([&](auto I) {
         if (!result) {
@@ -437,7 +438,7 @@ std::optional<std::vector<uint8_t>> database_impl::find_in_latest_version(key_t 
             if (auto it = map.find(key); it != map.end()) {
                 search_stats_.add_record(height, it->second.block_height, 0, false, true, 'f');
                 auto data = it->second.get_data();
-                result = std::vector<uint8_t>(data.begin(), data.end());
+                result = bytes(data.begin(), data.end());
             }
         }
     });
@@ -445,9 +446,9 @@ std::optional<std::vector<uint8_t>> database_impl::find_in_latest_version(key_t 
     return result;
 }
 
-std::optional<std::vector<uint8_t>> database_impl::find_in_previous_versions(key_t const& key,
+bytes_opt database_impl::find_in_previous_versions(key_t const& key,
                                                                               uint32_t height) {
-    std::optional<std::vector<uint8_t>> result;
+    bytes_opt result;
 
     for_each_index<container_count>([&](auto I) {
         if (!result) {
@@ -463,7 +464,7 @@ std::optional<std::vector<uint8_t>> database_impl::find_in_previous_versions(key
 }
 
 template<size_t Index>
-std::optional<std::vector<uint8_t>> database_impl::find_in_prev_versions(key_t const& key,
+bytes_opt database_impl::find_in_prev_versions(key_t const& key,
                                                                           uint32_t height) {
     for (size_t v = current_versions_[Index]; v-- > 0;) {
         // Check metadata first
@@ -477,7 +478,7 @@ std::optional<std::vector<uint8_t>> database_impl::find_in_prev_versions(key_t c
             auto depth = static_cast<uint32_t>(current_versions_[Index] - v);
             search_stats_.add_record(height, it->second.block_height, depth, cache_hit, true, 'f');
             auto data = it->second.get_data();
-            return std::vector<uint8_t>(data.begin(), data.end());
+            return bytes(data.begin(), data.end());
         }
     }
 
@@ -733,6 +734,127 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
         case 2: return process_with_container(std::integral_constant<size_t, 2>{});
         case 3: return process_with_container(std::integral_constant<size_t, 3>{});
         default: return 0;
+    }
+}
+
+// =============================================================================
+// database_impl - Deferred lookups
+// =============================================================================
+
+void database_impl::add_to_deferred_lookups(key_t const& key, uint32_t height) const {
+    deferred_lookups_.emplace(key, height);
+}
+
+size_t database_impl::deferred_lookups_size() const {
+    return deferred_lookups_.size();
+}
+
+std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> database_impl::process_pending_lookups() {
+    if (deferred_lookups_.empty()) return {};
+
+    flat_map<key_t, bytes> successful_lookups;
+
+    auto const start_time = std::chrono::steady_clock::now();
+    ++deferred_stats_.processing_runs;
+
+    size_t initial_size = deferred_lookups_.size();
+    log::debug("Processing {} deferred lookups...", initial_size);
+
+    // Phase 1: Process cached files first
+    auto cached_files = file_cache_->get_cached_files();
+    if (!cached_files.empty()) {
+        std::ranges::sort(cached_files, [](auto const& a, auto const& b) {
+            if (a.first != b.first) return a.first < b.first;
+            return a.second > b.second; // Most recent version first
+        });
+
+        for (auto const& [container_index, version] : cached_files) {
+            if (deferred_lookups_.empty()) break;
+            process_deferred_lookups_in_file(container_index, version, true, successful_lookups);
+        }
+    }
+
+    // Phase 2: Process remaining files
+    if (!deferred_lookups_.empty()) {
+        std::array<std::set<size_t>, container_count> processed_versions;
+        for (auto const& [container_index, version] : cached_files) {
+            processed_versions[container_index].insert(version);
+        }
+
+        for_each_index<container_count>([&](auto I) {
+            if (deferred_lookups_.empty()) return;
+            if (current_versions_[I.value] == 0) return;
+
+            for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
+                if (deferred_lookups_.empty()) break;
+                if (processed_versions[I.value].contains(v)) continue;
+
+                auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+                if (!fs::exists(file_name)) continue;
+
+                process_deferred_lookups_in_file(I.value, v, false, successful_lookups);
+            }
+        });
+    }
+
+    // Collect failed lookups (includes key and block height)
+    std::vector<deferred_lookup_entry> failed_lookups;
+    failed_lookups.reserve(deferred_lookups_.size());
+    deferred_lookups_.visit_all([&](auto const& entry) {
+        failed_lookups.push_back(entry);
+    });
+
+    deferred_lookups_.clear();
+
+    auto const end_time = std::chrono::steady_clock::now();
+    deferred_stats_.total_processing_time +=
+        std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    deferred_stats_.successfully_processed += successful_lookups.size();
+    deferred_stats_.failed_to_delete += failed_lookups.size();
+
+    log::debug("Deferred lookup complete: {} successful, {} failed",
+              successful_lookups.size(), failed_lookups.size());
+
+    return {std::move(successful_lookups), std::move(failed_lookups)};
+}
+
+void database_impl::process_deferred_lookups_in_file(size_t container_index,
+                                                      size_t version,
+                                                      [[maybe_unused]] bool is_cached,
+                                                      flat_map<key_t, bytes>& successful_lookups) {
+    if (deferred_lookups_.empty()) return;
+
+    auto process_with_container = [&]<size_t Index>(std::integral_constant<size_t, Index>) {
+        try {
+            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(container_index, version);
+
+            deferred_lookups_.erase_if([&](auto const& entry) {
+                auto map_it = map.find(entry.key);
+                if (map_it != map.end()) {
+                    auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
+
+                    ++deferred_stats_.lookups_by_depth[depth];
+                    search_stats_.add_record(entry.height, map_it->second.block_height, depth, cache_hit, true, 'f');
+
+                    auto data = map_it->second.get_data();
+                    successful_lookups.emplace(entry.key, bytes(data.begin(), data.end()));
+
+                    return true;  // Remove this entry
+                }
+                return false;  // Keep this entry
+            });
+
+        } catch (std::exception const& e) {
+            log::error("Error processing lookups in file ({}, v{}): {}", container_index, version, e.what());
+        }
+    };
+
+    switch (container_index) {
+        case 0: process_with_container(std::integral_constant<size_t, 0>{}); break;
+        case 1: process_with_container(std::integral_constant<size_t, 1>{}); break;
+        case 2: process_with_container(std::integral_constant<size_t, 2>{}); break;
+        case 3: process_with_container(std::integral_constant<size_t, 3>{}); break;
     }
 }
 
@@ -1006,9 +1128,9 @@ template bool database_impl::insert_in_index<1>(key_t const&, value_span_t, uint
 template bool database_impl::insert_in_index<2>(key_t const&, value_span_t, uint32_t);
 template bool database_impl::insert_in_index<3>(key_t const&, value_span_t, uint32_t);
 
-template std::optional<std::vector<uint8_t>> database_impl::find_in_prev_versions<0>(key_t const&, uint32_t);
-template std::optional<std::vector<uint8_t>> database_impl::find_in_prev_versions<1>(key_t const&, uint32_t);
-template std::optional<std::vector<uint8_t>> database_impl::find_in_prev_versions<2>(key_t const&, uint32_t);
-template std::optional<std::vector<uint8_t>> database_impl::find_in_prev_versions<3>(key_t const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<0>(key_t const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<1>(key_t const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<2>(key_t const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<3>(key_t const&, uint32_t);
 
 } // namespace utxoz::detail

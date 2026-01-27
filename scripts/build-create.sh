@@ -19,6 +19,9 @@ cd "${PROJECT_DIR}"
 rm -rf build
 rm -rf conan.lock
 
+# Remove existing package from cache to force rebuild
+conan remove "utxoz/${VERSION}" -c 2>/dev/null || true
+
 conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o with_tests=True -o with_examples=False --update
 
 conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o with_tests=True -o with_examples=False --lockfile=conan.lock --lockfile-out=build/conan.lock

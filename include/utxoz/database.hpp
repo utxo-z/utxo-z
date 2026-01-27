@@ -10,11 +10,10 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 #include <string_view>
 #include <utility>
-#include <vector>
 
+#include <utxoz/aliases.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
@@ -71,7 +70,8 @@ struct db {
     /**
      * @brief Get the total number of UTXOs in the database
      */
-    [[nodiscard]] size_t size() const;
+    [[nodiscard]]
+    size_t size() const;
 
     /**
      * @brief Insert a new UTXO
@@ -80,7 +80,8 @@ struct db {
      * @param height Block height where this UTXO was created
      * @return true if inserted successfully, false if already exists
      */
-    [[nodiscard]] bool insert(key_t const& key, value_span_t value, uint32_t height);
+    [[nodiscard]]
+    bool insert(key_t const& key, value_span_t value, uint32_t height);
 
     /**
      * @brief Find a UTXO by key
@@ -88,7 +89,8 @@ struct db {
      * @param height Current block height (for statistics)
      * @return UTXO value if found, std::nullopt otherwise
      */
-    [[nodiscard]] std::optional<std::vector<uint8_t>> find(key_t const& key, uint32_t height);
+    [[nodiscard]]
+    bytes_opt find(key_t const& key, uint32_t height) const;
 
     /**
      * @brief Erase a UTXO by key
@@ -100,19 +102,41 @@ struct db {
      * @param height Current block height
      * @return Number of UTXOs erased (0 if not found, 1 if found and erased)
      */
-    [[nodiscard]] size_t erase(key_t const& key, uint32_t height);
+    [[nodiscard]]
+    size_t erase(key_t const& key, uint32_t height);
 
     /**
      * @brief Process all pending deferred deletions
      * @return Pair of (successful_deletions_count, failed_deletions)
      *         Each failed deletion includes the key and the block height that requested it
      */
-    [[nodiscard]] std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
+    [[nodiscard]]
+    std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
 
     /**
      * @brief Get the number of pending deferred deletions
      */
-    [[nodiscard]] size_t deferred_deletions_size() const;
+    [[nodiscard]]
+    size_t deferred_deletions_size() const;
+
+    /**
+     * @brief Process all pending deferred lookups
+     *
+     * Lookups not found in the latest version are deferred and batched for
+     * efficient processing across older file versions.
+     *
+     * @return Pair of (successful_lookups_map, failed_lookups)
+     *         - successful_lookups_map: key -> value for found UTXOs
+     *         - failed_lookups: entries that could not be found (includes key and height)
+     */
+    [[nodiscard]]
+    std::pair<flat_map<key_t, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+
+    /**
+     * @brief Get the number of pending deferred lookups
+     */
+    [[nodiscard]]
+    size_t deferred_lookups_size() const;
 
     /**
      * @brief Compact all containers
@@ -125,7 +149,8 @@ struct db {
     /**
      * @brief Get comprehensive database statistics
      */
-    [[nodiscard]] database_statistics get_statistics();
+    [[nodiscard]]
+    database_statistics get_statistics();
 
     /**
      * @brief Print formatted statistics to log
@@ -140,7 +165,8 @@ struct db {
     /**
      * @brief Get search performance statistics
      */
-    [[nodiscard]] search_stats const& get_search_stats() const;
+    [[nodiscard]]
+    search_stats const& get_search_stats() const;
 
     /**
      * @brief Reset search statistics
@@ -151,13 +177,15 @@ struct db {
      * @brief Get file cache hit rate
      * @return Cache hit rate (0.0 to 1.0)
      */
-    [[nodiscard]] float get_cache_hit_rate() const;
+    [[nodiscard]]
+    float get_cache_hit_rate() const;
 
     /**
      * @brief Get information about currently cached files
      * @return Vector of (container_index, version) pairs
      */
-    [[nodiscard]] std::vector<std::pair<size_t, size_t>> get_cached_file_info() const;
+    [[nodiscard]]
+    std::vector<std::pair<size_t, size_t>> get_cached_file_info() const;
 
 private:
     std::unique_ptr<detail::database_impl> impl_;
