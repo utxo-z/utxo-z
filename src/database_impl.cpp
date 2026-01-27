@@ -9,6 +9,8 @@
 
 #include "detail/database_impl.hpp"
 
+#include <utxoz/config.hpp>
+
 #include <algorithm>
 #include <numeric>
 #include <ranges>
@@ -383,12 +385,13 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
     while (max_retries > 0) {
         try {
             auto& map = container<Index>();
-            size_t bucket_count_before = map.bucket_count();
+            [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
 
             auto [it, inserted] = map.emplace(key, val);
             if (inserted) {
                 ++entries_count_;
 
+#ifdef UTXOZ_STATISTICS_ENABLED
                 // Update statistics
                 ++container_stats_[Index].total_inserts;
                 ++container_stats_[Index].current_size;
@@ -397,6 +400,7 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
                 if (map.bucket_count() != bucket_count_before) {
                     ++container_stats_[Index].rehash_count;
                 }
+#endif
 
                 update_metadata_on_insert(Index, current_versions_[Index], key, height);
             }
@@ -436,7 +440,9 @@ bytes_opt database_impl::find_in_latest_version(raw_outpoint const& key,
         if (!result) {
             auto& map = container<I>();
             if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
                 search_stats_.add_record(height, it->second.block_height, 0, false, true, 'f');
+#endif
                 auto data = it->second.get_data();
                 result = bytes(data.begin(), data.end());
             }
@@ -456,9 +462,11 @@ bytes_opt database_impl::find_in_previous_versions(raw_outpoint const& key,
         }
     });
 
+#ifdef UTXOZ_STATISTICS_ENABLED
     if (!result) {
         search_stats_.add_record(height, 0, 1, false, false, 'f');
     }
+#endif
 
     return result;
 }
@@ -475,8 +483,10 @@ bytes_opt database_impl::find_in_prev_versions(raw_outpoint const& key,
         auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, v);
 
         if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
             auto depth = static_cast<uint32_t>(current_versions_[Index] - v);
             search_stats_.add_record(height, it->second.block_height, depth, cache_hit, true, 'f');
+#endif
             auto data = it->second.get_data();
             return bytes(data.begin(), data.end());
         }
@@ -505,11 +515,13 @@ size_t database_impl::erase(raw_outpoint const& key, uint32_t height) {
         return res;
     }
 
+#ifdef UTXOZ_STATISTICS_ENABLED
     // Track not found
     ++not_found_stats_.total_not_found;
     not_found_stats_.total_search_depth += search_depth;
     not_found_stats_.max_search_depth = std::max(not_found_stats_.max_search_depth, search_depth);
     ++not_found_stats_.depth_distribution[search_depth];
+#endif
 
     // Defer deletion
     add_to_deferred_deletions(key, height);
@@ -523,6 +535,7 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
         if (result == 0) {
             auto& map = container<I>();
             if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
                 // Track UTXO lifetime
                 uint32_t age = height - it->second.block_height;
                 ++lifetime_stats_.age_distribution[age];
@@ -534,10 +547,13 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
                     / lifetime_stats_.total_spent;
 
                 search_stats_.add_record(height, it->second.block_height, 0, false, true, 'e');
+#endif
                 map.erase(it);
 
+#ifdef UTXOZ_STATISTICS_ENABLED
                 --container_stats_[I].current_size;
                 ++container_stats_[I].total_deletes;
+#endif
 
                 result = 1;
             }
@@ -562,6 +578,7 @@ size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint
                     auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(container_index, version);
 
                     if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
                         uint32_t age = height - it->second.block_height;
                         ++lifetime_stats_.age_distribution[age];
                         lifetime_stats_.max_age = std::max(lifetime_stats_.max_age, age);
@@ -572,10 +589,13 @@ size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint
 
                         search_stats_.add_record(height, it->second.block_height,
                             static_cast<uint32_t>(current_versions_[Index] - version), cache_hit, true, 'e');
+#endif
                         map.erase(it);
 
+#ifdef UTXOZ_STATISTICS_ENABLED
                         --container_stats_[Index].current_size;
                         ++container_stats_[Index].total_deletes;
+#endif
 
                         update_metadata_on_delete(Index, version);
                         result = 1;
@@ -605,7 +625,8 @@ size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint
 // =============================================================================
 
 void database_impl::add_to_deferred_deletions(raw_outpoint const& key, uint32_t height) {
-    auto [it, inserted] = deferred_deletions_.emplace(key, height);
+    [[maybe_unused]] auto [it, inserted] = deferred_deletions_.emplace(key, height);
+#ifdef UTXOZ_STATISTICS_ENABLED
     if (inserted) {
         ++deferred_stats_.total_deferred;
         deferred_stats_.max_queue_size = std::max(deferred_stats_.max_queue_size,
@@ -615,6 +636,7 @@ void database_impl::add_to_deferred_deletions(raw_outpoint const& key, uint32_t 
             ++container_stats_[i].deferred_deletes;
         }
     }
+#endif
 }
 
 size_t database_impl::deferred_deletions_size() const {
@@ -624,8 +646,10 @@ size_t database_impl::deferred_deletions_size() const {
 std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process_pending_deletions() {
     if (deferred_deletions_.empty()) return {};
 
+#ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
     ++deferred_stats_.processing_runs;
+#endif
 
     size_t initial_size = deferred_deletions_.size();
     log::debug("Processing {} deferred deletions...", initial_size);
@@ -678,12 +702,14 @@ std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process
 
     deferred_deletions_.clear();
 
+#ifdef UTXOZ_STATISTICS_ENABLED
     auto const end_time = std::chrono::steady_clock::now();
     deferred_stats_.total_processing_time +=
         std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
     deferred_stats_.successfully_processed += successful_deletions;
     deferred_stats_.failed_to_delete += failed_deletions.size();
+#endif
 
     log::debug("Deferred deletion complete: {} successful, {} failed",
               successful_deletions, failed_deletions.size());
@@ -707,11 +733,13 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
                 auto erased_count = map.erase(it->key);
                 if (erased_count > 0) {
                     update_metadata_on_delete(Index, version);
+#ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
 
                     ++deferred_stats_.deletions_by_depth[depth];
                     search_stats_.add_record(it->height, 0, depth, cache_hit, true, 'e');
                     --container_stats_[Index].deferred_deletes;
+#endif
 
                     it = deferred_deletions_.erase(it);
                     ++successful_deletions;
@@ -754,8 +782,10 @@ std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> dat
 
     flat_map<raw_outpoint, bytes> successful_lookups;
 
+#ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
     ++deferred_stats_.processing_runs;
+#endif
 
     size_t initial_size = deferred_lookups_.size();
     log::debug("Processing {} deferred lookups...", initial_size);
@@ -806,12 +836,14 @@ std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> dat
 
     deferred_lookups_.clear();
 
+#ifdef UTXOZ_STATISTICS_ENABLED
     auto const end_time = std::chrono::steady_clock::now();
     deferred_stats_.total_processing_time +=
         std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
     deferred_stats_.successfully_processed += successful_lookups.size();
     deferred_stats_.failed_to_delete += failed_lookups.size();
+#endif
 
     log::debug("Deferred lookup complete: {} successful, {} failed",
               successful_lookups.size(), failed_lookups.size());
@@ -832,10 +864,12 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
 
                     ++deferred_stats_.lookups_by_depth[depth];
                     search_stats_.add_record(entry.height, map_it->second.block_height, depth, cache_hit, true, 'f');
+#endif
 
                     auto data = map_it->second.get_data();
                     successful_lookups.emplace(entry.key, bytes(data.begin(), data.end()));
@@ -975,6 +1009,7 @@ void database_impl::compact_all() {
 // =============================================================================
 
 void database_impl::update_fragmentation_stats() {
+#ifdef UTXOZ_STATISTICS_ENABLED
     for_each_index<container_count>([&](auto I) {
         if (segments_[I]) {
             try {
@@ -994,6 +1029,7 @@ void database_impl::update_fragmentation_stats() {
             }
         }
     });
+#endif
 }
 
 size_t database_impl::estimate_memory_usage(size_t index) const {

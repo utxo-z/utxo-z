@@ -39,6 +39,12 @@ if(NOT DEFINED UTXOZ_LOG_BACKEND)
 endif()
 message(STATUS "Log backend: ${UTXOZ_LOG_BACKEND}")
 
+# Statistics: enabled by default
+if(NOT DEFINED UTXOZ_STATISTICS_ENABLED)
+    set(UTXOZ_STATISTICS_ENABLED ON)
+endif()
+message(STATUS "Statistics: ${UTXOZ_STATISTICS_ENABLED}")
+
 # Set variables for config.hpp generation
 set(UTXOZ_LOG_CUSTOM OFF)
 set(UTXOZ_LOG_SPDLOG OFF)

@@ -10,8 +10,9 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 BUILD_TYPE="${1:-Release}"
 LOG_BACKEND="${2:-custom}"
+STATISTICS="${3:-True}"
 
-echo "Rebuilding utxoz (${BUILD_TYPE}, log=${LOG_BACKEND})"
+echo "Rebuilding utxoz (${BUILD_TYPE}, log=${LOG_BACKEND}, statistics=${STATISTICS})"
 
 cd "${PROJECT_DIR}"
 
@@ -22,7 +23,7 @@ rm -rf CMakeUserPresets.json
 
 # Install Conan dependencies
 echo "Installing Conan dependencies..."
-conan install . -of build --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o with_examples=True
+conan install . -of build --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_examples=True
 
 # Configure CMake
 echo "Configuring CMake..."

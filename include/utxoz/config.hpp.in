@@ -14,3 +14,6 @@
 #cmakedefine UTXOZ_LOG_CUSTOM
 #cmakedefine UTXOZ_LOG_SPDLOG
 #cmakedefine UTXOZ_LOG_NONE
+
+// Statistics collection
+#cmakedefine UTXOZ_STATISTICS_ENABLED
