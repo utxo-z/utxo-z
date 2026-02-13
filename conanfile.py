@@ -44,7 +44,7 @@ class UtxozConan(ConanFile):
     }
 
     # Sources are located in the same place as this recipe
-    exports_sources = "CMakeLists.txt", "src/*", "include/*", "examples/*", "tests/*", "LICENSE", "README.md"
+    exports_sources = "CMakeLists.txt", "src/*", "include/*", "examples/*", "tests/*", "benchmarks/*", "LICENSE", "README.md"
 
     def validate(self):
         if self.info.settings.compiler.cppstd:
@@ -69,9 +69,8 @@ class UtxozConan(ConanFile):
     def build_requirements(self):
         if self.options.with_tests:
             self.test_requires("catch2/3.11.0")
-            self.test_requires("nanobench/4.3.11")
 
-        if self.options.with_benchmarks:
+        if self.options.with_tests or self.options.with_benchmarks:
             self.test_requires("nanobench/4.3.11")
 
     def layout(self):
