@@ -6,10 +6,15 @@
 set -e
 set -x
 
+if [ -z "$1" ]; then
+    echo "Usage: $0 <version> [log_backend] [statistics]"
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-VERSION="${1:-0.0.1}"
+VERSION="$1"
 LOG_BACKEND="${2:-custom}"
 STATISTICS="${3:-True}"
 

@@ -12,7 +12,7 @@ required_conan_version = ">=2.0"
 
 class UtxozConan(ConanFile):
     name = "utxoz"
-    version = "0.0.1"
+    # version is set dynamically via --version parameter
 
     # Package metadata
     description = "High-performance UTXO Database for Bitcoin Cash"
@@ -83,7 +83,8 @@ class UtxozConan(ConanFile):
 
         tc = CMakeToolchain(self)
         tc.variables["CMAKE_VERBOSE_MAKEFILE"] = "ON"
-        tc.variables["UTXOZ_VERSION"] = self.version
+        utxoz_version = str(self.version) if self.version else "0.0.0-dev"
+        tc.variables["UTXOZ_VERSION"] = utxoz_version
         tc.variables["UTXOZ_BUILD_TESTS"] = self.options.with_tests
         tc.variables["UTXOZ_BUILD_EXAMPLES"] = self.options.with_examples
         tc.variables["UTXOZ_BUILD_BENCHMARKS"] = self.options.with_benchmarks
