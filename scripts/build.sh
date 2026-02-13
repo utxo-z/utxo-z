@@ -5,14 +5,20 @@
 
 set -e
 
+if [ -z "$1" ]; then
+    echo "Usage: $0 <version> [build_type] [log_backend] [statistics]"
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-BUILD_TYPE="${1:-Release}"
-LOG_BACKEND="${2:-custom}"
-STATISTICS="${3:-True}"
+VERSION="$1"
+BUILD_TYPE="${2:-Release}"
+LOG_BACKEND="${3:-custom}"
+STATISTICS="${4:-True}"
 
-echo "Building utxoz (${BUILD_TYPE}, log=${LOG_BACKEND}, statistics=${STATISTICS})"
+echo "Building utxoz version: ${VERSION} (${BUILD_TYPE}, log=${LOG_BACKEND}, statistics=${STATISTICS})"
 
 cd "${PROJECT_DIR}"
 
@@ -23,7 +29,7 @@ if [ ! -f "build/build/${BUILD_TYPE}/CMakeCache.txt" ]; then
     # Install dependencies if needed
     if [ ! -d "build" ]; then
         echo "Installing Conan dependencies..."
-        conan install . -of build --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_examples=True
+        conan install . -of build --version="${VERSION}" --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_examples=True
     fi
 
     cmake --preset conan-release

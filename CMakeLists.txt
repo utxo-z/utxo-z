@@ -10,9 +10,9 @@ project(utxo-z
     LANGUAGES CXX
 )
 
-# Version: must be provided via -DUTXOZ_VERSION=x.y.z or from Conan
+# Version: provided via -DUTXOZ_VERSION=x.y.z from Conan
 if(NOT DEFINED UTXOZ_VERSION)
-    message(FATAL_ERROR "UTXOZ_VERSION not defined. Pass -DUTXOZ_VERSION=x.y.z to cmake.")
+    message(FATAL_ERROR "UTXOZ_VERSION not defined. Pass -DUTXOZ_VERSION=x.y.z or use conan install with --version.")
 endif()
 message(STATUS "utxoz version: ${UTXOZ_VERSION}")
 configure_file(
