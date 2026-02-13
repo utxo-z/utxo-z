@@ -80,3 +80,4 @@ docs/latex/
 *.gcno
 coverage.info
 coverage/
+.boost-unordered-ref/
