@@ -6,7 +6,8 @@
 #include <nanobench.h>
 
 #include <fstream>
-#include <iostream>
+
+#include <fmt/format.h>
 
 #include "bench_common.hpp"
 
@@ -21,10 +22,14 @@ int main() {
     bench::register_find_benchmarks(bench);
     bench::register_erase_benchmarks(bench);
     bench::register_mixed_workload_benchmarks(bench);
+    bench::register_storage_benchmarks(bench);
 
     std::ofstream json_file("benchmark_results.json");
     bench.render(ankerl::nanobench::templates::json(), json_file);
 
-    std::cout << "Benchmark results written to benchmark_results.json\n";
+    fmt::println("Benchmark results written to benchmark_results.json");
+
+    bench::run_storage_overhead_report();
+
     return 0;
 }
