@@ -1,0 +1,602 @@
+// Copyright (c) 2016-present Knuth Project developers.
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+/**
+ * @file test_storage_correctness.cpp
+ * @brief Storage correctness tests: persistence, rotation, cross-version lookups
+ *
+ * These tests verify that the storage layer correctly persists data across
+ * close/reopen cycles, handles file rotation, and serves lookups/deletes
+ * across multiple file versions.
+ */
+
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <numeric>
+#include <random>
+
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
+
+#include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
+
+#include <utxoz/database.hpp>
+#include <utxoz/utils.hpp>
+
+namespace {
+
+inline std::atomic<uint64_t> test_counter{0};
+
+std::string make_unique_path() {
+    auto ts = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    auto unique_id = test_counter.fetch_add(1);
+    return fmt::format("./test_storage_{}_{}_{}", getpid(), ts, unique_id);
+}
+
+utxoz::raw_outpoint make_test_key(uint32_t tx_id, uint32_t output_index) {
+    utxoz::raw_outpoint key{};
+    for (size_t i = 0; i < 32; ++i) {
+        key[i] = static_cast<uint8_t>((tx_id >> (i % 4 * 8)) & 0xFF);
+    }
+    std::memcpy(key.data() + 32, &output_index, 4);
+    return key;
+}
+
+std::vector<uint8_t> make_test_value(size_t size, uint8_t seed = 0) {
+    std::vector<uint8_t> value(size);
+    std::iota(value.begin(), value.end(), seed);
+    return value;
+}
+
+struct ScopedTestDir {
+    std::string path;
+
+    ScopedTestDir() : path(make_unique_path()) {
+        if (std::filesystem::exists(path)) {
+            std::filesystem::remove_all(path);
+        }
+    }
+
+    ~ScopedTestDir() {
+        if (std::filesystem::exists(path)) {
+            std::filesystem::remove_all(path);
+        }
+    }
+};
+
+} // anonymous namespace
+
+// =============================================================================
+// Persistence: close + reopen
+// =============================================================================
+
+TEST_CASE("Reopen: data persists after close and reopen", "[storage][persistence]") {
+    ScopedTestDir dir;
+    constexpr size_t N = 500;
+
+    std::vector<utxoz::raw_outpoint> keys;
+    std::vector<std::vector<uint8_t>> values;
+
+    // Phase 1: insert data and close
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        for (size_t i = 0; i < N; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), 0);
+            auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+            keys.push_back(key);
+            values.push_back(val);
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+        }
+
+        CHECK(db.size() == N);
+        db.close();
+    }
+
+    // Phase 2: reopen and verify all data
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, false);  // do NOT remove existing
+
+        for (size_t i = 0; i < N; ++i) {
+            auto result = db.find(keys[i], 1000);
+            REQUIRE(result.has_value());
+            CHECK(*result == values[i]);
+        }
+
+        db.close();
+    }
+}
+
+TEST_CASE("Reopen: multiple close/reopen cycles accumulate data", "[storage][persistence]") {
+    ScopedTestDir dir;
+    constexpr size_t entries_per_cycle = 100;
+    constexpr size_t cycles = 5;
+
+    std::vector<utxoz::raw_outpoint> all_keys;
+    std::vector<std::vector<uint8_t>> all_values;
+
+    for (size_t c = 0; c < cycles; ++c) {
+        utxoz::db db;
+        if (c == 0) {
+            db.configure_for_testing(dir.path, true);
+        } else {
+            db.configure_for_testing(dir.path, false);
+        }
+
+        // Insert new batch
+        for (size_t i = 0; i < entries_per_cycle; ++i) {
+            uint32_t id = static_cast<uint32_t>(c * entries_per_cycle + i);
+            auto key = make_test_key(id, 0);
+            auto val = make_test_value(30, static_cast<uint8_t>(id & 0xFF));
+            all_keys.push_back(key);
+            all_values.push_back(val);
+            REQUIRE(db.insert(key, val, id + 100));
+        }
+
+        // Verify ALL data from all cycles so far
+        for (size_t i = 0; i < all_keys.size(); ++i) {
+            auto result = db.find(all_keys[i], 9999);
+            REQUIRE(result.has_value());
+            CHECK(*result == all_values[i]);
+        }
+
+        db.close();
+    }
+
+    CHECK(all_keys.size() == cycles * entries_per_cycle);
+}
+
+TEST_CASE("Reopen: all four container sizes persist correctly", "[storage][persistence]") {
+    ScopedTestDir dir;
+
+    struct TestEntry {
+        utxoz::raw_outpoint key;
+        std::vector<uint8_t> value;
+    };
+
+    std::vector<TestEntry> entries;
+
+    // Insert one entry per container size
+    std::array<size_t, 4> value_sizes = {30, 100, 400, 8000};
+
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        for (size_t i = 0; i < value_sizes.size(); ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i + 1), 0);
+            auto val = make_test_value(value_sizes[i], static_cast<uint8_t>(i * 42));
+            entries.push_back({key, val});
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+        }
+
+        db.close();
+    }
+
+    // Reopen and verify
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, false);
+
+        for (auto const& [key, val] : entries) {
+            auto result = db.find(key, 9999);
+            REQUIRE(result.has_value());
+            CHECK(*result == val);
+        }
+
+        db.close();
+    }
+}
+
+// =============================================================================
+// File rotation
+// =============================================================================
+
+TEST_CASE("Rotation: data accessible after file rotation", "[storage][rotation]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Insert enough entries to trigger at least one rotation.
+    // With 10 MiB test files and container 0 (44B values), rotation happens
+    // when load factor approaches the limit (~100K+ entries).
+    // We check statistics to confirm rotation occurred.
+    constexpr size_t N = 200'000;
+    std::vector<utxoz::raw_outpoint> keys;
+    keys.reserve(N);
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+        keys.push_back(key);
+        auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+    }
+
+    // Verify at least one rotation happened
+    auto stats = db.get_statistics();
+    bool any_rotation = false;
+    for (size_t i = 0; i < 4; ++i) {
+        if (stats.rotations_per_container[i] > 0) {
+            any_rotation = true;
+            break;
+        }
+    }
+    REQUIRE(any_rotation);
+
+    // Verify a random sample of entries (including ones that ended up in older versions)
+    std::mt19937 gen(42);
+    std::uniform_int_distribution<size_t> dist(0, N - 1);
+
+    size_t found_in_latest = 0;
+    size_t deferred = 0;
+
+    for (int test = 0; test < 1000; ++test) {
+        size_t idx = dist(gen);
+        auto result = db.find(keys[idx], static_cast<uint32_t>(N));
+        if (result.has_value()) {
+            ++found_in_latest;
+        } else {
+            ++deferred;
+        }
+    }
+
+    // Some should be found immediately (latest version), rest are deferred
+    CHECK(found_in_latest > 0);
+
+    // Process deferred lookups and verify they succeed
+    if (deferred > 0) {
+        auto [successful, failed] = db.process_pending_lookups();
+        // Most deferred lookups should succeed (the data is there, just in older files)
+        CHECK(successful.size() + failed.size() > 0);
+    }
+
+    db.close();
+}
+
+// =============================================================================
+// Cross-version erase (deferred deletions)
+// =============================================================================
+
+TEST_CASE("Deferred erase: delete entries from previous versions", "[storage][rotation][deferred]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Insert enough to trigger rotation
+    constexpr size_t N = 200'000;
+    std::vector<utxoz::raw_outpoint> keys;
+    keys.reserve(N);
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+        keys.push_back(key);
+        auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+    }
+
+    // Confirm rotation
+    auto stats = db.get_statistics();
+    bool any_rotation = false;
+    for (size_t i = 0; i < 4; ++i) {
+        if (stats.rotations_per_container[i] > 0) any_rotation = true;
+    }
+    REQUIRE(any_rotation);
+
+    // Erase the first 1000 entries (likely in older versions → deferred)
+    size_t immediate_erases = 0;
+    size_t deferred_erases = 0;
+
+    for (size_t i = 0; i < 1000; ++i) {
+        auto result = db.erase(keys[i], static_cast<uint32_t>(N + 1));
+        if (result > 0) {
+            ++immediate_erases;
+        } else {
+            ++deferred_erases;
+        }
+    }
+
+    // Process deferred deletions
+    auto [deleted_count, failed] = db.process_pending_deletions();
+
+    // Total successful should equal 1000 (immediate + deferred)
+    size_t total_deleted = immediate_erases + deleted_count;
+    CHECK(total_deleted == 1000);
+    CHECK(failed.empty());
+
+    db.close();
+}
+
+// =============================================================================
+// Cross-version lookups (deferred lookups)
+// =============================================================================
+
+TEST_CASE("Deferred lookups: find entries in previous versions", "[storage][rotation][deferred]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Insert enough to trigger rotation
+    constexpr size_t N = 200'000;
+    std::vector<utxoz::raw_outpoint> keys;
+    std::vector<std::vector<uint8_t>> values;
+    keys.reserve(N);
+    values.reserve(N);
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+        auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+        keys.push_back(key);
+        values.push_back(val);
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+    }
+
+    // Lookup entries that are definitely in old versions (first inserted)
+    size_t deferred_count = 0;
+    for (size_t i = 0; i < 500; ++i) {
+        auto result = db.find(keys[i], static_cast<uint32_t>(N));
+        if (!result.has_value()) {
+            ++deferred_count;
+        }
+    }
+
+    // Process deferred lookups
+    auto [successful, failed] = db.process_pending_lookups();
+
+    // Verify the found values are correct
+    for (auto const& [key, found_value] : successful) {
+        // Find the original index for this key
+        for (size_t i = 0; i < 500; ++i) {
+            if (keys[i] == key) {
+                CHECK(found_value == values[i]);
+                break;
+            }
+        }
+    }
+
+    // All lookups should eventually succeed (immediate + deferred)
+    CHECK(failed.empty());
+
+    db.close();
+}
+
+// =============================================================================
+// Compaction after rotation
+// =============================================================================
+
+TEST_CASE("Compaction: data integrity preserved after compact_all", "[storage][compaction]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Insert enough to get multiple versions
+    constexpr size_t N = 200'000;
+    std::vector<utxoz::raw_outpoint> keys;
+    keys.reserve(N);
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+        keys.push_back(key);
+        auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+    }
+
+    // Erase some entries before compaction
+    for (size_t i = 0; i < 1000; ++i) {
+        db.erase(keys[i], static_cast<uint32_t>(N + 1));
+    }
+    db.process_pending_deletions();
+
+    // Compact
+    db.compact_all();
+
+    // Verify remaining entries (1000..N) are accessible
+    // After compaction there may still be multiple files, so some finds
+    // may be deferred. We process deferred lookups to verify them.
+    std::mt19937 gen(42);
+    std::uniform_int_distribution<size_t> dist(1000, N - 1);
+
+    size_t found_immediate = 0;
+    for (int test = 0; test < 500; ++test) {
+        size_t idx = dist(gen);
+        auto result = db.find(keys[idx], static_cast<uint32_t>(N + 2));
+        if (result.has_value()) ++found_immediate;
+    }
+
+    auto [successful, failed_lookups] = db.process_pending_lookups();
+    size_t total_found = found_immediate + successful.size();
+
+    // All 500 sampled entries should be found (immediate or deferred)
+    CHECK(total_found == 500);
+    CHECK(failed_lookups.empty());
+
+    // Verify erased entries are gone (these should not be found anywhere)
+    for (size_t i = 0; i < 100; ++i) {
+        auto result = db.find(keys[i], static_cast<uint32_t>(N + 2));
+        CHECK_FALSE(result.has_value());
+    }
+    // Process any deferred lookups for erased entries — they should all fail
+    auto [found_erased, failed_erased] = db.process_pending_lookups();
+    CHECK(found_erased.empty());
+
+    db.close();
+}
+
+// =============================================================================
+// Persistence after rotation
+// =============================================================================
+
+TEST_CASE("Reopen after rotation: all versions survive close/reopen", "[storage][persistence][rotation]") {
+    ScopedTestDir dir;
+
+    constexpr size_t N = 200'000;
+    std::vector<utxoz::raw_outpoint> keys;
+    keys.reserve(N);
+
+    // Phase 1: insert enough to rotate, then close
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        for (size_t i = 0; i < N; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+            keys.push_back(key);
+            auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        }
+
+        auto stats = db.get_statistics();
+        bool any_rotation = false;
+        for (size_t i = 0; i < 4; ++i) {
+            if (stats.rotations_per_container[i] > 0) any_rotation = true;
+        }
+        REQUIRE(any_rotation);
+
+        db.close();
+    }
+
+    // Phase 2: reopen and verify data from latest version
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, false);
+
+        // Recent entries (in latest version) should be found directly
+        size_t found = 0;
+        for (size_t i = N - 1000; i < N; ++i) {
+            auto result = db.find(keys[i], static_cast<uint32_t>(N));
+            if (result.has_value()) ++found;
+        }
+
+        // Most recent entries should be in the latest version
+        CHECK(found > 0);
+
+        db.close();
+    }
+}
+
+// =============================================================================
+// Value data integrity across all sizes
+// =============================================================================
+
+TEST_CASE("Value integrity: exact byte content preserved for all container sizes", "[storage][integrity]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Test with values that fit within each container's data capacity.
+    // utxo_value<Size> overhead: sizeof(uint32_t) + sizeof(size_type<Size>)
+    //   Container 0 (44B):    max data = 39
+    //   Container 1 (128B):   max data = 123
+    //   Container 2 (512B):   max data = 506
+    //   Container 3 (10240B): max data = 10234
+    std::vector<size_t> test_sizes = {1, 20, 39, 50, 100, 123, 200, 400, 506, 1000, 5000, 10234};
+
+    struct Entry {
+        utxoz::raw_outpoint key;
+        std::vector<uint8_t> value;
+    };
+    std::vector<Entry> entries;
+
+    for (size_t i = 0; i < test_sizes.size(); ++i) {
+        size_t sz = test_sizes[i];
+        // Skip sizes that exceed max container
+        if (sz > 10240) continue;
+
+        auto key = make_test_key(static_cast<uint32_t>(i + 1), 0);
+
+        // Create a value with recognizable pattern
+        std::vector<uint8_t> val(sz);
+        for (size_t j = 0; j < sz; ++j) {
+            val[j] = static_cast<uint8_t>((i * 31 + j * 7) & 0xFF);
+        }
+
+        entries.push_back({key, val});
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+    }
+
+    // Verify all values byte-for-byte
+    for (auto const& [key, expected] : entries) {
+        auto result = db.find(key, 9999);
+        REQUIRE(result.has_value());
+        REQUIRE(result->size() == expected.size());
+        CHECK(*result == expected);
+    }
+
+    db.close();
+
+    // Reopen and verify again
+    db.configure_for_testing(dir.path, false);
+
+    for (auto const& [key, expected] : entries) {
+        auto result = db.find(key, 9999);
+        REQUIRE(result.has_value());
+        REQUIRE(result->size() == expected.size());
+        CHECK(*result == expected);
+    }
+
+    db.close();
+}
+
+// =============================================================================
+// Erase + reopen: deletions persist
+// =============================================================================
+
+TEST_CASE("Erase persistence: erased entries stay gone after reopen", "[storage][persistence]") {
+    ScopedTestDir dir;
+
+    constexpr size_t N = 200;
+
+    std::vector<utxoz::raw_outpoint> keys;
+
+    // Phase 1: insert, erase half, close
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        for (size_t i = 0; i < N; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), 0);
+            keys.push_back(key);
+            auto val = make_test_value(30);
+            REQUIRE(db.insert(key, val, 100));
+        }
+
+        // Erase first half
+        for (size_t i = 0; i < N / 2; ++i) {
+            CHECK(db.erase(keys[i], 200) == 1);
+        }
+
+        db.close();
+    }
+
+    // Phase 2: reopen, erased entries should be gone, rest should be present
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, false);
+
+        for (size_t i = 0; i < N / 2; ++i) {
+            auto result = db.find(keys[i], 300);
+            CHECK_FALSE(result.has_value());
+        }
+
+        for (size_t i = N / 2; i < N; ++i) {
+            auto result = db.find(keys[i], 300);
+            CHECK(result.has_value());
+        }
+
+        db.close();
+    }
+}

@@ -12,6 +12,7 @@ find_package(Catch2 REQUIRED)
 # Test executable
 add_executable(utxoz_tests
     test_database.cpp
+    test_storage_correctness.cpp
 )
 
 target_link_libraries(utxoz_tests
