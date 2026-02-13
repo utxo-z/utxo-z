@@ -11,12 +11,11 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <vector>
 #include <optional>
 #include <chrono>
-
-#include <boost/container_hash/hash.hpp>
 
 #include <utxoz/literals.hpp>
 
@@ -46,6 +45,22 @@ inline constexpr size_t outpoint_size = 36;
  * @see get_txid(), get_output_index() for extracting components
  */
 using raw_outpoint = std::array<uint8_t, outpoint_size>;
+
+/**
+ * @brief Fast hash for raw_outpoint.
+ *
+ * Since the first 32 bytes are a SHA256 txid (uniformly distributed),
+ * we just grab the first 8 bytes as size_t and mix in the 4-byte output index.
+ * This is O(1) instead of the O(36) byte-by-byte hash_combine approach.
+ */
+inline size_t hash_outpoint(raw_outpoint const& k) noexcept {
+    size_t seed;
+    std::memcpy(&seed, k.data(), sizeof(seed));
+    uint32_t idx;
+    std::memcpy(&idx, k.data() + 32, sizeof(idx));
+    seed ^= size_t(idx) * 0x9e3779b97f4a7c15ULL;
+    return seed;
+}
 
 /**
  * @brief Span of bytes representing UTXO output data
@@ -88,13 +103,13 @@ struct search_record {
     bool is_cache_hit;         ///< Whether this was a cache hit
     bool found;                ///< Whether the UTXO was found
     char operation;            ///< Operation type ('f' = find, 'e' = erase)
-    
+
     /**
      * @brief Calculate UTXO age in blocks
      * @return Age in blocks, or 0 if not found or invalid
      */
     uint32_t get_utxo_age() const {
-        return found && access_height >= insertion_height ? 
+        return found && access_height >= insertion_height ?
                access_height - insertion_height : 0;
     }
 };
@@ -114,7 +129,7 @@ struct deferred_deletion_entry {
     }
 
     friend std::size_t hash_value(deferred_deletion_entry const& entry) {
-        return boost::hash<raw_outpoint>{}(entry.key);
+        return hash_outpoint(entry.key);
     }
 };
 
@@ -133,7 +148,7 @@ struct deferred_lookup_entry {
     }
 
     friend std::size_t hash_value(deferred_lookup_entry const& entry) {
-        return boost::hash<raw_outpoint>{}(entry.key);
+        return hash_outpoint(entry.key);
     }
 };
 
@@ -145,12 +160,7 @@ struct deferred_lookup_entry {
 template<>
 struct std::hash<utxoz::raw_outpoint> {
     std::size_t operator()(utxoz::raw_outpoint const& key) const noexcept {
-        // Simple hash combination
-        std::size_t seed = 0;
-        for (auto byte : key) {
-            seed ^= std::hash<uint8_t>{}(byte) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        }
-        return seed;
+        return utxoz::hash_outpoint(key);
     }
 };
 
@@ -160,7 +170,7 @@ struct std::hash<utxoz::raw_outpoint> {
 template<>
 struct std::hash<utxoz::deferred_deletion_entry> {
     std::size_t operator()(utxoz::deferred_deletion_entry const& entry) const noexcept {
-        return std::hash<utxoz::raw_outpoint>{}(entry.key);
+        return utxoz::hash_outpoint(entry.key);
     }
 };
 
@@ -170,6 +180,6 @@ struct std::hash<utxoz::deferred_deletion_entry> {
 template<>
 struct std::hash<utxoz::deferred_lookup_entry> {
     std::size_t operator()(utxoz::deferred_lookup_entry const& entry) const noexcept {
-        return std::hash<utxoz::raw_outpoint>{}(entry.key);
+        return utxoz::hash_outpoint(entry.key);
     }
 };

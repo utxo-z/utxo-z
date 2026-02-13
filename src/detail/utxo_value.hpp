@@ -16,7 +16,6 @@
 #include <span>
 #include <type_traits>
 
-#include <boost/container_hash/hash.hpp>
 #include <boost/interprocess/allocators/allocator.hpp>
 #include <boost/interprocess/managed_mapped_file.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
@@ -32,7 +31,13 @@ namespace bip = boost::interprocess;
 // =============================================================================
 
 using segment_manager_t = bip::managed_mapped_file::segment_manager;
-using outpoint_hash = boost::hash<raw_outpoint>;
+
+struct outpoint_hash {
+    size_t operator()(raw_outpoint const& k) const noexcept {
+        return hash_outpoint(k);
+    }
+};
+
 using outpoint_equal = std::equal_to<raw_outpoint>;
 
 // =============================================================================

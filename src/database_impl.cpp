@@ -10,6 +10,7 @@
 #include "detail/database_impl.hpp"
 
 #include <utxoz/config.hpp>
+#include <utxoz/utils.hpp>
 
 #include <algorithm>
 #include <numeric>
@@ -357,9 +358,12 @@ size_t database_impl::size() const {
 // =============================================================================
 
 bool database_impl::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
+    // log::debug("insert called at height {}", height);
+
     size_t const index = get_index_from_size(value.size());
     if (index >= container_count) {
-        log::error("insert: Invalid index {} for value size {}", index, value.size());
+        log::error("insert: value too large ({} bytes) for any container (max {}). height={}, outpoint={}",
+            value.size(), container_sizes[container_count - 1], height, outpoint_to_string(key));
         throw std::out_of_range("Value size too large");
     }
 
@@ -388,6 +392,10 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
             [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
 
             auto [it, inserted] = map.emplace(key, val);
+            if ( ! inserted) {
+                log::warn("insert: duplicate key at height {}, outpoint={}, container={}",
+                    height, outpoint_to_string(key), Index);
+            }
             if (inserted) {
                 ++entries_count_;
 
