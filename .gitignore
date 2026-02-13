@@ -36,14 +36,18 @@ Thumbs.db
 
 # Test and benchmark outputs
 test_utxo_*/
+bench_utxo_*/
 utxo_*/
 *_data/
 benchmark_*.log
+benchmark_results.json
+benchmark_results_gh.json
 *.log
 
 # CMake
 CMakeUserPresets.json
 include/utxoz/config.hpp
+include/utxoz/version.hpp
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/

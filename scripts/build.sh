@@ -6,7 +6,7 @@
 set -e
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 <version> [build_type] [log_backend] [statistics]"
+    echo "Usage: $0 <version> [build_type] [log_backend] [statistics] [--bench]"
     exit 1
 fi
 
@@ -18,7 +18,15 @@ BUILD_TYPE="${2:-Release}"
 LOG_BACKEND="${3:-custom}"
 STATISTICS="${4:-True}"
 
-echo "Building utxoz version: ${VERSION} (${BUILD_TYPE}, log=${LOG_BACKEND}, statistics=${STATISTICS})"
+# Check for --bench flag in any position
+WITH_BENCHMARKS="False"
+for arg in "$@"; do
+    if [ "$arg" = "--bench" ]; then
+        WITH_BENCHMARKS="True"
+    fi
+done
+
+echo "Building utxoz version: ${VERSION} (${BUILD_TYPE}, log=${LOG_BACKEND}, statistics=${STATISTICS}, benchmarks=${WITH_BENCHMARKS})"
 
 cd "${PROJECT_DIR}"
 
@@ -29,7 +37,7 @@ if [ ! -f "build/build/${BUILD_TYPE}/CMakeCache.txt" ]; then
     # Install dependencies if needed
     if [ ! -d "build" ]; then
         echo "Installing Conan dependencies..."
-        conan install . -of build --version="${VERSION}" --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_examples=True
+        conan install . -of build --version="${VERSION}" --build=missing -s build_type=${BUILD_TYPE} -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_examples=True -o with_benchmarks=${WITH_BENCHMARKS}
     fi
 
     cmake --preset conan-release

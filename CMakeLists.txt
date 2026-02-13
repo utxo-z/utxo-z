@@ -131,6 +131,11 @@ if(UTXOZ_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+# Benchmarks
+if(UTXOZ_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
+
 # Documentation
 if(UTXOZ_BUILD_DOCS)
     find_package(Doxygen)

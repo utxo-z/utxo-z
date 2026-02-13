@@ -7,7 +7,7 @@ set -e
 set -x
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 <version> [log_backend] [statistics]"
+    echo "Usage: $0 <version> [log_backend] [statistics] [--bench]"
     exit 1
 fi
 
@@ -18,7 +18,15 @@ VERSION="$1"
 LOG_BACKEND="${2:-custom}"
 STATISTICS="${3:-True}"
 
-echo "Building utxoz version: ${VERSION} (log=${LOG_BACKEND}, statistics=${STATISTICS})"
+# Check for --bench flag in any position
+WITH_BENCHMARKS="False"
+for arg in "$@"; do
+    if [ "$arg" = "--bench" ]; then
+        WITH_BENCHMARKS="True"
+    fi
+done
+
+echo "Building utxoz version: ${VERSION} (log=${LOG_BACKEND}, statistics=${STATISTICS}, benchmarks=${WITH_BENCHMARKS})"
 
 cd "${PROJECT_DIR}"
 
@@ -28,9 +36,9 @@ rm -rf conan.lock
 # Remove existing package from cache to force rebuild
 conan remove "utxoz/${VERSION}" -c 2>/dev/null || true
 
-conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False --update
+conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --update
 
-conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False --lockfile=conan.lock --lockfile-out=build/conan.lock
-conan create conanfile.py --version "${VERSION}" --lockfile=build/conan.lock --build=missing -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False
+conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --lockfile=conan.lock --lockfile-out=build/conan.lock
+conan create conanfile.py --version "${VERSION}" --lockfile=build/conan.lock --build=missing -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS}
 
 echo "Package utxoz/${VERSION} created successfully in local cache"
