@@ -86,5 +86,7 @@ void register_insert_benchmarks(ankerl::nanobench::Bench& bench);
 void register_find_benchmarks(ankerl::nanobench::Bench& bench);
 void register_erase_benchmarks(ankerl::nanobench::Bench& bench);
 void register_mixed_workload_benchmarks(ankerl::nanobench::Bench& bench);
+void register_storage_benchmarks(ankerl::nanobench::Bench& bench);
+void run_storage_overhead_report();
 
 } // namespace bench
