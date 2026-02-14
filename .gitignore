@@ -47,7 +47,6 @@ benchmark_results_gh.json
 # CMake
 CMakeUserPresets.json
 include/utxoz/config.hpp
-include/utxoz/version.hpp
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
