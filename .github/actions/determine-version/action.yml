@@ -1,0 +1,63 @@
+name: 'Determine Version'
+description: 'Calculates the version tag based off the git reference'
+inputs:
+  github-ref:
+    description: 'The current reference point for the version'
+    required: true
+  run-number:
+    description: 'Github Run Number'
+    required: true
+
+outputs:
+  build-version:
+    description: "Build Version"
+    value: ${{ steps.cal.outputs.version }}
+runs:
+  using: "composite"
+  steps:
+  - id: cal
+    run: |
+      LAST_TAG=$(git tag -l --sort=-creatordate | head -n 1)
+      echo "LAST_TAG: $LAST_TAG"
+      LAST_TAG=$(echo $LAST_TAG | sed -e 's/^v//')
+      echo "LAST_TAG: $LAST_TAG"
+      [[ "$LAST_TAG" == "" ]] && LAST_TAG="0.0.0"
+
+      GITHUB_REF="${{ inputs.github-ref }}"
+      echo "Input github-ref: $GITHUB_REF"
+
+      # If it doesn't start with refs/, assume it's a branch name and add the prefix
+      if [[ ! "$GITHUB_REF" == "refs/"* ]]; then
+        GITHUB_REF="refs/heads/$GITHUB_REF"
+        echo "Normalized github-ref: $GITHUB_REF"
+      fi
+
+      VERSION=$(echo "$GITHUB_REF" | sed -e 's,.*/\(.*\),\1,')
+      [[ "$GITHUB_REF" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+
+      echo "Raw VERSION from ref: $VERSION"
+
+      # Handle release branches (release/1.2.3 -> 1.2.3)
+      if [[ "$GITHUB_REF" == "refs/heads/release/"* ]]; then
+        VERSION=$(echo $VERSION | sed -e 's/^release\///' -e 's/^v//')
+        echo "Release branch detected, using version: $VERSION"
+
+      # Handle hotfix branches (hotfix/1.2.4 -> 1.2.4)
+      elif [[ "$GITHUB_REF" == "refs/heads/hotfix/"* ]]; then
+        VERSION=$(echo $VERSION | sed -e 's/^hotfix\///' -e 's/^v//')
+        echo "Hotfix branch detected, using version: $VERSION"
+
+      # Handle main/master/dev branches
+      elif [ "$VERSION" == "main" ] || [ "$VERSION" == "master" ] || [ "$VERSION" == "dev" ]; then
+        VERSION=$(echo "$LAST_TAG-commit.${{ inputs.run-number }}")
+        echo "Development branch detected, using version: $VERSION"
+
+      # Handle merge/PR and any other branch (feature/*, etc.)
+      else
+        VERSION=$(echo "$LAST_TAG-commit.${{ inputs.run-number }}")
+        echo "Other branch detected, using version: $VERSION"
+      fi
+
+      echo "Final VERSION: $VERSION"
+      echo "version=$VERSION" >> $GITHUB_OUTPUT
+    shell: bash

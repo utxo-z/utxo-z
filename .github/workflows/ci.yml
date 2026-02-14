@@ -1,13 +1,41 @@
-name: CI
+name: Build and Test
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'release/**', 'hotfix/**']
+    tags:
+      - v*
   pull_request:
     branches: [main, master]
+  workflow_dispatch: {}
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      build-version: ${{ steps.version.outputs.build-version }}
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Determine version
+        id: version
+        uses: ./.github/actions/determine-version
+        with:
+          github-ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+          run-number: ${{ github.run_number }}
+
+      - name: 📊 Build configuration summary
+        run: |
+          echo "## Build Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.version.outputs.build-version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Event:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Ref:** ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+
   build:
+    needs: [setup]
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +71,7 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          conan install . -of build --version=0.0.0-ci --build=missing -s build_type=Release -s compiler.cppstd=23
+          conan install . -of build --version=${{ needs.setup.outputs.build-version }} --build=missing -s build_type=Release -s compiler.cppstd=23
 
       - name: ⚙️ Configure CMake
         run: |
@@ -58,6 +86,7 @@ jobs:
           ctest --preset ${{ matrix.build-preset }} --output-on-failure
 
   benchmark:
+    needs: [setup]
     runs-on: ubuntu-24.04
     name: 📊 Benchmarks
     permissions:
@@ -79,7 +108,7 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          conan install . -of build --version=0.0.0-ci -o with_benchmarks=True --build=missing -s build_type=Release -s compiler.cppstd=23
+          conan install . -of build --version=${{ needs.setup.outputs.build-version }} -o with_benchmarks=True --build=missing -s build_type=Release -s compiler.cppstd=23
 
       - name: ⚙️ Configure CMake
         run: |
