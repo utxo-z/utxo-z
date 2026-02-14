@@ -16,21 +16,11 @@
 #include <span>
 #include <type_traits>
 
-#include <boost/interprocess/allocators/allocator.hpp>
-#include <boost/interprocess/managed_mapped_file.hpp>
-#include <boost/unordered/unordered_flat_map.hpp>
-
 #include <utxoz/types.hpp>
 
+#include <utxoz/flatmap/mmap_flat_map.hpp>
+
 namespace utxoz::detail {
-
-namespace bip = boost::interprocess;
-
-// =============================================================================
-// Type aliases
-// =============================================================================
-
-using segment_manager_t = bip::managed_mapped_file::segment_manager;
 
 struct outpoint_hash {
     size_t operator()(raw_outpoint const& k) const noexcept {
@@ -65,13 +55,14 @@ struct utxo_value {
     }
 };
 
+/// The internal map type — lives directly in an mmap'd buffer.
+/// No allocator needed; groups + elements are the file's table buffer.
 template<size_t Size>
-using utxo_map = boost::unordered_flat_map<
+using utxo_map = utxoz::flatmap::mmap_flat_map<
     raw_outpoint,
     utxo_value<Size>,
     outpoint_hash,
-    outpoint_equal,
-    bip::allocator<std::pair<raw_outpoint const, utxo_value<Size>>, segment_manager_t>
+    outpoint_equal
 >;
 
 } // namespace utxoz::detail

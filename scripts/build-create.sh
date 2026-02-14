@@ -18,6 +18,7 @@ VERSION="$1"
 LOG_BACKEND="${2:-custom}"
 STATISTICS="${3:-True}"
 
+
 # Check for --bench flag in any position
 WITH_BENCHMARKS="False"
 for arg in "$@"; do
@@ -30,7 +31,9 @@ echo "Building utxoz version: ${VERSION} (log=${LOG_BACKEND}, statistics=${STATI
 
 cd "${PROJECT_DIR}"
 
-rm -rf build
+BUILD_DIR="${PROJECT_DIR}/build-create"
+
+rm -rf "${BUILD_DIR}"
 rm -rf conan.lock
 
 # Remove existing package from cache to force rebuild
@@ -38,7 +41,7 @@ conan remove "utxoz/${VERSION}" -c 2>/dev/null || true
 
 conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --update
 
-conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --lockfile=conan.lock --lockfile-out=build/conan.lock
-conan create conanfile.py --version "${VERSION}" --lockfile=build/conan.lock --build=missing -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS}
+conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --lockfile=conan.lock --lockfile-out="${BUILD_DIR}/conan.lock"
+conan create conanfile.py --version "${VERSION}" --lockfile="${BUILD_DIR}/conan.lock" --build=missing -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS}
 
 echo "Package utxoz/${VERSION} created successfully in local cache"

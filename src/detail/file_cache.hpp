@@ -19,10 +19,10 @@
 #include <utility>
 #include <vector>
 
-#include <boost/interprocess/managed_mapped_file.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <fmt/format.h>
 
+#include "mapped_segment.hpp"
 #include "utxo_value.hpp"
 
 namespace utxoz::detail {
@@ -34,6 +34,9 @@ inline constexpr std::string_view data_file_format = "{}/cont_{}_v{:05}.dat";
  *
  * Provides efficient access to historical database files with automatic
  * eviction of least-recently-used entries.
+ *
+ * With mmap_flat_map, opening a file is just mmap + attach (O(1)).
+ * No deserialization needed. Closing is save scalars + munmap.
  */
 struct file_cache {
     template<size_t Index>
@@ -67,23 +70,38 @@ struct file_cache {
             evict_lru();
         }
 
-        // Open file
+        // Open file and attach to the table already in the mmap buffer (O(1))
         auto file_path = make_file_path(container_index, version);
-        auto segment = std::make_unique<bip::managed_mapped_file>(
-            bip::open_only, file_path.c_str());
+        auto segment = std::make_unique<mapped_segment>(file_path, open_only);
+        auto& hdr = segment->header();
 
-        auto* map = segment->find<utxo_map<container_sizes[Index]>>("db_map").first;
-        if (!map) {
-            throw std::runtime_error("Map not found in file: " + file_path);
-        }
+        using map_t = utxo_map<container_sizes[Index]>;
+        auto* map = new map_t(map_t::attach(
+            segment->table_buffer(),
+            hdr.groups_size_index,
+            hdr.groups_size_mask,
+            hdr.entry_count,
+            hdr.max_load,
+            outpoint_hash{},
+            outpoint_equal{}));
 
-        cache_[file_key] = cached_file{
-            std::move(segment),
-            map,
-            now,
-            1,
-            false
+        // Capture raw pointers before moving into cached_file
+        auto* seg_ptr = segment.get();
+
+        cached_file cf;
+        cf.segment = std::move(segment);
+        cf.map_ptr = map;
+        // On eviction: save scalar state to header, delete map wrapper, flush segment
+        cf.on_close = [map, seg_ptr]() {
+            auto& h = seg_ptr->header();
+            h.entry_count = map->size();
+            h.max_load = map->get_max_load();
+            delete map;
         };
+        cf.last_used = now;
+        cf.access_count = 1;
+        cf.is_pinned = false;
+        cache_[file_key] = std::move(cf);
 
         return {*map, false};
     }
@@ -94,6 +112,10 @@ struct file_cache {
 
     void set_cache_size(size_t new_size) {
         max_cached_files_ = new_size;
+    }
+
+    void clear() {
+        cache_.clear();
     }
 
     std::vector<std::pair<size_t, size_t>> get_cached_files() const {
@@ -122,11 +144,37 @@ struct file_cache {
 
 private:
     struct cached_file {
-        std::unique_ptr<bip::managed_mapped_file> segment;
-        void* map_ptr;
+        std::unique_ptr<mapped_segment> segment;  // destroyed last (declared first)
+        void* map_ptr = nullptr;
+        std::function<void()> on_close;            // save state + delete map
         std::chrono::steady_clock::time_point last_used;
         size_t access_count = 0;
         bool is_pinned = false;
+
+        ~cached_file() {
+            // Body runs before member destruction, so segment is still alive
+            if (on_close) on_close();
+        }
+
+        cached_file() = default;
+        cached_file(cached_file&&) = default;
+        cached_file& operator=(cached_file&& other) {
+            if (this != &other) {
+                // Save state for current map before replacing
+                if (on_close) on_close();
+                segment = std::move(other.segment);
+                map_ptr = other.map_ptr;
+                on_close = std::move(other.on_close);
+                last_used = other.last_used;
+                access_count = other.access_count;
+                is_pinned = other.is_pinned;
+                other.map_ptr = nullptr;
+                other.on_close = nullptr;
+            }
+            return *this;
+        }
+        cached_file(cached_file const&) = delete;
+        cached_file& operator=(cached_file const&) = delete;
     };
 
     std::string make_file_path(size_t container_index, size_t version) const {

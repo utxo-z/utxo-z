@@ -13,6 +13,8 @@
 #include <utxoz/utils.hpp>
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <numeric>
 #include <ranges>
 #include <set>
@@ -104,48 +106,52 @@ size_t database_impl::count_versions_for_container(size_t index) const {
 }
 
 // =============================================================================
-// database_impl - Optimal buckets finder
+// database_impl - Optimal groups calculation
 // =============================================================================
 
 template<size_t Index>
-size_t database_impl::find_optimal_buckets(std::string const& file_path,
-                                           size_t file_size,
-                                           size_t initial_buckets) {
-    log::debug("Finding optimal buckets for container {} (file size: {})...", Index, file_size);
+void database_impl::find_optimal_groups(size_t file_size) {
+    // Mathematical calculation of the largest groups_size (power-of-2)
+    // whose table buffer fits in the available space after the file header.
+    //
+    // mmap_flat_map internal layout (from boost/unordered/detail/foa/core.hpp):
+    //   group_type: 16 bytes (group15, alignas(16), N=15 slots)
+    //   groups_size: gs (power of 2, minimum 2)
+    //   groups_size_mask: gsm = gs - 1
+    //   groups_size_index: gsi = 64 - countr_zero(gs)  (shift count for position())
+    //   capacity = gs * N - 1
+    //   buffer_bytes = gs * sizeof(group_type) + capacity * sizeof(value_type)
 
-    size_t left = 1;
-    size_t right = initial_buckets;
-    size_t best_buckets = left;
+    using map_t = utxo_map<container_sizes[Index]>;
+    using value_type = typename map_t::value_type;
+    constexpr size_t N = 15;            // group15::N
+    constexpr size_t group_sz = 16;     // sizeof(group15)
+    size_t available = file_size - sizeof(file_header);
 
-    while (left <= right) {
-        size_t mid = left + (right - left) / 2;
+    // Find largest power-of-2 gs that fits (minimum gs = 2, per pow2_size_policy).
+    size_t best_gs = 2;
+    for (size_t gs = 2; gs <= available; gs *= 2) {
+        size_t capacity = gs * N - 1;
+        size_t buffer_bytes = gs * group_sz + capacity * sizeof(value_type);
 
-        std::string temp_file = fmt::format("{}/temp_{}_{}.dat", file_path, file_size, mid);
-        try {
-            bip::managed_mapped_file segment(bip::open_or_create, temp_file.c_str(), file_size);
-
-            // Just test if construction succeeds - we don't need the pointer
-            (void)segment.find_or_construct<utxo_map<container_sizes[Index]>>("temp_map")(
-                mid,
-                outpoint_hash{},
-                outpoint_equal{},
-                segment.get_allocator<std::pair<raw_outpoint const, utxo_value<container_sizes[Index]>>>()
-            );
-
-            // Success - try more buckets
-            best_buckets = mid;
-            left = mid + 1;
-            log::trace("  {} buckets OK, trying more...", mid);
-        } catch (boost::interprocess::bad_alloc const&) {
-            // Too many - try fewer
-            right = mid - 1;
+        if (buffer_bytes <= available) {
+            best_gs = gs;
+        } else {
+            break;
         }
-
-        fs::remove(temp_file);
     }
 
-    log::debug("Optimal buckets for container {}: {}", Index, best_buckets);
-    return best_buckets;
+    // gsi = shift count used by pow2_size_policy::position(hash, gsi) = hash >> gsi
+    size_t best_gsm = best_gs - 1;
+    size_t best_gsi = sizeof(size_t) * CHAR_BIT - std::countr_zero(best_gs);
+
+    groups_size_index_[Index] = best_gsi;
+    groups_size_mask_[Index] = best_gsm;
+
+    size_t capacity = best_gs * N - 1;
+    log::debug("Optimal groups for container {} (file size: {}): "
+               "gs={}, gsi={}, gsm={}, capacity={}",
+               Index, file_size, best_gs, best_gsi, best_gsm, capacity);
 }
 
 // =============================================================================
@@ -156,16 +162,46 @@ template<size_t Index>
 void database_impl::open_or_create_container(size_t version) {
     auto file_name = fmt::format(data_file_format, db_path_.string(), Index, version);
 
-    segments_[Index] = std::make_unique<bip::managed_mapped_file>(
-        bip::open_or_create, file_name.c_str(), active_file_sizes_[Index]);
+    using map_t = utxo_map<container_sizes[Index]>;
 
-    auto* segment = segments_[Index].get();
-    containers_[Index] = segment->find_or_construct<utxo_map<container_sizes[Index]>>("db_map")(
-        min_buckets_ok_[Index],
-        outpoint_hash{},
-        outpoint_equal{},
-        segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>()
-    );
+    bool file_exists = fs::exists(file_name);
+
+    if (file_exists) {
+        // Reopen existing file — attach to the table already in the buffer
+        segments_[Index] = std::make_unique<mapped_segment>(file_name, open_only);
+        auto& hdr = segments_[Index]->header();
+
+        auto* map = new map_t(map_t::attach(
+            segments_[Index]->table_buffer(),
+            hdr.groups_size_index,
+            hdr.groups_size_mask,
+            hdr.entry_count,
+            hdr.max_load,
+            outpoint_hash{},
+            outpoint_equal{}));
+
+        containers_[Index] = map;
+        entries_count_ += hdr.entry_count;
+    } else {
+        // Create new file
+        segments_[Index] = std::make_unique<mapped_segment>(
+            file_name, active_file_sizes_[Index], open_or_create);
+        auto& hdr = segments_[Index]->header();
+
+        hdr.container_index = static_cast<uint32_t>(Index);
+        hdr.file_version = version;
+        hdr.groups_size_index = groups_size_index_[Index];
+        hdr.groups_size_mask = groups_size_mask_[Index];
+
+        auto* map = new map_t(map_t::create(
+            segments_[Index]->table_buffer(),
+            groups_size_index_[Index],
+            groups_size_mask_[Index],
+            outpoint_hash{},
+            outpoint_equal{}));
+
+        containers_[Index] = map;
+    }
 
     current_versions_[Index] = version;
 }
@@ -173,10 +209,23 @@ void database_impl::open_or_create_container(size_t version) {
 template<size_t Index>
 void database_impl::close_container() {
     if (segments_[Index]) {
+        if (containers_[Index]) {
+            // Save scalar state to the file header
+            auto& map = container<Index>();
+            auto& hdr = segments_[Index]->header();
+            hdr.entry_count = map.size();
+            hdr.max_load = map.get_max_load();
+            hdr.groups_size_index = map.get_groups_size_index();
+            hdr.groups_size_mask = map.get_groups_size_mask();
+
+            // No-op destructor — data stays in the mmap'd file
+            delete static_cast<utxo_map<container_sizes[Index]>*>(containers_[Index]);
+            containers_[Index] = nullptr;
+        }
+
         save_metadata_to_disk(Index, current_versions_[Index]);
         segments_[Index]->flush();
         segments_[Index].reset();
-        containers_[Index] = nullptr;
     }
 }
 
@@ -196,9 +245,9 @@ void database_impl::new_version() {
 }
 
 template<size_t Index>
-std::unique_ptr<bip::managed_mapped_file> database_impl::open_container_file(size_t version) {
+std::unique_ptr<mapped_segment> database_impl::open_container_file(size_t version) {
     auto file_name = fmt::format(data_file_format, db_path_.string(), Index, version);
-    return std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+    return std::make_unique<mapped_segment>(file_name, open_only);
 }
 
 // =============================================================================
@@ -209,63 +258,27 @@ template<size_t Index>
 bool database_impl::can_insert_safely() const {
     auto const& map = container<Index>();
 
-    // Check load factor
-    if (map.bucket_count() > 0) {
-        float next_load = float(map.size() + 1) / float(map.bucket_count());
-        if (next_load >= map.max_load_factor() * 0.95f) {
-            return false;
-        }
-    }
-
-    // Check available memory
-    if (segments_[Index]) {
-        try {
-            size_t free_memory = segments_[Index]->get_free_memory();
-            size_t entry_size = sizeof(typename utxo_map<container_sizes[Index]>::value_type);
-            size_t buffer_size = entry_size * 10; // Safety buffer
-
-            return free_memory > buffer_size;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    return true;
+    // Only load factor check — the table has a fixed capacity in the mmap'd file.
+    // When size >= max_load, the table is full.
+    return map.size() + 1 <= map.get_max_load();
 }
 
 template<size_t Index>
-bool database_impl::can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map,
-                                              bip::managed_mapped_file const& segment) const {
-    if (map.bucket_count() > 0) {
-        float next_load = float(map.size() + 1) / float(map.bucket_count());
-        if (next_load >= map.max_load_factor() * 0.95f) {
-            return false;
-        }
-    }
-
-    try {
-        size_t free_memory = segment.get_free_memory();
-        size_t entry_size = sizeof(typename utxo_map<container_sizes[Index]>::value_type);
-        size_t buffer_size = entry_size * 100; // Larger buffer for compaction
-
-        return free_memory > buffer_size;
-    } catch (...) {
-        return false;
-    }
+bool database_impl::can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map) const {
+    return map.size() + 1 <= map.get_max_load();
 }
 
 template<size_t Index>
 bool database_impl::should_rotate() const {
-    auto const& map = container<Index>();
-    if (map.bucket_count() == 0) return false;
     return !can_insert_safely<Index>();
 }
 
 template<size_t Index>
 float database_impl::next_load_factor() const {
     auto const& map = container<Index>();
-    if (map.bucket_count() == 0) return 0.0f;
-    return float(map.size() + 1) / float(map.bucket_count());
+    auto cap = map.capacity();
+    if (cap == 0) return 0.0f;
+    return float(map.size() + 1) / float(cap);
 }
 
 // =============================================================================
@@ -323,15 +336,15 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
     // Initialize file cache
     file_cache_ = std::make_unique<file_cache>(std::string(path));
 
-    // Find optimal bucket counts for each container
+    // Calculate optimal groups for each container (pure math, no temp files)
     static_assert(container_count == 4);
-    auto path_str = db_path_.string();
-    min_buckets_ok_[0] = find_optimal_buckets<0>(path_str, active_file_sizes_[0], 7864304);
-    min_buckets_ok_[1] = find_optimal_buckets<1>(path_str, active_file_sizes_[1], 7864304);
-    min_buckets_ok_[2] = find_optimal_buckets<2>(path_str, active_file_sizes_[2], 7864304);
-    min_buckets_ok_[3] = find_optimal_buckets<3>(path_str, active_file_sizes_[3], 7864304);
+    find_optimal_groups<0>(active_file_sizes_[0]);
+    find_optimal_groups<1>(active_file_sizes_[1]);
+    find_optimal_groups<2>(active_file_sizes_[2]);
+    find_optimal_groups<3>(active_file_sizes_[3]);
 
     // Initialize containers
+    entries_count_ = 0;
     for_each_index<container_count>([&](auto I) {
         size_t latest_version = find_latest_version_from_files(I);
         open_or_create_container<I>(latest_version);
@@ -358,8 +371,6 @@ size_t database_impl::size() const {
 // =============================================================================
 
 bool database_impl::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
-    // log::debug("insert called at height {}", height);
-
     size_t const index = get_index_from_size(value.size());
     if (index >= container_count) {
         log::error("insert: value too large ({} bytes) for any container (max {}). height={}, outpoint={}",
@@ -376,7 +387,7 @@ template<size_t Index>
 bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height) {
     // Check if rotation needed
     if (!can_insert_safely<Index>()) {
-        log::debug("Rotating container {} due to safety constraints", Index);
+        log::debug("Rotating container {} (table full)", Index);
         new_version<Index>();
     }
 
@@ -385,44 +396,25 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
     val.block_height = height;
     val.set_data(value);
 
-    size_t max_retries = 3;
-    while (max_retries > 0) {
-        try {
-            auto& map = container<Index>();
-            [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
+    auto& map = container<Index>();
 
-            auto [it, inserted] = map.emplace(key, val);
-            if ( ! inserted) {
-                log::warn("insert: duplicate key at height {}, outpoint={}, container={}",
-                    height, outpoint_to_string(key), Index);
-            }
-            if (inserted) {
-                ++entries_count_;
+    auto [it, inserted] = map.emplace(key, val);
+    if (!inserted) {
+        log::warn("insert: duplicate key at height {}, outpoint={}, container={}",
+            height, outpoint_to_string(key), Index);
+    }
+    if (inserted) {
+        ++entries_count_;
 
 #ifdef UTXOZ_STATISTICS_ENABLED
-                // Update statistics
-                ++container_stats_[Index].total_inserts;
-                ++container_stats_[Index].current_size;
-                ++container_stats_[Index].value_size_distribution[value.size()];
-
-                if (map.bucket_count() != bucket_count_before) {
-                    ++container_stats_[Index].rehash_count;
-                }
+        ++container_stats_[Index].total_inserts;
+        ++container_stats_[Index].current_size;
+        ++container_stats_[Index].value_size_distribution[value.size()];
 #endif
 
-                update_metadata_on_insert(Index, current_versions_[Index], key, height);
-            }
-            return inserted;
-
-        } catch (boost::interprocess::bad_alloc const& e) {
-            log::error("Error inserting into container {}: {}", Index, e.what());
-            new_version<Index>();
-        }
-        --max_retries;
+        update_metadata_on_insert(Index, current_versions_[Index], key, height);
     }
-
-    log::error("Failed to insert after 3 retries");
-    throw boost::interprocess::bad_alloc();
+    return inserted;
 }
 
 // =============================================================================
@@ -911,68 +903,92 @@ void database_impl::compact_container() {
     size_t files_deleted = 0;
     size_t entries_moved = 0;
 
+    // Save active entry count before closing — entries_count_ already includes it.
+    // We'll subtract it before reopening to avoid double-counting.
+    size_t old_active_count = 0;
+    if (containers_[Index]) {
+        old_active_count = container<Index>().size();
+    }
+
     close_container<Index>();
+    file_cache_->clear();
 
     size_t total_versions = count_versions_for_container(Index);
     if (total_versions <= 1) {
         log::trace("Container {} has {} files, no compaction needed", Index, total_versions);
+        entries_count_ -= old_active_count;
         open_or_create_container<Index>(total_versions > 0 ? total_versions - 1 : 0);
         return;
     }
 
+    // Helper to save map state to its segment header
+    auto save_map_state = [](mapped_segment& seg, auto const& map) {
+        auto& h = seg.header();
+        h.entry_count = map.size();
+        h.max_load = map.get_max_load();
+    };
+
+    // Helper to attach a map from a segment
+    using map_t = utxo_map<container_sizes[Index]>;
+    auto attach_map = [](mapped_segment& seg) {
+        auto& h = seg.header();
+        return std::make_unique<map_t>(map_t::attach(
+            seg.table_buffer(),
+            h.groups_size_index, h.groups_size_mask,
+            h.entry_count, h.max_load,
+            outpoint_hash{}, outpoint_equal{}));
+    };
+
+    // Open target and source segments, attach maps
     size_t target_idx = 0;
     size_t source_idx = 1;
 
     auto target_segment = open_container_file<Index>(target_idx);
     auto source_segment = open_container_file<Index>(source_idx);
 
-    auto* target_map = target_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
-    auto* source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
+    auto target_map = attach_map(*target_segment);
+    auto source_map = attach_map(*source_segment);
 
     while (source_idx < total_versions) {
         auto it = source_map->begin();
 
         while (it != source_map->end()) {
-            if (!can_insert_safely_in_map<Index>(*target_map, *target_segment)) {
+            if (!can_insert_safely_in_map<Index>(*target_map)) {
                 log::trace("Target file {} is full, rotating...", target_idx);
 
+                // Save target state and release — access header through
+                // the segment directly (not a cached reference).
+                save_map_state(*target_segment, *target_map);
+                target_map.reset();
+                target_segment->flush();
                 target_segment.reset();
+
                 target_idx = source_idx;
                 target_segment = std::move(source_segment);
-                target_map = source_map;
+                target_map = std::move(source_map);
 
                 ++source_idx;
                 if (source_idx >= total_versions) break;
 
                 source_segment = open_container_file<Index>(source_idx);
-                source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
+                source_map = attach_map(*source_segment);
                 break;
             }
 
             auto key = it->first;
             auto value = it->second;
 
-            try {
-                target_map->emplace(key, value);
-                it = source_map->erase(it);
-                ++entries_moved;
-            } catch (boost::interprocess::bad_alloc const&) {
-                target_segment.reset();
-                target_idx = source_idx;
-                target_segment = std::move(source_segment);
-                target_map = source_map;
-
-                ++source_idx;
-                if (source_idx >= total_versions) break;
-
-                source_segment = open_container_file<Index>(source_idx);
-                source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
-                it = source_map->begin();
-            }
+            target_map->emplace(key, value);
+            it = source_map->erase(it);
+            ++entries_moved;
         }
 
         if (source_map && source_map->empty()) {
+            // Save source state, release, and delete file
+            save_map_state(*source_segment, *source_map);
+            source_map.reset();
             source_segment.reset();
+
             auto source_path = fmt::format(data_file_format, db_path_.string(), Index, source_idx);
             fs::remove(source_path);
             ++files_deleted;
@@ -987,15 +1003,28 @@ void database_impl::compact_container() {
 
             if (source_idx < total_versions) {
                 source_segment = open_container_file<Index>(source_idx);
-                source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
+                source_map = attach_map(*source_segment);
             }
         }
     }
 
+    // Save and release remaining segments
+    if (target_map && target_segment) {
+        save_map_state(*target_segment, *target_map);
+        target_map.reset();
+        target_segment->flush();
+    }
     target_segment.reset();
+
+    if (source_map && source_segment) {
+        save_map_state(*source_segment, *source_map);
+        source_map.reset();
+        source_segment->flush();
+    }
     source_segment.reset();
 
     current_versions_[Index] = total_versions > 0 ? total_versions - 1 : 0;
+    entries_count_ -= old_active_count;
     open_or_create_container<Index>(current_versions_[Index]);
 
     log::debug("Compaction complete for container {}: {} files deleted, {} entries moved",
@@ -1020,21 +1049,20 @@ void database_impl::update_fragmentation_stats() {
 #ifdef UTXOZ_STATISTICS_ENABLED
     for_each_index<container_count>([&](auto I) {
         if (segments_[I]) {
-            try {
-                size_t total_size = active_file_sizes_[I];
-                size_t free_memory = segments_[I]->get_free_memory();
-                size_t used_memory = total_size - free_memory;
+            auto const& map = container<I>();
+            size_t total_size = active_file_sizes_[I];
+            size_t table_buf_size = segments_[I]->table_buffer_size();
+            size_t used_entries = map.size();
+            size_t capacity = map.capacity();
 
-                fragmentation_stats_.fill_ratios[I] = double(used_memory) / double(total_size);
+            fragmentation_stats_.fill_ratios[I] =
+                capacity > 0 ? double(used_entries) / double(capacity) : 0.0;
 
-                auto& map = container<I>();
-                size_t ideal_size = map.size() * sizeof(typename utxo_map<container_sizes[I]>::value_type);
-                fragmentation_stats_.wasted_space[I] =
-                    used_memory > ideal_size ? used_memory - ideal_size : 0;
-            } catch (...) {
-                fragmentation_stats_.fill_ratios[I] = 0.0;
-                fragmentation_stats_.wasted_space[I] = 0;
-            }
+            size_t ideal_size = used_entries * sizeof(typename utxo_map<container_sizes[I]>::value_type);
+            fragmentation_stats_.wasted_space[I] =
+                table_buf_size > ideal_size ? table_buf_size - ideal_size : 0;
+
+            (void)total_size;
         }
     });
 #endif

@@ -25,6 +25,7 @@
 
 #include "file_cache.hpp"
 #include "file_metadata.hpp"
+#include "mapped_segment.hpp"
 #include "utxo_value.hpp"
 
 namespace utxoz::detail {
@@ -121,15 +122,14 @@ private:
     void new_version();
 
     template<size_t Index>
-    std::unique_ptr<bip::managed_mapped_file> open_container_file(size_t version);
+    std::unique_ptr<mapped_segment> open_container_file(size_t version);
 
     // Safety checks
     template<size_t Index>
     bool can_insert_safely() const;
 
     template<size_t Index>
-    bool can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map,
-                                   bip::managed_mapped_file const& segment) const;
+    bool can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map) const;
 
     template<size_t Index>
     bool should_rotate() const;
@@ -141,9 +141,9 @@ private:
     template<size_t Index>
     void compact_container();
 
-    // Optimal buckets finder
+    // Optimal groups calculation (pure math, no temp files)
     template<size_t Index>
-    size_t find_optimal_buckets(std::string const& file_path, size_t file_size, size_t initial_buckets);
+    void find_optimal_groups(size_t file_size);
 
     // Utilities
     size_t get_index_from_size(size_t size) const;
@@ -166,10 +166,13 @@ private:
     // Member variables
     fs::path db_path_;
     std::array<size_t, container_count> active_file_sizes_ = file_sizes; // Can be changed for testing
-    std::array<std::unique_ptr<bip::managed_mapped_file>, container_count> segments_;
+    std::array<std::unique_ptr<mapped_segment>, container_count> segments_;
     std::array<void*, container_count> containers_{};
     std::array<size_t, container_count> current_versions_{};
-    std::array<size_t, container_count> min_buckets_ok_{};
+
+    // Optimal groups info (computed once per container size)
+    std::array<size_t, container_count> groups_size_index_{};
+    std::array<size_t, container_count> groups_size_mask_{};
 
     size_t entries_count_ = 0;
 
