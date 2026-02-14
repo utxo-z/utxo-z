@@ -14,6 +14,6 @@
 
 namespace utxoz {
 
-inline constexpr std::string_view version = "0.0.0-dev";
+inline constexpr std::string_view version = "0.1.0";
 
 } // namespace utxoz
