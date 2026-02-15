@@ -55,12 +55,16 @@ class UtxozConan(ConanFile):
     def config_options(self):
         if self.settings.os == "Windows":
             self.options.rm_safe("fPIC")
+        if self.settings.os == "Emscripten":
+            self.options.with_tests = False
+            self.options.with_benchmarks = False
 
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
         self.options["fmt/*"].header_only = True
         self.options["spdlog/*"].header_only = True
+        self.options["boost/*"].header_only = True
         self.options["boost/*"].without_cobalt = True
 
     def requirements(self):
@@ -111,7 +115,7 @@ class UtxozConan(ConanFile):
         self.cpp_info.libs = ["utxoz"]
         self.cpp_info.includedirs = ["include"]
 
-        self.cpp_info.requires = ["boost::headers", "boost::filesystem", "fmt::fmt"]
+        self.cpp_info.requires = ["boost::headers", "fmt::fmt"]
         if self.options.log == "spdlog":
             self.cpp_info.requires.append("spdlog::spdlog")
 

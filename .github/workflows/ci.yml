@@ -97,6 +97,54 @@ jobs:
         run: |
           ctest --preset ${{ matrix.build-preset }} --output-on-failure
 
+  build-wasm:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    name: 🌐 WebAssembly (Emscripten)
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan
+          conan --version
+
+      - name: 🔧 Setup Conan profiles
+        run: |
+          conan profile detect --force
+
+          cat > ~/.conan2/profiles/ems2 <<'EOF'
+          [settings]
+          arch=wasm
+          build_type=Release
+          compiler=clang
+          compiler.cppstd=23
+          compiler.libcxx=libc++
+          compiler.version=14
+          os=Emscripten
+
+          [tool_requires]
+          emsdk/3.1.73
+
+          [buildenv]
+          CC_FOR_BUILD=clang
+          CXX_FOR_BUILD=clang++
+          EOF
+
+      - name: 📦 Install dependencies
+        run: |
+          conan install . -of build --version=${{ needs.setup.outputs.build-version }} --build=missing -pr ems2
+
+      - name: ⚙️ Configure CMake
+        run: |
+          cmake --preset conan-release
+
+      - name: 🔨 Build
+        run: |
+          cmake --build --preset conan-release --parallel
+
   benchmark:
     needs: [setup]
     runs-on: ubuntu-24.04
