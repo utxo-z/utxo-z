@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771171903259,
+  "lastUpdate": 1771172335239,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -1051,6 +1051,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (128B)",
             "value": 68.72,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "87fc4a3c454aa90657fa2e72bdae911a113e31af",
+          "message": "feat: Add sanitizer support (ASAN, UBSAN, TSAN) (#17)\n\nAdd build-time sanitizer configuration via CMake + Conan:\n- UTXOZ_SANITIZER cache variable in CMakeLists.txt\n- sanitizer option in conanfile.py (address, undefined, thread, or combined)\n- ASAN+UBSAN CI job (Linux GCC 15, Debug build)\n\nUsage: conan install . -o sanitizer=address,undefined -s build_type=Debug",
+          "timestamp": "2026-02-15T17:16:28+01:00",
+          "tree_id": "12c3eaa9296faac1f1a5daab848d2eec8cd3fea3",
+          "url": "https://github.com/utxo-z/utxo-z/commit/87fc4a3c454aa90657fa2e72bdae911a113e31af"
+        },
+        "date": 1771172334414,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert 44B value",
+            "value": 63.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 128B value",
+            "value": 63.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 512B value",
+            "value": 63.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 10KB value",
+            "value": 64.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (44B)",
+            "value": 34.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (mixed sizes)",
+            "value": 10.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 45.9,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 46.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (mixed sizes)",
+            "value": 28.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 35.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 46.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 46.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 45.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 34.82,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 42.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 45.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 44.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (44B)",
+            "value": 69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (44B)",
+            "value": 68.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (44B)",
+            "value": 69.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (44B)",
+            "value": 69.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (128B)",
+            "value": 69.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (128B)",
+            "value": 69.09,
             "unit": "ops/sec"
           }
         ]
