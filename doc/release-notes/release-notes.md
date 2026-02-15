@@ -1,3 +1,17 @@
+# version 0.2.0
+
+## What's Changed
+* docs: Add alpha disclaimer to README by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/16
+* fix: benchmark gh-pages switch failure by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/18
+* ci: Add sanitizer support (ASAN, UBSAN, TSAN) by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/17
+* fix: Disable boost cobalt module and add sanitizer build script by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/19
+* ci: Add WebAssembly (Emscripten) build by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/20
+* release: 0.2.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/22
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.1.0...v0.2.0
+
+
 # version 0.1.0
 
 ## What's Changed
