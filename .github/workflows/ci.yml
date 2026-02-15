@@ -126,6 +126,10 @@ jobs:
         run: |
           python3 scripts/convert_nanobench_json.py benchmark_results.json benchmark_results_gh.json
 
+      - name: 🧹 Clean generated files
+        run: |
+          git checkout -- .
+
       - name: 📊 Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
         with:
