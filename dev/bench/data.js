@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771106360242,
+  "lastUpdate": 1771171903259,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -912,6 +912,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (128B)",
             "value": 68.53,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "67c97fbac48255c1e6fcab4201ce61e5768996ac",
+          "message": "fix: Clean working tree before benchmark gh-pages switch (#18)\n\nconfigure_file generates version.hpp in the source tree during build.\nWhen the benchmark action tries to git switch to gh-pages, it fails\nbecause version.hpp is dirty. Clean generated files before that step.",
+          "timestamp": "2026-02-15T17:09:23+01:00",
+          "tree_id": "6bec1efc0cfb9daf82efd4a0876edb7df85236ea",
+          "url": "https://github.com/utxo-z/utxo-z/commit/67c97fbac48255c1e6fcab4201ce61e5768996ac"
+        },
+        "date": 1771171902810,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert 44B value",
+            "value": 63.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 128B value",
+            "value": 63.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 512B value",
+            "value": 63.9,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 10KB value",
+            "value": 63.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (44B)",
+            "value": 33.96,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (mixed sizes)",
+            "value": 9.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 45.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 45.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (mixed sizes)",
+            "value": 27.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 35.01,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 45.49,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 45.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 45.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 34.9,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 42.24,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 45.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 44.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (44B)",
+            "value": 68.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (44B)",
+            "value": 68.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (44B)",
+            "value": 68.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (44B)",
+            "value": 68.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (128B)",
+            "value": 68.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (128B)",
+            "value": 68.72,
             "unit": "ops/sec"
           }
         ]
