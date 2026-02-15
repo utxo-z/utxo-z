@@ -31,7 +31,8 @@ class UtxozConan(ConanFile):
         "with_examples": [True, False],
         "with_benchmarks": [True, False],
         "log": ["custom", "spdlog", "none"],
-        "statistics": [True, False]
+        "statistics": [True, False],
+        "sanitizer": ["none", "address", "undefined", "address,undefined", "thread"]
     }
     default_options = {
         "shared": False,
@@ -40,7 +41,8 @@ class UtxozConan(ConanFile):
         "with_examples": False,
         "with_benchmarks": False,
         "log": "custom",
-        "statistics": True
+        "statistics": True,
+        "sanitizer": "none"
     }
 
     # Sources are located in the same place as this recipe
@@ -90,6 +92,8 @@ class UtxozConan(ConanFile):
         tc.variables["UTXOZ_LOG_BACKEND"] = str(self.options.log)
         tc.variables["UTXOZ_STATISTICS_ENABLED"] = self.options.statistics
         tc.variables["UTXOZ_CONAN_BUILD"] = True
+        if str(self.options.sanitizer) != "none":
+            tc.variables["UTXOZ_SANITIZER"] = str(self.options.sanitizer)
         tc.generate()
 
     def build(self):

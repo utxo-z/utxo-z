@@ -120,6 +120,14 @@ else()
     )
 endif()
 
+# Sanitizers (e.g. -DUTXOZ_SANITIZER=address,undefined)
+set(UTXOZ_SANITIZER "" CACHE STRING "Sanitizer to enable (address, undefined, thread, address,undefined)")
+if(UTXOZ_SANITIZER)
+    message(STATUS "Sanitizer: ${UTXOZ_SANITIZER}")
+    target_compile_options(utxoz PUBLIC -fsanitize=${UTXOZ_SANITIZER} -fno-omit-frame-pointer)
+    target_link_options(utxoz PUBLIC -fsanitize=${UTXOZ_SANITIZER})
+endif()
+
 # Examples
 if(UTXOZ_BUILD_EXAMPLES)
     add_subdirectory(examples)
