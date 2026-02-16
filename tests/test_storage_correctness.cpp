@@ -1486,26 +1486,27 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
     utxoz::db db;
     db.configure_for_testing(dir.path, true);
 
-    // Insert values of different sizes into different containers
-    // Container 0: max 44 bytes
-    // Container 1: max 128 bytes
-    // Container 2: max 512 bytes
+    // Insert values of different sizes into different containers.
+    // Routing uses container_capacities (39, 123, 506, 10234), not container_sizes.
+    //
+    // Container 0 capacity: 39B  (container_size 44 - 5 overhead)
+    // Container 1 capacity: 123B (container_size 128 - 5 overhead)
 
-    // 10 entries of 30 bytes -> container 0 (44B), waste = (44-30)*10 = 140
+    // 10 entries of 30 bytes -> container 0 (cap 39), waste = (44-30)*10 = 140
     for (size_t i = 0; i < 10; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(30, static_cast<uint8_t>(i));
         REQUIRE(db.insert(key, val, 100));
     }
 
-    // 5 entries of 40 bytes -> container 0 (44B), waste = (44-40)*5 = 20
+    // 5 entries of 40 bytes -> container 1 (40 > cap 39), waste = (128-40)*5 = 440
     for (size_t i = 10; i < 15; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(40, static_cast<uint8_t>(i));
         REQUIRE(db.insert(key, val, 100));
     }
 
-    // 3 entries of 100 bytes -> container 1 (128B), waste = (128-100)*3 = 84
+    // 3 entries of 100 bytes -> container 1 (cap 123), waste = (128-100)*3 = 84
     for (size_t i = 15; i < 18; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(100, static_cast<uint8_t>(i));
@@ -1514,19 +1515,19 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
 
     auto report = db.get_sizing_report();
 
-    // Container 0 checks
+    // Container 0: only the 30-byte entries (10 entries)
     CHECK(report.containers[0].container_size == 44);
-    CHECK(report.containers[0].historical_inserts == 15);
-    CHECK(report.containers[0].current_entries == 15);
-    CHECK(report.containers[0].total_wasted_bytes == 160);  // 140 + 20
-    CHECK(report.containers[0].avg_waste_per_entry == Catch::Approx(160.0 / 15.0));
+    CHECK(report.containers[0].historical_inserts == 10);
+    CHECK(report.containers[0].current_entries == 10);
+    CHECK(report.containers[0].total_wasted_bytes == 140);
+    CHECK(report.containers[0].avg_waste_per_entry == Catch::Approx(14.0));
 
-    // Container 1 checks
+    // Container 1: 40-byte (5) + 100-byte (3) = 8 entries
     CHECK(report.containers[1].container_size == 128);
-    CHECK(report.containers[1].historical_inserts == 3);
-    CHECK(report.containers[1].current_entries == 3);
-    CHECK(report.containers[1].total_wasted_bytes == 84);
-    CHECK(report.containers[1].avg_waste_per_entry == Catch::Approx(28.0));
+    CHECK(report.containers[1].historical_inserts == 8);
+    CHECK(report.containers[1].current_entries == 8);
+    CHECK(report.containers[1].total_wasted_bytes == 524);  // 440 + 84
+    CHECK(report.containers[1].avg_waste_per_entry == Catch::Approx(65.5));
 
     // Container 2 and 3: no inserts
     CHECK(report.containers[2].historical_inserts == 0);
@@ -1539,11 +1540,11 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
     CHECK(report.global_value_size_histogram[100] == 3);
 
     // file_count should be at least 1 for all containers
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < utxoz::container_count; ++i) {
         CHECK(report.containers[i].file_count >= 1);
     }
 
-    // Erase some entries and verify deletes are tracked
+    // Erase some entries and verify deletes are tracked (keys 0-4 are 30B -> container 0)
     for (size_t i = 0; i < 5; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         (void)db.erase(key, 200);
@@ -1551,7 +1552,7 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
 
     auto report2 = db.get_sizing_report();
     CHECK(report2.containers[0].historical_deletes == 5);
-    CHECK(report2.containers[0].current_entries == 10);
+    CHECK(report2.containers[0].current_entries == 5);
 
     // print_sizing_report should not crash
     db.print_sizing_report();
@@ -1567,7 +1568,7 @@ TEST_CASE("Sizing report: empty database returns zeroed report", "[storage][sizi
 
     auto report = db.get_sizing_report();
 
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < utxoz::container_count; ++i) {
         CHECK(report.containers[i].container_size == utxoz::container_sizes[i]);
         CHECK(report.containers[i].historical_inserts == 0);
         CHECK(report.containers[i].current_entries == 0);
@@ -1584,7 +1585,7 @@ TEST_CASE("Sizing report: unconfigured database returns zeroed report", "[storag
     utxoz::db db;
     auto report = db.get_sizing_report();
 
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < utxoz::container_count; ++i) {
         CHECK(report.containers[i].historical_inserts == 0);
         CHECK(report.containers[i].current_entries == 0);
     }
