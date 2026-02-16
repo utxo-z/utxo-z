@@ -755,6 +755,8 @@ std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process
     deferred_stats_.failed_to_delete += failed_deletions.size();
 #endif
 
+    entries_count_ -= successful_deletions;
+
     log::debug("Deferred deletion complete: {} successful, {} failed",
               successful_deletions, failed_deletions.size());
 
@@ -783,6 +785,8 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
                     ++deferred_stats_.deletions_by_depth[depth];
                     search_stats_.add_record(it->height, 0, depth, cache_hit, true, 'e');
                     --container_stats_[Index].deferred_deletes;
+                    --container_stats_[Index].current_size;
+                    ++container_stats_[Index].total_deletes;
 #endif
 
                     it = deferred_deletions_.erase(it);
