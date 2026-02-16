@@ -13,6 +13,7 @@
 #include <utxoz/utils.hpp>
 
 #include <algorithm>
+#include <fstream>
 #include <numeric>
 #include <ranges>
 #include <set>
@@ -287,15 +288,46 @@ void database_impl::update_metadata_on_delete(size_t index, size_t version) {
 }
 
 void database_impl::save_metadata_to_disk(size_t index, size_t version) {
-    // TODO: Implement actual saving to disk
+    if (index >= file_metadata_.size() || version >= file_metadata_[index].size()) return;
+
+    auto const& meta = file_metadata_[index][version];
     auto metadata_file = fmt::format("{}/meta_{}_{:05}.dat", db_path_.string(), index, version);
-    (void)metadata_file;
+
+    std::ofstream ofs(metadata_file, std::ios::binary);
+    if ( ! ofs) {
+        log::warn("Failed to save metadata: {}", metadata_file);
+        return;
+    }
+
+    uint64_t entry_count = meta.entry_count;
+    ofs.write(reinterpret_cast<char const*>(&meta.min_block_height), sizeof(meta.min_block_height));
+    ofs.write(reinterpret_cast<char const*>(&meta.max_block_height), sizeof(meta.max_block_height));
+    ofs.write(reinterpret_cast<char const*>(meta.min_key.data()), meta.min_key.size());
+    ofs.write(reinterpret_cast<char const*>(meta.max_key.data()), meta.max_key.size());
+    ofs.write(reinterpret_cast<char const*>(&entry_count), sizeof(entry_count));
 }
 
 void database_impl::load_metadata_from_disk(size_t index, size_t version) {
-    // TODO: Implement actual loading from disk
     auto metadata_file = fmt::format("{}/meta_{}_{:05}.dat", db_path_.string(), index, version);
-    (void)metadata_file;
+
+    std::ifstream ifs(metadata_file, std::ios::binary);
+    if ( ! ifs) return;
+
+    if (file_metadata_[index].size() <= version) {
+        file_metadata_[index].resize(version + 1);
+    }
+
+    auto& meta = file_metadata_[index][version];
+    meta.container_index = index;
+    meta.version = version;
+
+    uint64_t entry_count = 0;
+    ifs.read(reinterpret_cast<char*>(&meta.min_block_height), sizeof(meta.min_block_height));
+    ifs.read(reinterpret_cast<char*>(&meta.max_block_height), sizeof(meta.max_block_height));
+    ifs.read(reinterpret_cast<char*>(meta.min_key.data()), meta.min_key.size());
+    ifs.read(reinterpret_cast<char*>(meta.max_key.data()), meta.max_key.size());
+    ifs.read(reinterpret_cast<char*>(&entry_count), sizeof(entry_count));
+    meta.entry_count = static_cast<size_t>(entry_count);
 }
 
 // =============================================================================

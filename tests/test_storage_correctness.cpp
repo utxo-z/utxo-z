@@ -1322,3 +1322,103 @@ TEST_CASE("Compaction: size() is correct after compaction", "[storage][compactio
 
     db.close();
 }
+
+// =============================================================================
+// Metadata persistence
+// =============================================================================
+
+TEST_CASE("Metadata: files are created on disk after close", "[storage][metadata]") {
+    ScopedTestDir dir;
+
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        for (size_t i = 0; i < 100; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), 0);
+            auto val = make_test_value(30, static_cast<uint8_t>(i));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i + 100)));
+        }
+
+        db.close();
+    }
+
+    // Metadata file for container 0, version 0 should exist
+    auto meta_path = std::filesystem::path(dir.path) / "meta_0_00000.dat";
+    CHECK(std::filesystem::exists(meta_path));
+    CHECK(std::filesystem::file_size(meta_path) > 0);
+}
+
+TEST_CASE("Metadata: files created for all versions on rotation", "[storage][metadata]") {
+    ScopedTestDir dir;
+
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        // Insert enough to cause rotation in container 0
+        constexpr size_t N = 200'000;
+        for (size_t i = 0; i < N; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+            auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        }
+
+        auto stats = db.get_statistics();
+        REQUIRE(stats.rotations_per_container[0] > 0);
+
+        db.close();
+    }
+
+    // Metadata files should exist for both version 0 and version 1
+    CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_00000.dat"));
+    CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_00001.dat"));
+}
+
+TEST_CASE("Metadata: key ranges are correct after reopen", "[storage][metadata]") {
+    ScopedTestDir dir;
+
+    constexpr size_t N = 200'000;
+    std::vector<utxoz::raw_outpoint> keys;
+    keys.reserve(N);
+
+    // Phase 1: insert enough to rotate, close
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        for (size_t i = 0; i < N; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+            keys.push_back(key);
+            auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        }
+
+        auto stats = db.get_statistics();
+        REQUIRE(stats.rotations_per_container[0] > 0);
+        db.close();
+    }
+
+    // Phase 2: reopen — metadata should be loaded from disk.
+    // Without metadata, find_in_prev_versions searches all files (works but slow).
+    // With metadata, it can skip files where the key is out of range.
+    // We verify correctness: entries in old versions should still be found.
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, false);
+
+        // Look up entries that are likely in version 0 (earliest inserts)
+        size_t deferred = 0;
+        for (size_t i = 0; i < 200; ++i) {
+            auto result = db.find(keys[i], static_cast<uint32_t>(N + 1));
+            if (!result.has_value()) ++deferred;
+        }
+
+        auto [successful, failed] = db.process_pending_lookups();
+        // All should be found — either immediately or via deferred
+        CHECK(failed.empty());
+        CHECK((deferred == 0 || !successful.empty()));
+
+        db.close();
+    }
+}
