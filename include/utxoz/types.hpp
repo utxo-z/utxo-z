@@ -79,6 +79,28 @@ using output_data_span = std::span<uint8_t const>;
 inline constexpr std::array<size_t, 4> container_sizes = {44, 128, 512, 10240};
 
 /**
+ * @brief Effective data capacity for a given container size
+ *
+ * Each utxo_value<Size> stores: block_height (4 bytes) + actual_size field + data.
+ * The actual_size field is uint8_t for Size <= 255, uint16_t otherwise.
+ */
+inline constexpr size_t data_capacity(size_t container_size) {
+    size_t size_field = container_size <= 255 ? 1 : 2;
+    return container_size - sizeof(uint32_t) - size_field;
+}
+
+/**
+ * @brief Pre-computed data capacities for each container
+ */
+inline constexpr auto container_capacities = [] {
+    std::array<size_t, container_sizes.size()> caps{};
+    for (size_t i = 0; i < container_sizes.size(); ++i) {
+        caps[i] = data_capacity(container_sizes[i]);
+    }
+    return caps;
+}();
+
+/**
  * @brief File sizes for each container type (production)
  */
 inline constexpr std::array<size_t, 4> file_sizes = {2_gib, 2_gib, 100_mib, 50_mib};

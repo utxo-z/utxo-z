@@ -83,7 +83,7 @@ utxo_map<container_sizes[Index]> const& database_impl::container() const {
 
 size_t database_impl::get_index_from_size(size_t size) const {
     for (size_t i = 0; i < container_count; ++i) {
-        if (size <= container_sizes[i]) return i;
+        if (size <= container_capacities[i]) return i;
     }
     return container_count;
 }
@@ -398,8 +398,8 @@ bool database_impl::insert(raw_outpoint const& key, output_data_span value, uint
 
     size_t const index = get_index_from_size(value.size());
     if (index >= container_count) {
-        log::error("insert: value too large ({} bytes) for any container (max {}). height={}, outpoint={}",
-            value.size(), container_sizes[container_count - 1], height, outpoint_to_string(key));
+        log::error("insert: value too large ({} bytes) for any container (max capacity {}). height={}, outpoint={}",
+            value.size(), container_capacities[container_count - 1], height, outpoint_to_string(key));
         throw std::out_of_range("Value size too large");
     }
 
