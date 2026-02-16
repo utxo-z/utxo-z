@@ -1377,6 +1377,106 @@ TEST_CASE("Metadata: files created for all versions on rotation", "[storage][met
 }
 
 // =============================================================================
+// No-truncation: values up to container_sizes[i] must round-trip exactly
+// =============================================================================
+
+TEST_CASE("No truncation: P2PKH-sized values (43 bytes) survive round-trip", "[storage][truncation]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // 43 bytes is the most common UTXO value size on BCH (P2PKH outputs).
+    // It should fit in container 0 (max 44 bytes) without any truncation.
+    auto key = make_test_key(1, 0);
+    auto val = make_test_value(43, 0xAB);
+    REQUIRE(db.insert(key, val, 100));
+
+    auto result = db.find(key, 200);
+    REQUIRE(result.has_value());
+    CHECK(result->size() == 43);
+    CHECK(*result == val);
+
+    db.close();
+}
+
+TEST_CASE("No truncation: P2SH-sized values (41 bytes) survive round-trip", "[storage][truncation]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // 41 bytes is the second most common size (P2SH outputs, 13.3% of chain).
+    auto key = make_test_key(1, 0);
+    auto val = make_test_value(41, 0xCD);
+    REQUIRE(db.insert(key, val, 100));
+
+    auto result = db.find(key, 200);
+    REQUIRE(result.has_value());
+    CHECK(result->size() == 41);
+    CHECK(*result == val);
+
+    db.close();
+}
+
+TEST_CASE("No truncation: max value for each container survives round-trip", "[storage][truncation]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // For each container, insert a value at exactly its data capacity.
+    // This is the maximum value size that should fit without truncation.
+    for (size_t i = 0; i < utxoz::container_sizes.size(); ++i) {
+        size_t val_size = utxoz::container_capacities[i];
+        auto key = make_test_key(static_cast<uint32_t>(i + 1), 0);
+        auto val = make_test_value(val_size, static_cast<uint8_t>(i * 37));
+
+        INFO("container " << i << ", capacity = " << val_size);
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+
+        auto result = db.find(key, 200);
+        REQUIRE(result.has_value());
+        REQUIRE(result->size() == val_size);
+        CHECK(*result == val);
+    }
+
+    db.close();
+}
+
+TEST_CASE("No truncation: boundary values at each container capacity", "[storage][truncation]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Test sizes around each container's data capacity boundary.
+    // Values at capacity should fit exactly; values below should have room to spare.
+    std::vector<size_t> boundary_sizes;
+    for (size_t cap : utxoz::container_capacities) {
+        for (size_t delta = 0; delta <= 5 && delta < cap; ++delta) {
+            boundary_sizes.push_back(cap - delta);
+        }
+    }
+
+    for (size_t i = 0; i < boundary_sizes.size(); ++i) {
+        size_t val_size = boundary_sizes[i];
+        auto key = make_test_key(static_cast<uint32_t>(i + 1), 0);
+        auto val = make_test_value(val_size, static_cast<uint8_t>(i * 13));
+
+        INFO("value size = " << val_size);
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+
+        auto result = db.find(key, 200);
+        REQUIRE(result.has_value());
+        REQUIRE(result->size() == val_size);
+        CHECK(*result == val);
+    }
+
+    db.close();
+}
+
+// =============================================================================
 // Sizing report
 // =============================================================================
 
