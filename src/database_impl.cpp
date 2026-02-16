@@ -1152,6 +1152,87 @@ void database_impl::print_statistics() {
     log::info("================================");
 }
 
+sizing_report database_impl::get_sizing_report() const {
+    sizing_report report{};
+
+    for (size_t i = 0; i < container_count; ++i) {
+        auto& info = report.containers[i];
+        info.container_size = container_sizes[i];
+        info.file_size_setting = active_file_sizes_[i];
+        info.file_count = current_versions_[i] + 1;
+        info.current_entries = container_stats_[i].current_size;
+        info.historical_inserts = container_stats_[i].total_inserts;
+        info.historical_deletes = container_stats_[i].total_deletes;
+        info.total_wasted_bytes = 0;
+
+        for (auto const& [value_size, count] : container_stats_[i].value_size_distribution) {
+            if (container_sizes[i] > value_size) {
+                info.total_wasted_bytes += (container_sizes[i] - value_size) * count;
+            }
+            report.global_value_size_histogram[value_size] += count;
+        }
+
+        info.avg_waste_per_entry = info.historical_inserts > 0
+            ? double(info.total_wasted_bytes) / double(info.historical_inserts)
+            : 0.0;
+    }
+
+    return report;
+}
+
+void database_impl::print_sizing_report() const {
+    auto report = get_sizing_report();
+
+    log::info("=== UTXO-Z Sizing Report ===");
+    log::info("");
+
+    for (size_t i = 0; i < container_count; ++i) {
+        auto const& c = report.containers[i];
+        double file_size_gib = double(c.file_size_setting) / (1024.0 * 1024.0 * 1024.0);
+        double file_size_mib = double(c.file_size_setting) / (1024.0 * 1024.0);
+
+        if (file_size_gib >= 1.0) {
+            log::info("--- Container {} (max {} bytes, file size: {:.2f} GiB) ---",
+                      i, c.container_size, file_size_gib);
+        } else {
+            log::info("--- Container {} (max {} bytes, file size: {:.2f} MiB) ---",
+                      i, c.container_size, file_size_mib);
+        }
+
+        log::info("  Files: {}", c.file_count);
+        log::info("  Current entries: {:L}", c.current_entries);
+        log::info("  Historical inserts: {:L}", c.historical_inserts);
+        log::info("  Historical deletes: {:L}", c.historical_deletes);
+        log::info("  Wasted bytes: {:L} ({:.2f} bytes/entry avg)",
+                  c.total_wasted_bytes, c.avg_waste_per_entry);
+        log::info("");
+    }
+
+    // Build sorted histogram (by count descending)
+    std::vector<std::pair<size_t, size_t>> sorted_histogram(
+        report.global_value_size_histogram.begin(),
+        report.global_value_size_histogram.end());
+
+    std::ranges::sort(sorted_histogram, [](auto const& a, auto const& b) {
+        return a.second > b.second;
+    });
+
+    // Compute total for percentage
+    size_t total_count = 0;
+    for (auto const& [sz, cnt] : sorted_histogram) {
+        total_count += cnt;
+    }
+
+    log::info("--- Global Value Size Histogram ({} distinct sizes) ---", sorted_histogram.size());
+    for (auto const& [value_size, count] : sorted_histogram) {
+        double pct = total_count > 0 ? double(count) / double(total_count) * 100.0 : 0.0;
+        log::info("  {} bytes: {:L} ({:.1f}%)", value_size, count, pct);
+    }
+
+    log::info("");
+    log::info("=== End Sizing Report ===");
+}
+
 void database_impl::reset_all_statistics() {
     for (auto& cs : container_stats_) {
         cs = container_stats{};

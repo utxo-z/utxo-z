@@ -130,4 +130,26 @@ struct database_statistics {
     std::array<size_t, container_count> memory_usage_per_container{};
 };
 
+/**
+ * @brief Sizing analysis report for optimizing container and file sizes
+ *
+ * Generated from existing statistics data (no additional hot-path tracking).
+ * Call db::print_sizing_report() after a full chain sync to get the data
+ * needed for sizing decisions.
+ */
+struct sizing_report {
+    struct container_info {
+        size_t container_size;        ///< container_sizes[i] (e.g. 44, 128, 512, 10240)
+        size_t file_size_setting;     ///< Configured file size for this container
+        size_t file_count;            ///< Number of files (current_versions + 1)
+        size_t current_entries;       ///< Live entries now
+        size_t historical_inserts;    ///< Total inserts ever
+        size_t historical_deletes;    ///< Total deletes ever
+        size_t total_wasted_bytes;    ///< Sum of (container_size - value_size) for all inserts
+        double avg_waste_per_entry;   ///< total_wasted_bytes / historical_inserts (or 0)
+    };
+    std::array<container_info, container_count> containers;
+    boost::unordered_flat_map<size_t, size_t> global_value_size_histogram; ///< value_size -> count
+};
+
 } // namespace utxoz

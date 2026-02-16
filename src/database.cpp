@@ -103,6 +103,19 @@ void db::print_statistics() {
     }
 }
 
+sizing_report db::get_sizing_report() const {
+    if (!impl_) {
+        return {};
+    }
+    return impl_->get_sizing_report();
+}
+
+void db::print_sizing_report() const {
+    if (impl_) {
+        impl_->print_sizing_report();
+    }
+}
+
 void db::reset_all_statistics() {
     if (impl_) {
         impl_->reset_all_statistics();

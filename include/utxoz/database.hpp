@@ -158,6 +158,22 @@ struct db {
     void print_statistics();
 
     /**
+     * @brief Get sizing analysis report for optimizing container/file sizes
+     *
+     * Computes waste analysis and value size histogram from existing statistics.
+     * No additional hot-path tracking required (uses data from UTXOZ_STATISTICS_ENABLED).
+     */
+    [[nodiscard]]
+    sizing_report get_sizing_report() const;
+
+    /**
+     * @brief Print formatted sizing report to log
+     *
+     * Call after a full chain sync to get data for sizing decisions.
+     */
+    void print_sizing_report() const;
+
+    /**
      * @brief Reset all statistics counters
      */
     void reset_all_statistics();
