@@ -26,6 +26,7 @@
 #endif
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <fmt/format.h>
 
 #include <utxoz/database.hpp>
@@ -1374,6 +1375,126 @@ TEST_CASE("Metadata: files created for all versions on rotation", "[storage][met
     CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_00000.dat"));
     CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_00001.dat"));
 }
+
+// =============================================================================
+// Sizing report
+// =============================================================================
+
+TEST_CASE("Sizing report: histogram and waste calculations are correct", "[storage][sizing]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Insert values of different sizes into different containers
+    // Container 0: max 44 bytes
+    // Container 1: max 128 bytes
+    // Container 2: max 512 bytes
+
+    // 10 entries of 30 bytes -> container 0 (44B), waste = (44-30)*10 = 140
+    for (size_t i = 0; i < 10; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), 0);
+        auto val = make_test_value(30, static_cast<uint8_t>(i));
+        REQUIRE(db.insert(key, val, 100));
+    }
+
+    // 5 entries of 40 bytes -> container 0 (44B), waste = (44-40)*5 = 20
+    for (size_t i = 10; i < 15; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), 0);
+        auto val = make_test_value(40, static_cast<uint8_t>(i));
+        REQUIRE(db.insert(key, val, 100));
+    }
+
+    // 3 entries of 100 bytes -> container 1 (128B), waste = (128-100)*3 = 84
+    for (size_t i = 15; i < 18; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), 0);
+        auto val = make_test_value(100, static_cast<uint8_t>(i));
+        REQUIRE(db.insert(key, val, 100));
+    }
+
+    auto report = db.get_sizing_report();
+
+    // Container 0 checks
+    CHECK(report.containers[0].container_size == 44);
+    CHECK(report.containers[0].historical_inserts == 15);
+    CHECK(report.containers[0].current_entries == 15);
+    CHECK(report.containers[0].total_wasted_bytes == 160);  // 140 + 20
+    CHECK(report.containers[0].avg_waste_per_entry == Catch::Approx(160.0 / 15.0));
+
+    // Container 1 checks
+    CHECK(report.containers[1].container_size == 128);
+    CHECK(report.containers[1].historical_inserts == 3);
+    CHECK(report.containers[1].current_entries == 3);
+    CHECK(report.containers[1].total_wasted_bytes == 84);
+    CHECK(report.containers[1].avg_waste_per_entry == Catch::Approx(28.0));
+
+    // Container 2 and 3: no inserts
+    CHECK(report.containers[2].historical_inserts == 0);
+    CHECK(report.containers[3].historical_inserts == 0);
+
+    // Global histogram checks
+    CHECK(report.global_value_size_histogram.size() == 3);  // 30, 40, 100
+    CHECK(report.global_value_size_histogram[30] == 10);
+    CHECK(report.global_value_size_histogram[40] == 5);
+    CHECK(report.global_value_size_histogram[100] == 3);
+
+    // file_count should be at least 1 for all containers
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(report.containers[i].file_count >= 1);
+    }
+
+    // Erase some entries and verify deletes are tracked
+    for (size_t i = 0; i < 5; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), 0);
+        (void)db.erase(key, 200);
+    }
+
+    auto report2 = db.get_sizing_report();
+    CHECK(report2.containers[0].historical_deletes == 5);
+    CHECK(report2.containers[0].current_entries == 10);
+
+    // print_sizing_report should not crash
+    db.print_sizing_report();
+
+    db.close();
+}
+
+TEST_CASE("Sizing report: empty database returns zeroed report", "[storage][sizing]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    auto report = db.get_sizing_report();
+
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(report.containers[i].container_size == utxoz::container_sizes[i]);
+        CHECK(report.containers[i].historical_inserts == 0);
+        CHECK(report.containers[i].current_entries == 0);
+        CHECK(report.containers[i].total_wasted_bytes == 0);
+        CHECK(report.containers[i].avg_waste_per_entry == 0.0);
+    }
+
+    CHECK(report.global_value_size_histogram.empty());
+
+    db.close();
+}
+
+TEST_CASE("Sizing report: unconfigured database returns zeroed report", "[storage][sizing]") {
+    utxoz::db db;
+    auto report = db.get_sizing_report();
+
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(report.containers[i].historical_inserts == 0);
+        CHECK(report.containers[i].current_entries == 0);
+    }
+
+    CHECK(report.global_value_size_histogram.empty());
+}
+
+// =============================================================================
+// Metadata persistence
+// =============================================================================
 
 TEST_CASE("Metadata: key ranges are correct after reopen", "[storage][metadata]") {
     ScopedTestDir dir;

@@ -62,6 +62,8 @@ struct database_impl {
 
     database_statistics get_statistics();
     void print_statistics();
+    sizing_report get_sizing_report() const;
+    void print_sizing_report() const;
     void reset_all_statistics();
 
     search_stats const& get_search_stats() const;
