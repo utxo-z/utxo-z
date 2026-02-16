@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771261191655,
+  "lastUpdate": 1771262433465,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -2580,6 +2580,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (128B)",
             "value": 68.14,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7837bb1fbb81c470ebd52ba02e6ddc316a8fd2e3",
+          "message": "fix: Route values by data capacity, not container size (#27)\n\nget_index_from_size() compared value.size() against container_sizes[i],\nbut utxo_value<Size> has overhead (block_height + size field) that\nreduces the actual data capacity. This caused silent truncation of\nvalues near the container limit — including 82% of all UTXOs (P2PKH\nat 43 bytes truncated to 39 in the 44-byte container).\n\nAdd data_capacity() and container_capacities[] to compute effective\nstorage per container, and use them for routing decisions.",
+          "timestamp": "2026-02-16T18:18:12+01:00",
+          "tree_id": "c738bbaea6f7e214c322479ea333f05c4d4f28d6",
+          "url": "https://github.com/utxo-z/utxo-z/commit/7837bb1fbb81c470ebd52ba02e6ddc316a8fd2e3"
+        },
+        "date": 1771262432473,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert 44B value",
+            "value": 63.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 128B value",
+            "value": 64.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 512B value",
+            "value": 63.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 10KB value",
+            "value": 63.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (44B)",
+            "value": 33.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (mixed sizes)",
+            "value": 10.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 44.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 44.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (mixed sizes)",
+            "value": 27.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 34.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 45.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 45.22,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 45.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 34.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 41.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 45.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 43.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (44B)",
+            "value": 68.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (44B)",
+            "value": 66.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (44B)",
+            "value": 67.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (44B)",
+            "value": 68.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (128B)",
+            "value": 68.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (128B)",
+            "value": 68.09,
             "unit": "ops/sec"
           }
         ]
