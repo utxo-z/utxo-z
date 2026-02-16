@@ -30,6 +30,7 @@ class UtxozConan(ConanFile):
         "with_tests": [True, False],
         "with_examples": [True, False],
         "with_benchmarks": [True, False],
+        "with_large_benchmarks": [True, False],
         "log": ["custom", "spdlog", "none"],
         "statistics": [True, False],
         "sanitizer": ["none", "address", "undefined", "address,undefined", "thread"]
@@ -40,6 +41,7 @@ class UtxozConan(ConanFile):
         "with_tests": True,
         "with_examples": False,
         "with_benchmarks": False,
+        "with_large_benchmarks": True,
         "log": "custom",
         "statistics": True,
         "sanitizer": "none"
@@ -94,6 +96,7 @@ class UtxozConan(ConanFile):
         tc.variables["UTXOZ_BUILD_TESTS"] = self.options.with_tests
         tc.variables["UTXOZ_BUILD_EXAMPLES"] = self.options.with_examples
         tc.variables["UTXOZ_BUILD_BENCHMARKS"] = self.options.with_benchmarks
+        tc.variables["UTXOZ_BUILD_LARGE_BENCHMARKS"] = self.options.with_large_benchmarks
         tc.variables["UTXOZ_LOG_BACKEND"] = str(self.options.log)
         tc.variables["UTXOZ_STATISTICS_ENABLED"] = self.options.statistics
         tc.variables["UTXOZ_CONAN_BUILD"] = True

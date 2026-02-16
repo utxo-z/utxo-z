@@ -79,4 +79,7 @@ docs/latex/
 *.gcno
 coverage.info
 coverage/
+
 .boost-unordered-ref/
+test_storage_*/
+scripts/__pycache__/

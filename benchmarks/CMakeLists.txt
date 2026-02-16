@@ -23,3 +23,18 @@ target_link_libraries(utxoz_benchmarks
         utxoz::utxoz
         nanobench::nanobench
 )
+
+# Large-scale benchmarks (production file sizes, 2GB containers)
+if(UTXOZ_BUILD_LARGE_BENCHMARKS)
+    add_executable(utxoz_benchmarks_large
+        bench_large_main.cpp
+        bench_large_ibd.cpp
+        bench_large_ops.cpp
+    )
+
+    target_link_libraries(utxoz_benchmarks_large
+        PRIVATE
+            utxoz::utxoz
+            nanobench::nanobench
+    )
+endif()

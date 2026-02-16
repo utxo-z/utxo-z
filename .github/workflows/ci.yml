@@ -168,7 +168,7 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          conan install . -of build --version=${{ needs.setup.outputs.build-version }} -o with_benchmarks=True --build=missing -s build_type=Release -s compiler.cppstd=23
+          conan install . -of build --version=${{ needs.setup.outputs.build-version }} -o with_benchmarks=True -o with_large_benchmarks=False --build=missing -s build_type=Release -s compiler.cppstd=23
 
       - name: ⚙️ Configure CMake
         run: |
