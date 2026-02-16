@@ -30,6 +30,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(UTXOZ_BUILD_TESTS "Build tests" ON)
 option(UTXOZ_BUILD_EXAMPLES "Build examples" ON)
 option(UTXOZ_BUILD_BENCHMARKS "Build benchmarks" ON)
+option(UTXOZ_BUILD_LARGE_BENCHMARKS "Build large-scale benchmarks (production file sizes, requires significant disk/RAM)" ON)
 option(UTXOZ_BUILD_DOCS "Build documentation" OFF)
 option(UTXOZ_CONAN_BUILD "Building via Conan (skip cmake config generation)" OFF)
 
