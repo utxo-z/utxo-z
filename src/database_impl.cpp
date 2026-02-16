@@ -332,9 +332,13 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
     min_buckets_ok_[3] = find_optimal_buckets<3>(path_str, active_file_sizes_[3], 7864304);
 
     // Initialize containers
+    entries_count_ = 0;
     for_each_index<container_count>([&](auto I) {
         size_t latest_version = find_latest_version_from_files(I);
         open_or_create_container<I>(latest_version);
+
+        // Count existing entries in reopened containers
+        entries_count_ += container<I>().size();
 
         // Load metadata for all versions
         for (size_t v = 0; v <= latest_version; ++v) {
