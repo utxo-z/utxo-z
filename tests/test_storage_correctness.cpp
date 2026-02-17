@@ -1345,7 +1345,7 @@ TEST_CASE("Metadata: files are created on disk after close", "[storage][metadata
     }
 
     // Metadata file for container 0, version 0 should exist
-    auto meta_path = std::filesystem::path(dir.path) / "meta_0_00000.dat";
+    auto meta_path = std::filesystem::path(dir.path) / "meta_0_v00000.dat";
     CHECK(std::filesystem::exists(meta_path));
     CHECK(std::filesystem::file_size(meta_path) > 0);
 }
@@ -1372,8 +1372,83 @@ TEST_CASE("Metadata: files created for all versions on rotation", "[storage][met
     }
 
     // Metadata files should exist for both version 0 and version 1
-    CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_00000.dat"));
-    CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_00001.dat"));
+    CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_v00000.dat"));
+    CHECK(std::filesystem::exists(std::filesystem::path(dir.path) / "meta_0_v00001.dat"));
+}
+
+TEST_CASE("Metadata: rebuilt correctly after compaction", "[storage][metadata][compaction]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Insert enough 1000-byte values (-> container 4, 10KB) to cause 3+ rotations.
+    constexpr size_t N = 3400;
+    uint32_t min_height = 1000;
+    uint32_t max_height = min_height + N - 1;
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+        auto val = make_test_value(1000, static_cast<uint8_t>(i & 0xFF));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(min_height + i)));
+    }
+
+    auto stats = db.get_statistics();
+    size_t container_idx = utxoz::container_count - 1; // 10KB container
+    REQUIRE(stats.rotations_per_container[container_idx] >= 3);
+
+    // Count metadata files before compaction
+    size_t meta_before = 0;
+    for (size_t v = 0; v < 20; ++v) {
+        auto meta_path = std::filesystem::path(dir.path) /
+            fmt::format("meta_{}_v{:05}.dat", container_idx, v);
+        if (std::filesystem::exists(meta_path)) ++meta_before;
+    }
+    REQUIRE(meta_before >= 4); // at least 4 files (3 rotations + 1)
+
+    db.compact_all();
+
+    // Count data files and metadata files after compaction - they must match
+    size_t data_after = 0;
+    size_t meta_after = 0;
+    for (size_t v = 0; v < 20; ++v) {
+        auto data_path = std::filesystem::path(dir.path) /
+            fmt::format("cont_{}_v{:05}.dat", container_idx, v);
+        auto meta_path = std::filesystem::path(dir.path) /
+            fmt::format("meta_{}_v{:05}.dat", container_idx, v);
+        if (std::filesystem::exists(data_path)) ++data_after;
+        if (std::filesystem::exists(meta_path)) ++meta_after;
+    }
+
+    CHECK(data_after > 0);
+    CHECK(meta_after == data_after);
+
+    // No orphaned metadata files beyond the data file range
+    for (size_t v = data_after; v < 20; ++v) {
+        auto meta_path = std::filesystem::path(dir.path) /
+            fmt::format("meta_{}_v{:05}.dat", container_idx, v);
+        CHECK_FALSE(std::filesystem::exists(meta_path));
+    }
+
+    // Verify metadata is usable after close + reopen
+    db.close();
+
+    utxoz::db db2;
+    db2.configure_for_testing(dir.path, false);
+
+    // All entries should still be findable
+    size_t found = 0;
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+        auto result = db2.find(key, max_height + 1);
+        if (result.has_value()) ++found;
+    }
+
+    auto [successful, failed] = db2.process_pending_lookups();
+    CHECK(found + successful.size() == N);
+    CHECK(failed.empty());
+
+    db2.close();
 }
 
 // =============================================================================
