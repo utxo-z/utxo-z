@@ -131,6 +131,24 @@ struct database_statistics {
 };
 
 /**
+ * @brief Per-height-range statistics for tracking UTXO distribution over time
+ *
+ * Tracks inserts and deletes per container per height range (default 10,000 blocks).
+ * Call db::print_height_range_stats() after a full chain sync to see how the
+ * value size distribution evolves across the blockchain.
+ */
+struct height_range_stats {
+    static constexpr uint32_t range_size = 10000;
+
+    struct range_data {
+        std::array<size_t, container_count> inserts{};
+        std::array<size_t, container_count> deletes{};
+    };
+
+    boost::unordered_flat_map<uint32_t, range_data> ranges; ///< key = height / range_size
+};
+
+/**
  * @brief Sizing analysis report for optimizing container and file sizes
  *
  * Generated from existing statistics data (no additional hot-path tracking).

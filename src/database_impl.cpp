@@ -43,7 +43,8 @@ auto database_impl::make_index_variant(size_t index) {
         std::integral_constant<size_t, 0>,
         std::integral_constant<size_t, 1>,
         std::integral_constant<size_t, 2>,
-        std::integral_constant<size_t, 3>
+        std::integral_constant<size_t, 3>,
+        std::integral_constant<size_t, 4>
     >;
 
     switch (index) {
@@ -51,6 +52,7 @@ auto database_impl::make_index_variant(size_t index) {
         case 1: return variant_t{std::integral_constant<size_t, 1>{}};
         case 2: return variant_t{std::integral_constant<size_t, 2>{}};
         case 3: return variant_t{std::integral_constant<size_t, 3>{}};
+        case 4: return variant_t{std::integral_constant<size_t, 4>{}};
         default: throw std::out_of_range("Invalid container index");
     }
 }
@@ -356,12 +358,13 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
     file_cache_ = std::make_unique<file_cache>(std::string(path));
 
     // Find optimal bucket counts for each container
-    static_assert(container_count == 4);
+    static_assert(container_count == 5);
     auto path_str = db_path_.string();
     min_buckets_ok_[0] = find_optimal_buckets<0>(path_str, active_file_sizes_[0], 7864304);
     min_buckets_ok_[1] = find_optimal_buckets<1>(path_str, active_file_sizes_[1], 7864304);
     min_buckets_ok_[2] = find_optimal_buckets<2>(path_str, active_file_sizes_[2], 7864304);
     min_buckets_ok_[3] = find_optimal_buckets<3>(path_str, active_file_sizes_[3], 7864304);
+    min_buckets_ok_[4] = find_optimal_buckets<4>(path_str, active_file_sizes_[4], 7864304);
 
     // Initialize containers
     entries_count_ = 0;
@@ -440,6 +443,7 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
                 ++container_stats_[Index].total_inserts;
                 ++container_stats_[Index].current_size;
                 ++container_stats_[Index].value_size_distribution[value.size()];
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[Index];
 
                 if (map.bucket_count() != bucket_count_before) {
                     ++container_stats_[Index].rehash_count;
@@ -597,6 +601,7 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
 #ifdef UTXOZ_STATISTICS_ENABLED
                 --container_stats_[I].current_size;
                 ++container_stats_[I].total_deletes;
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[I];
 #endif
 
                 result = 1;
@@ -639,6 +644,7 @@ size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint
 #ifdef UTXOZ_STATISTICS_ENABLED
                         --container_stats_[Index].current_size;
                         ++container_stats_[Index].total_deletes;
+                        ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[Index];
 #endif
 
                         update_metadata_on_delete(Index, version);
@@ -656,6 +662,7 @@ size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint
             case 1: process_file(std::integral_constant<size_t, 1>{}); break;
             case 2: process_file(std::integral_constant<size_t, 2>{}); break;
             case 3: process_file(std::integral_constant<size_t, 3>{}); break;
+            case 4: process_file(std::integral_constant<size_t, 4>{}); break;
         }
 
         if (result > 0) break;
@@ -787,6 +794,7 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
                     --container_stats_[Index].deferred_deletes;
                     --container_stats_[Index].current_size;
                     ++container_stats_[Index].total_deletes;
+                    ++height_range_stats_.ranges[it->height / height_range_stats::range_size].deletes[Index];
 #endif
 
                     it = deferred_deletions_.erase(it);
@@ -809,6 +817,7 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
         case 1: return process_with_container(std::integral_constant<size_t, 1>{});
         case 2: return process_with_container(std::integral_constant<size_t, 2>{});
         case 3: return process_with_container(std::integral_constant<size_t, 3>{});
+        case 4: return process_with_container(std::integral_constant<size_t, 4>{});
         default: return 0;
     }
 }
@@ -937,6 +946,7 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
         case 1: process_with_container(std::integral_constant<size_t, 1>{}); break;
         case 2: process_with_container(std::integral_constant<size_t, 2>{}); break;
         case 3: process_with_container(std::integral_constant<size_t, 3>{}); break;
+        case 4: process_with_container(std::integral_constant<size_t, 4>{}); break;
     }
 }
 
@@ -1040,6 +1050,62 @@ void database_impl::compact_container() {
 
     log::debug("Compaction complete for container {}: {} files deleted, {} entries moved",
               Index, files_deleted, entries_moved);
+}
+
+void database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
+    for_each_index<container_count>([&](auto I) {
+        // Current version (active container)
+        auto const& map = container<I>();
+        for (auto const& [key, _] : map) {
+            cb(ctx, key);
+        }
+
+        // Previous versions
+        for (size_t v = 0; v < current_versions_[I]; ++v) {
+            auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+            if (!fs::exists(file_name)) continue;
+
+            try {
+                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
+                if (!map_ptr) continue;
+
+                for (auto const& [key, _] : *map_ptr) {
+                    cb(ctx, key);
+                }
+            } catch (std::exception const& e) {
+                log::error("for_each_key: error reading container {} v{}: {}", I.value, v, e.what());
+            }
+        }
+    });
+}
+
+void database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
+    for_each_index<container_count>([&](auto I) {
+        // Current version (active container)
+        auto const& map = container<I>();
+        for (auto const& [key, val] : map) {
+            cb(ctx, key, val.block_height, val.get_data());
+        }
+
+        // Previous versions
+        for (size_t v = 0; v < current_versions_[I]; ++v) {
+            auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+            if (!fs::exists(file_name)) continue;
+
+            try {
+                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
+                if (!map_ptr) continue;
+
+                for (auto const& [key, val] : *map_ptr) {
+                    cb(ctx, key, val.block_height, val.get_data());
+                }
+            } catch (std::exception const& e) {
+                log::error("for_each_entry: error reading container {} v{}: {}", I.value, v, e.what());
+            }
+        }
+    });
 }
 
 void database_impl::compact_all() {
@@ -1237,10 +1303,76 @@ void database_impl::print_sizing_report() const {
     log::info("=== End Sizing Report ===");
 }
 
+void database_impl::print_height_range_stats() const {
+    auto const& stats = height_range_stats_;
+    if (stats.ranges.empty()) {
+        log::info("No height range statistics collected.");
+        return;
+    }
+
+    std::vector<uint32_t> sorted_keys;
+    sorted_keys.reserve(stats.ranges.size());
+    for (auto const& [key, _] : stats.ranges) {
+        sorted_keys.push_back(key);
+    }
+    std::ranges::sort(sorted_keys);
+
+    log::info("=== UTXO-Z Height Range Statistics (per {:L} blocks) ===", height_range_stats::range_size);
+    log::info("");
+
+    // Header
+    std::string header = fmt::format("  {:>14}", "Range");
+    for (size_t i = 0; i < container_count; ++i) {
+        header += fmt::format(" | C{}({:>5})", i, container_sizes[i]);
+    }
+    header += fmt::format(" | {:>12}", "Total");
+    log::info("{}", header);
+
+    // Inserts
+    log::info("--- Inserts ---");
+    for (uint32_t key : sorted_keys) {
+        auto const& data = stats.ranges.at(key);
+        uint32_t start = key * height_range_stats::range_size;
+        uint32_t end = start + height_range_stats::range_size - 1;
+
+        std::string row = fmt::format("  {:>6}-{:<6}", start, end);
+        size_t total = 0;
+        for (size_t i = 0; i < container_count; ++i) {
+            row += fmt::format(" | {:>9L}", data.inserts[i]);
+            total += data.inserts[i];
+        }
+        row += fmt::format(" | {:>12L}", total);
+        log::info("{}", row);
+    }
+
+    log::info("");
+
+    // Deletes
+    log::info("--- Deletes ---");
+    for (uint32_t key : sorted_keys) {
+        auto const& data = stats.ranges.at(key);
+        uint32_t start = key * height_range_stats::range_size;
+        uint32_t end = start + height_range_stats::range_size - 1;
+
+        std::string row = fmt::format("  {:>6}-{:<6}", start, end);
+        size_t total = 0;
+        for (size_t i = 0; i < container_count; ++i) {
+            row += fmt::format(" | {:>9L}", data.deletes[i]);
+            total += data.deletes[i];
+        }
+        row += fmt::format(" | {:>12L}", total);
+        log::info("{}", row);
+    }
+
+    log::info("");
+    log::info("=== End Height Range Statistics ===");
+}
+
 void database_impl::reset_all_statistics() {
     for (auto& cs : container_stats_) {
         cs = container_stats{};
     }
+    height_range_stats_ = height_range_stats{};
     deferred_stats_ = deferred_stats{};
     not_found_stats_ = not_found_stats{};
     lifetime_stats_ = utxo_lifetime_stats{};
@@ -1272,30 +1404,36 @@ template void database_impl::open_or_create_container<0>(size_t);
 template void database_impl::open_or_create_container<1>(size_t);
 template void database_impl::open_or_create_container<2>(size_t);
 template void database_impl::open_or_create_container<3>(size_t);
+template void database_impl::open_or_create_container<4>(size_t);
 
 template void database_impl::close_container<0>();
 template void database_impl::close_container<1>();
 template void database_impl::close_container<2>();
 template void database_impl::close_container<3>();
+template void database_impl::close_container<4>();
 
 template void database_impl::new_version<0>();
 template void database_impl::new_version<1>();
 template void database_impl::new_version<2>();
 template void database_impl::new_version<3>();
+template void database_impl::new_version<4>();
 
 template void database_impl::compact_container<0>();
 template void database_impl::compact_container<1>();
 template void database_impl::compact_container<2>();
 template void database_impl::compact_container<3>();
+template void database_impl::compact_container<4>();
 
 template bool database_impl::insert_in_index<0>(raw_outpoint const&, output_data_span, uint32_t);
 template bool database_impl::insert_in_index<1>(raw_outpoint const&, output_data_span, uint32_t);
 template bool database_impl::insert_in_index<2>(raw_outpoint const&, output_data_span, uint32_t);
 template bool database_impl::insert_in_index<3>(raw_outpoint const&, output_data_span, uint32_t);
+template bool database_impl::insert_in_index<4>(raw_outpoint const&, output_data_span, uint32_t);
 
 template bytes_opt database_impl::find_in_prev_versions<0>(raw_outpoint const&, uint32_t);
 template bytes_opt database_impl::find_in_prev_versions<1>(raw_outpoint const&, uint32_t);
 template bytes_opt database_impl::find_in_prev_versions<2>(raw_outpoint const&, uint32_t);
 template bytes_opt database_impl::find_in_prev_versions<3>(raw_outpoint const&, uint32_t);
+template bytes_opt database_impl::find_in_prev_versions<4>(raw_outpoint const&, uint32_t);
 
 } // namespace utxoz::detail

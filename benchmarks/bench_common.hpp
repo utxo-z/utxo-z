@@ -47,6 +47,22 @@ std::vector<uint8_t> make_test_value(size_t size) {
     return value;
 }
 
+// BCH chain value size distribution (from full sync at block 930K).
+//   43B: 82.0% (P2PKH)
+//   41B: 13.3% (P2SH)
+//  123B:  3.4%
+//   89B:  0.9%
+//  other: 0.4%
+//
+// r should be in [0, 100). Returns a value size.
+inline
+size_t chain_value_size(uint32_t r) {
+    if (r < 82) return 43;   // P2PKH
+    if (r < 95) return 41;   // P2SH
+    if (r < 99) return 123;
+    return 89;
+}
+
 struct BenchFixture {
     BenchFixture() {
         auto ts = std::chrono::high_resolution_clock::now().time_since_epoch().count();
@@ -69,11 +85,31 @@ struct BenchFixture {
     BenchFixture(BenchFixture const&) = delete;
     BenchFixture& operator=(BenchFixture const&) = delete;
 
-    void populate(size_t n, size_t value_size = 50) {
+    void populate(size_t n, size_t value_size = 43) {
         auto value = make_test_value(value_size);
         for (size_t i = 0; i < n; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             (void)db.insert(key, value, 100);
+        }
+    }
+
+    // Populate with chain-realistic distribution
+    void populate_chain_mix(size_t n) {
+        auto val_43  = make_test_value(43);
+        auto val_41  = make_test_value(41);
+        auto val_123 = make_test_value(123);
+        auto val_89  = make_test_value(89);
+        for (size_t i = 0; i < n; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), 0);
+            auto sz = chain_value_size(static_cast<uint32_t>(i % 100));
+            utxoz::output_data_span value;
+            switch (sz) {
+                case 43:  value = val_43;  break;
+                case 41:  value = val_41;  break;
+                case 123: value = val_123; break;
+                default:  value = val_89;  break;
+            }
+            (void)db.insert(key, value, static_cast<uint32_t>(i / 100));
         }
     }
 

@@ -11,9 +11,7 @@ void register_storage_benchmarks(ankerl::nanobench::Bench& bench) {
     // Close + Reopen cost
     // =========================================================================
     // Measures the cost of serializing/deserializing the map on close/reopen.
-    // On master (managed_mapped_file), close is just msync + unmap and reopen
-    // is mmap + find named object. With serialization, close writes all entries
-    // sequentially and reopen reads + re-inserts.
+    // Uses realistic BCH value sizes (P2PKH 43B, 123B).
 
     struct CloseReopenCase {
         char const* name;
@@ -22,12 +20,12 @@ void register_storage_benchmarks(ankerl::nanobench::Bench& bench) {
     };
 
     CloseReopenCase const cr_cases[] = {
-        {"close+reopen 1K (44B)",     1'000,  30},
-        {"close+reopen 10K (44B)",   10'000,  30},
-        {"close+reopen 50K (44B)",   50'000,  30},
-        {"close+reopen 100K (44B)", 100'000,  30},
-        {"close+reopen 10K (128B)",  10'000, 100},
-        {"close+reopen 50K (128B)",  50'000, 100},
+        {"close+reopen 1K (P2PKH)",     1'000,  43},
+        {"close+reopen 10K (P2PKH)",   10'000,  43},
+        {"close+reopen 50K (P2PKH)",   50'000,  43},
+        {"close+reopen 100K (P2PKH)", 100'000,  43},
+        {"close+reopen 10K (123B)",    10'000, 123},
+        {"close+reopen 50K (123B)",    50'000, 123},
     };
 
     for (auto const& c : cr_cases) {

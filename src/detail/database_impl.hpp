@@ -59,11 +59,14 @@ struct database_impl {
     size_t deferred_lookups_size() const;
 
     void compact_all();
+    void for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
+    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
     database_statistics get_statistics();
     void print_statistics();
     sizing_report get_sizing_report() const;
     void print_sizing_report() const;
+    void print_height_range_stats() const;
     void reset_all_statistics();
 
     search_stats const& get_search_stats() const;
@@ -184,6 +187,7 @@ private:
     boost::unordered_flat_set<deferred_deletion_entry> deferred_deletions_;
     mutable boost::concurrent_flat_set<deferred_lookup_entry> deferred_lookups_;
     std::array<container_stats, container_count> container_stats_;
+    height_range_stats height_range_stats_;
     deferred_stats deferred_stats_;
     not_found_stats not_found_stats_;
     utxo_lifetime_stats lifetime_stats_;
