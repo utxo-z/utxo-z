@@ -1,3 +1,19 @@
+# version 0.3.0
+
+## What's Changed
+* feat: Add large-scale benchmarks with production file sizes by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/23
+* test: Add edge case and regression tests for storage correctness by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/24
+* fix: Implement metadata persistence (save/load to disk) by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/25
+* feat: Add sizing report for container/file size optimization by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/26
+* fix: Route values by data capacity, not container size by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/27
+* fix: Adjust sizing report test expectations after routing fix by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/28
+* fix: Update entries_count_ and container stats on deferred deletions by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/29
+* release: 0.3.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/31
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.2.0...v0.3.0
+
+
 # version 0.2.0
 
 ## What's Changed
