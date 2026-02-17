@@ -291,7 +291,7 @@ void database_impl::save_metadata_to_disk(size_t index, size_t version) {
     if (index >= file_metadata_.size() || version >= file_metadata_[index].size()) return;
 
     auto const& meta = file_metadata_[index][version];
-    auto metadata_file = fmt::format("{}/meta_{}_{:05}.dat", db_path_.string(), index, version);
+    auto metadata_file = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
 
     std::ofstream ofs(metadata_file, std::ios::binary);
     if ( ! ofs) {
@@ -308,7 +308,7 @@ void database_impl::save_metadata_to_disk(size_t index, size_t version) {
 }
 
 void database_impl::load_metadata_from_disk(size_t index, size_t version) {
-    auto metadata_file = fmt::format("{}/meta_{}_{:05}.dat", db_path_.string(), index, version);
+    auto metadata_file = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
 
     std::ifstream ifs(metadata_file, std::ios::binary);
     if ( ! ifs) return;
@@ -1034,6 +1034,46 @@ void database_impl::compact_container() {
 
     target_segment.reset();
     source_segment.reset();
+
+    // Rebuild metadata: delete all old meta files, scan remaining data files
+    {
+        // Delete all existing metadata files for this container
+        size_t old_meta_idx = 0;
+        while (true) {
+            auto meta_path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), Index, old_meta_idx);
+            if (!fs::exists(meta_path)) break;
+            fs::remove(meta_path);
+            ++old_meta_idx;
+        }
+
+        // Reset in-memory metadata
+        file_metadata_[Index].clear();
+        file_metadata_[Index].resize(total_versions);
+
+        // Scan each remaining data file to rebuild metadata
+        for (size_t v = 0; v < total_versions; ++v) {
+            auto& meta = file_metadata_[Index][v];
+            meta.container_index = Index;
+            meta.version = v;
+
+            auto file_name = fmt::format(data_file_format, db_path_.string(), Index, v);
+            if (!fs::exists(file_name)) continue;
+
+            try {
+                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto* map_ptr = segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
+                if (!map_ptr) continue;
+
+                for (auto const& [key, val] : *map_ptr) {
+                    meta.update_on_insert(key, val.block_height);
+                }
+            } catch (std::exception const& e) {
+                log::error("compact_container: error scanning container {} v{} for metadata: {}", Index, v, e.what());
+            }
+
+            save_metadata_to_disk(Index, v);
+        }
+    }
 
     current_versions_[Index] = total_versions > 0 ? total_versions - 1 : 0;
     open_or_create_container<Index>(current_versions_[Index]);
