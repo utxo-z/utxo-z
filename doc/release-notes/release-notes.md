@@ -1,3 +1,15 @@
+# version 0.4.0
+
+## What's Changed
+* fix: Rebuild metadata files after compaction by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/32
+* feat: 5-container layout, height range stats, key/entry iteration by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/30
+* docs: update README for 0.3.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/33
+* release: 0.4.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/34
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.3.0...v0.4.0
+
+
 # version 0.3.0
 
 ## What's Changed
