@@ -68,22 +68,18 @@ void run_ibd_simulation() {
     // =========================================================================
     // Parameters
     // =========================================================================
-    // Total entries to insert. 50M pushes container 0 past the 2GB rotation
-    // point (~20M entries per 2GB file for 44B container), creating 2-3
-    // generations and exercising the full code path.
     constexpr size_t total_inserts      = 50'000'000;
-    constexpr double erase_ratio        = 0.60;   // 60% of inserted keys will be erased
-    constexpr size_t deferred_interval  = 500'000; // process_pending_deletions every N inserts
+    constexpr double erase_ratio        = 0.60;
+    constexpr size_t deferred_interval  = 500'000;
     constexpr size_t progress_interval  = 5'000'000;
 
     // Pre-create value buffers (avoid per-insert allocation)
-    // Distribution mirrors real BCH:
-    //   ~85% P2PKH  (33B data → container 0, 44B)
-    //   ~10% P2SH   (80B data → container 1, 128B)
-    //    ~5% complex (200B data → container 2, 512B)
-    auto value_33  = bench::make_test_value(33);
-    auto value_80  = bench::make_test_value(80);
-    auto value_200 = bench::make_test_value(200);
+    // Distribution from real BCH chain sync at block 930K:
+    //   82% P2PKH (43B), 13% P2SH (41B), 4% 123B, 1% 89B
+    auto value_43  = bench::make_test_value(43);
+    auto value_41  = bench::make_test_value(41);
+    auto value_123 = bench::make_test_value(123);
+    auto value_89  = bench::make_test_value(89);
 
     std::mt19937 rng(42);
 
@@ -99,20 +95,19 @@ void run_ibd_simulation() {
     timer t;
 
     for (size_t i = 0; i < total_inserts; ++i) {
-        // Choose value size
+        // Choose value size from chain distribution
         uint32_t r = rng() % 100;
         utxoz::output_data_span value;
-        if (r < 85) value = value_33;
-        else if (r < 95) value = value_80;
-        else value = value_200;
+        if (r < 82) value = value_43;        // P2PKH
+        else if (r < 95) value = value_41;   // P2SH
+        else if (r < 99) value = value_123;
+        else value = value_89;
 
         auto key = bench::make_test_key(static_cast<uint32_t>(i), 0);
         (void)db.insert(key, value, static_cast<uint32_t>(i / 1000));
 
         // Remember some keys for erasing (uniformly sampled)
         if (keys_to_erase.size() < erase_count) {
-            // Deterministic sampling: keep entry if hash of index falls below threshold
-            // This gives us a uniform ~erase_ratio sample without branching on rng
             if ((i * 2654435761u) % 100 < static_cast<size_t>(erase_ratio * 100)) {
                 keys_to_erase.push_back(static_cast<uint32_t>(i));
             }
@@ -142,7 +137,6 @@ void run_ibd_simulation() {
         auto key = bench::make_test_key(keys_to_erase[i], 0);
         (void)db.erase(key, static_cast<uint32_t>(total_inserts / 1000 + i / 1000));
 
-        // Process deferred deletions periodically
         if ((i + 1) % deferred_interval == 0) {
             auto [processed, failed] = db.process_pending_deletions();
             deferred_total += processed;
@@ -174,7 +168,6 @@ void run_ibd_simulation() {
     // =========================================================================
     fmt::println("\n--- Phase 4: Find throughput ({:L} lookups) ---", 1'000'000UL);
 
-    // Mix of hits (keys that survived) and misses (erased keys)
     std::uniform_int_distribution<uint32_t> dist(0, total_inserts - 1);
     t.reset();
     size_t found = 0;

@@ -76,7 +76,7 @@ using output_data_span = std::span<uint8_t const>;
 /**
  * @brief Container sizes for different UTXO value sizes
  */
-inline constexpr std::array<size_t, 4> container_sizes = {44, 128, 512, 10240};
+inline constexpr std::array<size_t, 5> container_sizes = {48, 94, 128, 256, 10240};
 
 /**
  * @brief Effective data capacity for a given container size
@@ -103,12 +103,12 @@ inline constexpr auto container_capacities = [] {
 /**
  * @brief File sizes for each container type (production)
  */
-inline constexpr std::array<size_t, 4> file_sizes = {2_gib, 2_gib, 100_mib, 50_mib};
+inline constexpr std::array<size_t, 5> file_sizes = {2_gib, 500_mib, 1_gib, 50_mib, 10_mib};
 
 /**
  * @brief File sizes for each container type (testing - much smaller)
  */
-inline constexpr std::array<size_t, 4> test_file_sizes = {10_mib, 10_mib, 10_mib, 10_mib};
+inline constexpr std::array<size_t, 5> test_file_sizes = {10_mib, 10_mib, 10_mib, 10_mib, 10_mib};
 
 /**
  * @brief Number of container types

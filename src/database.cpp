@@ -84,6 +84,18 @@ size_t db::deferred_lookups_size() const {
     return impl_ ? impl_->deferred_lookups_size() : 0;
 }
 
+void db::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
+    if (impl_) {
+        impl_->for_each_key_impl(cb, ctx);
+    }
+}
+
+void db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
+    if (impl_) {
+        impl_->for_each_entry_impl(cb, ctx);
+    }
+}
+
 void db::compact_all() {
     if (impl_) {
         impl_->compact_all();
@@ -113,6 +125,12 @@ sizing_report db::get_sizing_report() const {
 void db::print_sizing_report() const {
     if (impl_) {
         impl_->print_sizing_report();
+    }
+}
+
+void db::print_height_range_stats() const {
+    if (impl_) {
+        impl_->print_height_range_stats();
     }
 }
 

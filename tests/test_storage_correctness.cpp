@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <numeric>
 #include <random>
+#include <map>
+#include <set>
 
 #ifdef _WIN32
 #include <process.h>
@@ -157,7 +159,7 @@ TEST_CASE("Reopen: multiple close/reopen cycles accumulate data", "[storage][per
     CHECK(all_keys.size() == cycles * entries_per_cycle);
 }
 
-TEST_CASE("Reopen: all four container sizes persist correctly", "[storage][persistence]") {
+TEST_CASE("Reopen: all container sizes persist correctly", "[storage][persistence]") {
     ScopedTestDir dir;
 
     struct TestEntry {
@@ -168,7 +170,8 @@ TEST_CASE("Reopen: all four container sizes persist correctly", "[storage][persi
     std::vector<TestEntry> entries;
 
     // Insert one entry per container size
-    std::array<size_t, 4> value_sizes = {30, 100, 400, 8000};
+    // Capacities: 43, 89, 123, 250, 10234
+    std::array<size_t, 5> value_sizes = {30, 50, 100, 200, 8000};
 
     {
         utxoz::db db;
@@ -227,7 +230,7 @@ TEST_CASE("Rotation: data accessible after file rotation", "[storage][rotation]"
     // Verify at least one rotation happened
     auto stats = db.get_statistics();
     bool any_rotation = false;
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < utxoz::container_count; ++i) {
         if (stats.rotations_per_container[i] > 0) {
             any_rotation = true;
             break;
@@ -290,7 +293,7 @@ TEST_CASE("Deferred erase: delete entries from previous versions", "[storage][ro
     // Confirm rotation
     auto stats = db.get_statistics();
     bool any_rotation = false;
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < utxoz::container_count; ++i) {
         if (stats.rotations_per_container[i] > 0) any_rotation = true;
     }
     REQUIRE(any_rotation);
@@ -461,7 +464,7 @@ TEST_CASE("Reopen after rotation: all versions survive close/reopen", "[storage]
 
         auto stats = db.get_statistics();
         bool any_rotation = false;
-        for (size_t i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < utxoz::container_count; ++i) {
             if (stats.rotations_per_container[i] > 0) any_rotation = true;
         }
         REQUIRE(any_rotation);
@@ -500,11 +503,12 @@ TEST_CASE("Value integrity: exact byte content preserved for all container sizes
 
     // Test with values that fit within each container's data capacity.
     // utxo_value<Size> overhead: sizeof(uint32_t) + sizeof(size_type<Size>)
-    //   Container 0 (44B):    max data = 39
-    //   Container 1 (128B):   max data = 123
-    //   Container 2 (512B):   max data = 506
-    //   Container 3 (10240B): max data = 10234
-    std::vector<size_t> test_sizes = {1, 20, 39, 50, 100, 123, 200, 400, 506, 1000, 5000, 10234};
+    //   Container 0 (48B):    max data = 43
+    //   Container 1 (94B):    max data = 89
+    //   Container 2 (128B):   max data = 123
+    //   Container 3 (256B):   max data = 250
+    //   Container 4 (10240B): max data = 10234
+    std::vector<size_t> test_sizes = {1, 20, 43, 50, 89, 100, 123, 200, 250, 1000, 5000, 10234};
 
     struct Entry {
         utxoz::raw_outpoint key;
@@ -638,7 +642,7 @@ TEST_CASE("Empty DB: close and reopen preserves empty state", "[storage][persist
 }
 
 TEST_CASE("Single entry: close and reopen per container size", "[storage][persistence][edge]") {
-    std::array<size_t, 4> value_sizes = {30, 100, 400, 8000};
+    std::array<size_t, 5> value_sizes = {30, 50, 100, 200, 8000};
 
     for (size_t vs : value_sizes) {
         ScopedTestDir dir;
@@ -899,9 +903,10 @@ TEST_CASE("High fill: close/reopen near rotation point per container", "[storage
 
     // Counts chosen to be well under rotation point but substantial
     Case const cases[] = {
-        {30,   50'000},  // 44B container
-        {100,  25'000},  // 128B container
-        {400,   5'000},  // 512B container
+        {30,   50'000},  // 48B container
+        {50,   25'000},  // 94B container
+        {100,  15'000},  // 128B container
+        {200,   5'000},  // 256B container
         {8000,    500},  // 10KB container
     };
 
@@ -970,7 +975,7 @@ TEST_CASE("Reopen after rotation: all entries verified across versions", "[stora
 
         auto stats = db.get_statistics();
         bool any_rotation = false;
-        for (size_t i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < utxoz::container_count; ++i) {
             if (stats.rotations_per_container[i] > 0) any_rotation = true;
         }
         REQUIRE(any_rotation);
@@ -1068,8 +1073,9 @@ TEST_CASE("Reopen: mixed container sizes with many entries each", "[storage][per
     };
     std::vector<EntryInfo> all_entries;
 
-    // Insert entries across all 4 containers
-    std::array<size_t, 4> value_sizes = {30, 100, 400, 8000};
+    // Insert entries across all 5 containers
+    // Capacities: 43, 89, 123, 250, 10234
+    std::array<size_t, 5> value_sizes = {30, 50, 100, 200, 8000};
     constexpr size_t entries_per_size = 50;
 
     {
@@ -1164,13 +1170,13 @@ TEST_CASE("Reopen: size() is consistent across close/reopen cycles", "[storage][
 // =============================================================================
 
 TEST_CASE("Compaction: survives 3+ rotations without crash", "[storage][compaction][regression]") {
-    // Container 3 (10KB values) is used for speed: ~840 entries per rotation.
+    // Container 4 (10KB values) is used for speed: ~840 entries per rotation.
     ScopedTestDir dir;
 
     utxoz::db db;
     db.configure_for_testing(dir.path, true);
 
-    // Insert enough 1000-byte values (-> container 3, 10KB) to cause 3+ rotations.
+    // Insert enough 1000-byte values (-> container 4, 10KB) to cause 3+ rotations.
     // ~840 entries per rotation, so ~3400 entries gives us 4 files.
     constexpr size_t N = 3400;
     std::vector<utxoz::raw_outpoint> keys;
@@ -1183,9 +1189,9 @@ TEST_CASE("Compaction: survives 3+ rotations without crash", "[storage][compacti
         REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
     }
 
-    // Verify we have multiple rotations (4+ files for container 3)
+    // Verify we have multiple rotations (4+ files for container 4, the 10KB container)
     auto stats = db.get_statistics();
-    REQUIRE(stats.rotations_per_container[3] >= 3);
+    REQUIRE(stats.rotations_per_container[4] >= 3);
 
     db.compact_all();
 
@@ -1223,7 +1229,7 @@ TEST_CASE("Compaction: data integrity with many versions + close/reopen", "[stor
         }
 
         auto stats = db.get_statistics();
-        REQUIRE(stats.rotations_per_container[3] >= 3);
+        REQUIRE(stats.rotations_per_container[4] >= 3);
 
         db.compact_all();
         db.close();
@@ -1462,7 +1468,7 @@ TEST_CASE("No truncation: P2PKH-sized values (43 bytes) survive round-trip", "[s
     db.configure_for_testing(dir.path, true);
 
     // 43 bytes is the most common UTXO value size on BCH (P2PKH outputs).
-    // It should fit in container 0 (max 44 bytes) without any truncation.
+    // It should fit in container 0 (max 48 bytes, capacity 43) without any truncation.
     auto key = make_test_key(1, 0);
     auto val = make_test_value(43, 0xAB);
     REQUIRE(db.insert(key, val, 100));
@@ -1562,26 +1568,27 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
     db.configure_for_testing(dir.path, true);
 
     // Insert values of different sizes into different containers.
-    // Routing uses container_capacities (39, 123, 506, 10234), not container_sizes.
+    // Routing uses container_capacities (43, 89, 123, 250, 10234), not container_sizes.
     //
-    // Container 0 capacity: 39B  (container_size 44 - 5 overhead)
-    // Container 1 capacity: 123B (container_size 128 - 5 overhead)
+    // Container 0 capacity: 43B  (container_size 48 - 5 overhead)
+    // Container 1 capacity: 89B  (container_size 94 - 5 overhead)
+    // Container 2 capacity: 123B (container_size 128 - 5 overhead)
 
-    // 10 entries of 30 bytes -> container 0 (cap 39), waste = (44-30)*10 = 140
+    // 10 entries of 30 bytes -> container 0 (cap 43), waste = (48-30)*10 = 180
     for (size_t i = 0; i < 10; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(30, static_cast<uint8_t>(i));
         REQUIRE(db.insert(key, val, 100));
     }
 
-    // 5 entries of 40 bytes -> container 1 (40 > cap 39), waste = (128-40)*5 = 440
+    // 5 entries of 50 bytes -> container 1 (50 > cap 43), waste = (94-50)*5 = 220
     for (size_t i = 10; i < 15; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
-        auto val = make_test_value(40, static_cast<uint8_t>(i));
+        auto val = make_test_value(50, static_cast<uint8_t>(i));
         REQUIRE(db.insert(key, val, 100));
     }
 
-    // 3 entries of 100 bytes -> container 1 (cap 123), waste = (128-100)*3 = 84
+    // 3 entries of 100 bytes -> container 2 (100 > cap 89), waste = (128-100)*3 = 84
     for (size_t i = 15; i < 18; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(100, static_cast<uint8_t>(i));
@@ -1591,27 +1598,34 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
     auto report = db.get_sizing_report();
 
     // Container 0: only the 30-byte entries (10 entries)
-    CHECK(report.containers[0].container_size == 44);
+    CHECK(report.containers[0].container_size == 48);
     CHECK(report.containers[0].historical_inserts == 10);
     CHECK(report.containers[0].current_entries == 10);
-    CHECK(report.containers[0].total_wasted_bytes == 140);
-    CHECK(report.containers[0].avg_waste_per_entry == Catch::Approx(14.0));
+    CHECK(report.containers[0].total_wasted_bytes == 180);
+    CHECK(report.containers[0].avg_waste_per_entry == Catch::Approx(18.0));
 
-    // Container 1: 40-byte (5) + 100-byte (3) = 8 entries
-    CHECK(report.containers[1].container_size == 128);
-    CHECK(report.containers[1].historical_inserts == 8);
-    CHECK(report.containers[1].current_entries == 8);
-    CHECK(report.containers[1].total_wasted_bytes == 524);  // 440 + 84
-    CHECK(report.containers[1].avg_waste_per_entry == Catch::Approx(65.5));
+    // Container 1: 50-byte entries (5 entries)
+    CHECK(report.containers[1].container_size == 94);
+    CHECK(report.containers[1].historical_inserts == 5);
+    CHECK(report.containers[1].current_entries == 5);
+    CHECK(report.containers[1].total_wasted_bytes == 220);
+    CHECK(report.containers[1].avg_waste_per_entry == Catch::Approx(44.0));
 
-    // Container 2 and 3: no inserts
-    CHECK(report.containers[2].historical_inserts == 0);
+    // Container 2: 100-byte entries (3 entries)
+    CHECK(report.containers[2].container_size == 128);
+    CHECK(report.containers[2].historical_inserts == 3);
+    CHECK(report.containers[2].current_entries == 3);
+    CHECK(report.containers[2].total_wasted_bytes == 84);
+    CHECK(report.containers[2].avg_waste_per_entry == Catch::Approx(28.0));
+
+    // Container 3 and 4: no inserts
     CHECK(report.containers[3].historical_inserts == 0);
+    CHECK(report.containers[4].historical_inserts == 0);
 
     // Global histogram checks
-    CHECK(report.global_value_size_histogram.size() == 3);  // 30, 40, 100
+    CHECK(report.global_value_size_histogram.size() == 3);  // 30, 50, 100
     CHECK(report.global_value_size_histogram[30] == 10);
-    CHECK(report.global_value_size_histogram[40] == 5);
+    CHECK(report.global_value_size_histogram[50] == 5);
     CHECK(report.global_value_size_histogram[100] == 3);
 
     // file_count should be at least 1 for all containers
@@ -1718,4 +1732,236 @@ TEST_CASE("Metadata: key ranges are correct after reopen", "[storage][metadata]"
 
         db.close();
     }
+}
+
+// =============================================================================
+// for_each_key
+// =============================================================================
+
+TEST_CASE("for_each_key: visits all keys exactly once", "[storage][iteration]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    constexpr size_t N = 500;
+    std::set<utxoz::raw_outpoint> inserted_keys;
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), 0);
+        auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i + 100)));
+        inserted_keys.insert(key);
+    }
+
+    std::set<utxoz::raw_outpoint> visited_keys;
+    db.for_each_key([&](utxoz::raw_outpoint const& key) {
+        visited_keys.insert(key);
+    });
+
+    CHECK(visited_keys.size() == N);
+    CHECK(visited_keys == inserted_keys);
+
+    db.close();
+}
+
+TEST_CASE("for_each_key: visits keys across all container sizes", "[storage][iteration]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Capacities: 43, 89, 123, 250, 10234
+    std::array<size_t, 5> value_sizes = {30, 50, 100, 200, 8000};
+    std::set<utxoz::raw_outpoint> inserted_keys;
+
+    uint32_t id = 0;
+    for (size_t vs : value_sizes) {
+        for (size_t i = 0; i < 10; ++i) {
+            auto key = make_test_key(id, 0);
+            auto val = make_test_value(vs, static_cast<uint8_t>(id));
+            REQUIRE(db.insert(key, val, id + 100));
+            inserted_keys.insert(key);
+            ++id;
+        }
+    }
+
+    std::set<utxoz::raw_outpoint> visited_keys;
+    db.for_each_key([&](utxoz::raw_outpoint const& key) {
+        visited_keys.insert(key);
+    });
+
+    CHECK(visited_keys.size() == 50);
+    CHECK(visited_keys == inserted_keys);
+
+    db.close();
+}
+
+TEST_CASE("for_each_key: visits keys in previous versions after rotation", "[storage][iteration][rotation]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // Insert enough to trigger rotation
+    constexpr size_t N = 200'000;
+    std::set<utxoz::raw_outpoint> inserted_keys;
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+        auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        inserted_keys.insert(key);
+    }
+
+    // Confirm rotation happened
+    auto stats = db.get_statistics();
+    bool any_rotation = false;
+    for (size_t i = 0; i < utxoz::container_count; ++i) {
+        if (stats.rotations_per_container[i] > 0) any_rotation = true;
+    }
+    REQUIRE(any_rotation);
+
+    // for_each_key should visit ALL keys, including those in old versions
+    size_t count = 0;
+    db.for_each_key([&](utxoz::raw_outpoint const& key) {
+        ++count;
+        CHECK(inserted_keys.contains(key));
+    });
+
+    CHECK(count == N);
+
+    db.close();
+}
+
+TEST_CASE("for_each_key: empty database visits nothing", "[storage][iteration][edge]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    size_t count = 0;
+    db.for_each_key([&](utxoz::raw_outpoint const&) {
+        ++count;
+    });
+
+    CHECK(count == 0);
+
+    db.close();
+}
+
+TEST_CASE("for_each_key: skips erased entries", "[storage][iteration]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    constexpr size_t N = 200;
+    std::vector<utxoz::raw_outpoint> keys;
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), 0);
+        keys.push_back(key);
+        auto val = make_test_value(30, static_cast<uint8_t>(i));
+        REQUIRE(db.insert(key, val, 100));
+    }
+
+    // Erase first half
+    for (size_t i = 0; i < N / 2; ++i) {
+        CHECK(db.erase(keys[i], 200) == 1);
+    }
+
+    size_t count = 0;
+    db.for_each_key([&](utxoz::raw_outpoint const&) {
+        ++count;
+    });
+
+    CHECK(count == N / 2);
+
+    db.close();
+}
+
+// =============================================================================
+// for_each_entry tests
+// =============================================================================
+
+TEST_CASE("for_each_entry: visits all entries with correct key, height and data", "[storage][iteration]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    constexpr size_t N = 500;
+    std::map<utxoz::raw_outpoint, std::pair<uint32_t, std::vector<uint8_t>>> expected;
+
+    for (size_t i = 0; i < N; ++i) {
+        auto key = make_test_key(static_cast<uint32_t>(i), 0);
+        auto val = make_test_value(30, static_cast<uint8_t>(i));
+        uint32_t height = static_cast<uint32_t>(1000 + i);
+        REQUIRE(db.insert(key, val, height));
+        expected[key] = {height, {val.begin(), val.end()}};
+    }
+
+    size_t count = 0;
+    db.for_each_entry([&](utxoz::raw_outpoint const& key, uint32_t height, std::span<uint8_t const> data) {
+        auto it = expected.find(key);
+        REQUIRE(it != expected.end());
+        CHECK(height == it->second.first);
+        CHECK(std::vector<uint8_t>(data.begin(), data.end()) == it->second.second);
+        ++count;
+    });
+
+    CHECK(count == N);
+
+    db.close();
+}
+
+TEST_CASE("for_each_entry: visits entries across all container sizes", "[storage][iteration]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    // One entry per container size
+    std::array<size_t, 5> value_sizes = {30, 50, 100, 200, 8000};
+    std::map<utxoz::raw_outpoint, std::pair<uint32_t, size_t>> expected; // key -> (height, data_size)
+
+    for (size_t c = 0; c < value_sizes.size(); ++c) {
+        for (size_t i = 0; i < 10; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(c * 100 + i), 0);
+            auto val = make_test_value(value_sizes[c], static_cast<uint8_t>(c));
+            uint32_t height = static_cast<uint32_t>(c * 1000 + i);
+            REQUIRE(db.insert(key, val, height));
+            expected[key] = {height, value_sizes[c]};
+        }
+    }
+
+    size_t count = 0;
+    db.for_each_entry([&](utxoz::raw_outpoint const& key, uint32_t height, std::span<uint8_t const> data) {
+        auto it = expected.find(key);
+        REQUIRE(it != expected.end());
+        CHECK(height == it->second.first);
+        CHECK(data.size() == it->second.second);
+        ++count;
+    });
+
+    CHECK(count == 50);
+
+    db.close();
+}
+
+TEST_CASE("for_each_entry: empty database visits nothing", "[storage][iteration][edge]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    size_t count = 0;
+    db.for_each_entry([&](utxoz::raw_outpoint const&, uint32_t, std::span<uint8_t const>) {
+        ++count;
+    });
+
+    CHECK(count == 0);
+
+    db.close();
 }

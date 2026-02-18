@@ -37,7 +37,7 @@ struct LargeBenchFixture {
     LargeBenchFixture(LargeBenchFixture const&) = delete;
     LargeBenchFixture& operator=(LargeBenchFixture const&) = delete;
 
-    void populate(size_t n, size_t value_size = 33) {
+    void populate(size_t n, size_t value_size = 43) {
         auto value = bench::make_test_value(value_size);
         for (size_t i = 0; i < n; ++i) {
             auto key = bench::make_test_key(static_cast<uint32_t>(i), 0);
@@ -61,8 +61,7 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
     fmt::println("{:=^80}", " Large-Scale Operation Benchmarks ");
 
     // =========================================================================
-    // Fixture 1: Single generation (~15M entries in one 2GB container file)
-    // Benchmarks: find (random), insert (append), erase (sequential)
+    // Fixture 1: Single generation (~15M P2PKH entries in one 2GB file)
     // =========================================================================
     {
         fmt::println("\n  Populating single-generation fixture ({:L} entries)...", single_gen_entries);
@@ -82,7 +81,7 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
         });
 
         // Insert — append into already-populated map
-        auto value = bench::make_test_value(33);
+        auto value = bench::make_test_value(43);
         uint32_t next_insert = single_gen_entries;
         bench.run("insert into populated 2GB map", [&] {
             auto key = bench::make_test_key(next_insert++, 0);
@@ -100,7 +99,6 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
 
     // =========================================================================
     // Fixture 2: Multiple generations (~25M entries, file rotation triggered)
-    // Benchmarks: find in previous generation, close+reopen at scale
     // =========================================================================
     {
         fmt::println("  Populating multi-generation fixture ({:L} entries)...", multi_gen_entries);
@@ -113,7 +111,6 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
             std::chrono::duration<double>(t1 - t0).count(), f.db.size());
 
         // Find in previous generation — keys 0..5M are in the first .dat file
-        // (before rotation at ~20M). Forces lookup across file boundaries.
         std::mt19937 rng(123);
         std::uniform_int_distribution<uint32_t> dist(0, 5'000'000);
         bench.run("find in previous generation", [&] {

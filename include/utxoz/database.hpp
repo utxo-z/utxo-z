@@ -147,6 +147,36 @@ struct db {
     void compact_all();
 
     /**
+     * @brief Iterate over all keys in the database
+     *
+     * Visits every key across all containers and all file versions.
+     * Order is unspecified. The callback receives each key exactly once.
+     *
+     * @param f Callable with signature void(raw_outpoint const&)
+     */
+    template<typename F>
+    void for_each_key(F&& f) const {
+        for_each_key_impl([](void* ctx, raw_outpoint const& key) {
+            (*static_cast<std::remove_reference_t<F>*>(ctx))(key);
+        }, &f);
+    }
+
+    /**
+     * @brief Iterate over all entries (key + value) in the database
+     *
+     * Visits every entry across all containers and all file versions.
+     * Order is unspecified. The callback receives each entry exactly once.
+     *
+     * @param f Callable with signature void(raw_outpoint const&, uint32_t block_height, std::span<uint8_t const> data)
+     */
+    template<typename F>
+    void for_each_entry(F&& f) const {
+        for_each_entry_impl([](void* ctx, raw_outpoint const& key, uint32_t height, std::span<uint8_t const> data) {
+            (*static_cast<std::remove_reference_t<F>*>(ctx))(key, height, data);
+        }, &f);
+    }
+
+    /**
      * @brief Get comprehensive database statistics
      */
     [[nodiscard]]
@@ -172,6 +202,15 @@ struct db {
      * Call after a full chain sync to get data for sizing decisions.
      */
     void print_sizing_report() const;
+
+    /**
+     * @brief Print per-height-range statistics to log
+     *
+     * Shows inserts and deletes per container per height range (10,000 blocks).
+     * Call after a full chain sync to see how the value size distribution
+     * evolves across the blockchain.
+     */
+    void print_height_range_stats() const;
 
     /**
      * @brief Reset all statistics counters
@@ -204,6 +243,8 @@ struct db {
     std::vector<std::pair<size_t, size_t>> get_cached_file_info() const;
 
 private:
+    void for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
+    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
     std::unique_ptr<detail::database_impl> impl_;
 };
 
