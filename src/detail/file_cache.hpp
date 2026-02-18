@@ -28,6 +28,8 @@
 namespace utxoz::detail {
 
 inline constexpr std::string_view data_file_format = "{}/cont_{}_v{:05}.dat";
+inline constexpr std::string_view compact_data_file_format = "{}/compact_v{:05}.dat";
+inline constexpr size_t compact_sentinel_index = SIZE_MAX;
 
 /**
  * @brief LRU cache for memory-mapped database files
@@ -88,6 +90,44 @@ struct file_cache {
         return {*map, false};
     }
 
+    std::pair<compact_map_t&, bool> get_or_open_compact_file(size_t version) {
+        file_key_t file_key{compact_sentinel_index, version};
+
+        ++gets_;
+        auto const now = std::chrono::steady_clock::now();
+        ++access_frequency_[file_key];
+
+        if (auto it = cache_.find(file_key); it != cache_.end()) {
+            it->second.last_used = now;
+            ++it->second.access_count;
+            ++hits_;
+            return {*static_cast<compact_map_t*>(it->second.map_ptr), true};
+        }
+
+        if (cache_.size() >= max_cached_files_) {
+            evict_lru();
+        }
+
+        auto file_path = make_file_path(compact_sentinel_index, version);
+        auto segment = std::make_unique<bip::managed_mapped_file>(
+            bip::open_only, file_path.c_str());
+
+        auto* map = segment->find<compact_map_t>("db_map").first;
+        if (!map) {
+            throw std::runtime_error("Map not found in compact file: " + file_path);
+        }
+
+        cache_[file_key] = cached_file{
+            std::move(segment),
+            map,
+            now,
+            1,
+            false
+        };
+
+        return {*map, false};
+    }
+
     float get_hit_rate() const {
         return gets_ > 0 ? float(hits_) / float(gets_) : 0.0f;
     }
@@ -130,6 +170,9 @@ private:
     };
 
     std::string make_file_path(size_t container_index, size_t version) const {
+        if (container_index == compact_sentinel_index) {
+            return fmt::format(compact_data_file_format, base_path_, version);
+        }
         return fmt::format(data_file_format, base_path_, container_index, version);
     }
 

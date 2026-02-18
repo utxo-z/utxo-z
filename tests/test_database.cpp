@@ -85,8 +85,9 @@ TEST_CASE_METHOD(DatabaseFixture, "Basic insert and find", "[database]") {
     // Find
     auto result = db_.find(key, height);
     REQUIRE(result.has_value());
-    CHECK(result->size() == value.size());
-    CHECK(*result == value);
+    CHECK(result->data.size() == value.size());
+    CHECK(result->data == value);
+    CHECK(result->block_height == height);
 
     // Duplicate insert should fail
     CHECK_FALSE(db_.insert(key, value, height));
@@ -114,7 +115,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Multiple containers by value size", "[databas
 
         auto result = db_.find(key, static_cast<uint32_t>(100 + i));
         REQUIRE(result.has_value());
-        CHECK(result->size() == value.size());
+        CHECK(result->data.size() == value.size());
     }
 
     CHECK(db_.size() == test_cases.size());

@@ -113,7 +113,7 @@ TEST_CASE("Reopen: data persists after close and reopen", "[storage][persistence
         for (size_t i = 0; i < N; ++i) {
             auto result = db.find(keys[i], 1000);
             REQUIRE(result.has_value());
-            CHECK(*result == values[i]);
+            CHECK(result->data == values[i]);
         }
 
         db.close();
@@ -150,7 +150,7 @@ TEST_CASE("Reopen: multiple close/reopen cycles accumulate data", "[storage][per
         for (size_t i = 0; i < all_keys.size(); ++i) {
             auto result = db.find(all_keys[i], 9999);
             REQUIRE(result.has_value());
-            CHECK(*result == all_values[i]);
+            CHECK(result->data == all_values[i]);
         }
 
         db.close();
@@ -195,7 +195,7 @@ TEST_CASE("Reopen: all container sizes persist correctly", "[storage][persistenc
         for (auto const& [key, val] : entries) {
             auto result = db.find(key, 9999);
             REQUIRE(result.has_value());
-            CHECK(*result == val);
+            CHECK(result->data == val);
         }
 
         db.close();
@@ -364,7 +364,7 @@ TEST_CASE("Deferred lookups: find entries in previous versions", "[storage][rota
         // Find the original index for this key
         for (size_t i = 0; i < 500; ++i) {
             if (keys[i] == key) {
-                CHECK(found_value == values[i]);
+                CHECK(found_value.data == values[i]);
                 break;
             }
         }
@@ -537,8 +537,8 @@ TEST_CASE("Value integrity: exact byte content preserved for all container sizes
     for (auto const& [key, expected] : entries) {
         auto result = db.find(key, 9999);
         REQUIRE(result.has_value());
-        REQUIRE(result->size() == expected.size());
-        CHECK(*result == expected);
+        REQUIRE(result->data.size() == expected.size());
+        CHECK(result->data == expected);
     }
 
     db.close();
@@ -549,8 +549,8 @@ TEST_CASE("Value integrity: exact byte content preserved for all container sizes
     for (auto const& [key, expected] : entries) {
         auto result = db.find(key, 9999);
         REQUIRE(result.has_value());
-        REQUIRE(result->size() == expected.size());
-        CHECK(*result == expected);
+        REQUIRE(result->data.size() == expected.size());
+        CHECK(result->data == expected);
     }
 
     db.close();
@@ -635,7 +635,7 @@ TEST_CASE("Empty DB: close and reopen preserves empty state", "[storage][persist
 
         auto result = db.find(key, 200);
         REQUIRE(result.has_value());
-        CHECK(*result == val);
+        CHECK(result->data == val);
 
         db.close();
     }
@@ -664,7 +664,7 @@ TEST_CASE("Single entry: close and reopen per container size", "[storage][persis
 
             auto result = db.find(key, 200);
             REQUIRE(result.has_value());
-            CHECK(*result == val);
+            CHECK(result->data == val);
             db.close();
         }
     }
@@ -718,7 +718,7 @@ TEST_CASE("Erase all: empty state persists after reopen", "[storage][persistence
         REQUIRE(db.insert(keys[0], val, 300));
         auto result = db.find(keys[0], 400);
         REQUIRE(result.has_value());
-        CHECK(*result == val);
+        CHECK(result->data == val);
 
         db.close();
     }
@@ -784,7 +784,7 @@ TEST_CASE("Multi-cycle: insert, delete, close, insert, close, verify", "[storage
         for (size_t i = 0; i < 50; ++i) {
             auto result = db.find(keys[i], 500);
             REQUIRE(result.has_value());
-            CHECK(*result == values[i]);
+            CHECK(result->data == values[i]);
         }
 
         // Entries 50..99: deleted in cycle 1
@@ -797,7 +797,7 @@ TEST_CASE("Multi-cycle: insert, delete, close, insert, close, verify", "[storage
         for (size_t i = 100; i < 150; ++i) {
             auto result = db.find(keys[i], 500);
             REQUIRE(result.has_value());
-            CHECK(*result == values[i]);
+            CHECK(result->data == values[i]);
         }
 
         // Entries 150..174: deleted in cycle 2
@@ -810,7 +810,7 @@ TEST_CASE("Multi-cycle: insert, delete, close, insert, close, verify", "[storage
         for (size_t i = 175; i < 300; ++i) {
             auto result = db.find(keys[i], 500);
             REQUIRE(result.has_value());
-            CHECK(*result == values[i]);
+            CHECK(result->data == values[i]);
         }
 
         db.close();
@@ -871,7 +871,7 @@ TEST_CASE("Compaction persistence: data survives compact + close + reopen", "[st
             auto expected = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
             auto result = db.find(keys[i], static_cast<uint32_t>(N + 2));
             if (result.has_value()) {
-                CHECK(*result == expected);
+                CHECK(result->data == expected);
                 ++found_immediate;
             } else {
                 ++not_found;
@@ -939,7 +939,7 @@ TEST_CASE("High fill: close/reopen near rotation point per container", "[storage
                 auto expected = make_test_value(c.value_size, static_cast<uint8_t>(i & 0xFF));
                 auto result = db.find(key, 99999);
                 REQUIRE(result.has_value());
-                CHECK(*result == expected);
+                CHECK(result->data == expected);
             }
 
             db.close();
@@ -992,7 +992,7 @@ TEST_CASE("Reopen after rotation: all entries verified across versions", "[stora
         for (size_t i = N - 100; i < N; ++i) {
             auto result = db.find(keys[i], static_cast<uint32_t>(N));
             REQUIRE(result.has_value());
-            CHECK(*result == values[i]);
+            CHECK(result->data == values[i]);
         }
 
         // Check oldest entries (likely deferred to previous versions)
@@ -1002,7 +1002,7 @@ TEST_CASE("Reopen after rotation: all entries verified across versions", "[stora
             if (!result.has_value()) {
                 ++deferred_count;
             } else {
-                CHECK(*result == values[i]);
+                CHECK(result->data == values[i]);
             }
         }
 
@@ -1013,7 +1013,7 @@ TEST_CASE("Reopen after rotation: all entries verified across versions", "[stora
             for (auto const& [key, found_value] : successful) {
                 for (size_t i = 0; i < 100; ++i) {
                     if (keys[i] == key) {
-                        CHECK(found_value == values[i]);
+                        CHECK(found_value.data == values[i]);
                         break;
                     }
                 }
@@ -1054,7 +1054,7 @@ TEST_CASE("Reopen: duplicate insert fails for existing entries", "[storage][pers
         // Original value should be preserved
         auto result = db.find(key, 300);
         REQUIRE(result.has_value());
-        CHECK(*result == val1);
+        CHECK(result->data == val1);
 
         db.close();
     }
@@ -1107,7 +1107,7 @@ TEST_CASE("Reopen: mixed container sizes with many entries each", "[storage][per
         for (auto const& [key, expected] : all_entries) {
             auto result = db.find(key, 99999);
             REQUIRE(result.has_value());
-            CHECK(*result == expected);
+            CHECK(result->data == expected);
         }
 
         db.close();
@@ -1246,7 +1246,7 @@ TEST_CASE("Compaction: data integrity with many versions + close/reopen", "[stor
             auto expected = make_test_value(1000, static_cast<uint8_t>(i & 0xFF));
             auto result = db.find(keys[i], static_cast<uint32_t>(N + 1));
             if (result.has_value()) {
-                CHECK(*result == expected);
+                CHECK(result->data == expected);
                 ++found_immediate;
             }
         }
@@ -1475,8 +1475,8 @@ TEST_CASE("No truncation: P2PKH-sized values (43 bytes) survive round-trip", "[s
 
     auto result = db.find(key, 200);
     REQUIRE(result.has_value());
-    CHECK(result->size() == 43);
-    CHECK(*result == val);
+    CHECK(result->data.size() == 43);
+    CHECK(result->data == val);
 
     db.close();
 }
@@ -1494,8 +1494,8 @@ TEST_CASE("No truncation: P2SH-sized values (41 bytes) survive round-trip", "[st
 
     auto result = db.find(key, 200);
     REQUIRE(result.has_value());
-    CHECK(result->size() == 41);
-    CHECK(*result == val);
+    CHECK(result->data.size() == 41);
+    CHECK(result->data == val);
 
     db.close();
 }
@@ -1518,8 +1518,8 @@ TEST_CASE("No truncation: max value for each container survives round-trip", "[s
 
         auto result = db.find(key, 200);
         REQUIRE(result.has_value());
-        REQUIRE(result->size() == val_size);
-        CHECK(*result == val);
+        REQUIRE(result->data.size() == val_size);
+        CHECK(result->data == val);
     }
 
     db.close();
@@ -1550,8 +1550,8 @@ TEST_CASE("No truncation: boundary values at each container capacity", "[storage
 
         auto result = db.find(key, 200);
         REQUIRE(result.has_value());
-        REQUIRE(result->size() == val_size);
-        CHECK(*result == val);
+        REQUIRE(result->data.size() == val_size);
+        CHECK(result->data == val);
     }
 
     db.close();
