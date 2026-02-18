@@ -116,6 +116,40 @@ inline constexpr std::array<size_t, 5> test_file_sizes = {10_mib, 10_mib, 10_mib
 inline constexpr size_t container_count = container_sizes.size();
 
 /**
+ * @brief Storage mode selection
+ *
+ * - full: Stores complete UTXO output data (scriptPubKey + amount) across 5 size-tiered containers
+ * - compact: Stores only a small fixed-size reference (e.g. block file position) in a single container
+ */
+enum class storage_mode : uint8_t { full = 0, compact = 1 };
+
+/// Result of full_db::find(): data bytes + block height at which the UTXO was inserted.
+struct full_find_result {
+    std::vector<uint8_t> data;
+    uint32_t block_height;
+};
+
+/// Result of compact_db::find(): typed compact fields + block height.
+struct compact_find_result {
+    uint32_t block_height;
+    uint32_t file_number;
+    uint32_t offset;
+};
+
+/// Backward-compatible alias.
+using find_result = full_find_result;
+
+/**
+ * @brief File size for compact mode (production)
+ */
+inline constexpr size_t compact_file_size = 4_gib;
+
+/**
+ * @brief File size for compact mode (testing)
+ */
+inline constexpr size_t compact_test_file_size = 10_mib;
+
+/**
  * @brief Search operation record for performance tracking
  */
 struct search_record {
