@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771419391113,
+  "lastUpdate": 1771419947458,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -4248,6 +4248,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 54.8,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "01d047cadc93e2b42f4d1b3e1470434141e8b977",
+          "message": "release: update version to 0.4.0 (#34)",
+          "timestamp": "2026-02-18T14:03:40+01:00",
+          "tree_id": "64cd690e280f0231a77f6eeb1f263a5815bea598",
+          "url": "https://github.com/utxo-z/utxo-z/commit/01d047cadc93e2b42f4d1b3e1470434141e8b977"
+        },
+        "date": 1771419947149,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 305327.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 286361.39,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 268251.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 552647.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 472.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 487.17,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12031484.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 13247236.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12025070.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13170,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 13978067.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 15714764.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 105903.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 12740.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2196.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3159.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2878.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 54.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 54.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.24,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.98,
             "unit": "ops/sec"
           }
         ]
