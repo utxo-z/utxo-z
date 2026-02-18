@@ -10,7 +10,7 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 
 ## Features
 
-- **Multi-container architecture**: Optimized storage for different value sizes (44B, 128B, 512B, 10KB)
+- **Multi-container architecture**: 5 size-optimized containers (48B, 94B, 128B, 256B, 10KB) matched to real BCH value size distribution
 - **Memory-mapped files**: Automatic file rotation and OS-managed I/O
 - **Deferred deletions**: Batched deletes for optimal write performance
 - **Generational storage**: Recent outputs are faster to access
@@ -30,7 +30,7 @@ Add to your `conanfile.py`:
 
 ```python
 def requirements(self):
-    self.requires("utxoz/0.1.0")
+    self.requires("utxoz/0.3.0")
 ```
 
 ### Building from source
@@ -41,7 +41,7 @@ git clone https://github.com/utxo-z/utxo-z.git
 cd utxo-z
 
 # Build and install to local Conan cache
-./scripts/build-create.sh 0.1.0
+./scripts/build-create.sh 0.3.0
 ```
 
 ## Usage
@@ -57,7 +57,7 @@ int main() {
 
     // Create a key (32-byte tx hash + 4-byte output index)
     std::array<uint8_t, 32> tx_hash = { /* ... */ };
-    auto key = utxoz::make_key(tx_hash, 0);  // output index 0
+    auto key = utxoz::make_outpoint(tx_hash, 0);  // output index 0
 
     // Insert UTXO
     std::vector<uint8_t> value = { /* serialized output */ };
@@ -86,14 +86,30 @@ int main() {
 }
 ```
 
+### Iterating over entries
+
+```cpp
+// Iterate all keys
+db.for_each_key([](utxoz::raw_outpoint const& key) {
+    // ...
+});
+
+// Iterate all entries (key + block height + data)
+db.for_each_entry([](utxoz::raw_outpoint const& key,
+                     uint32_t block_height,
+                     std::span<uint8_t const> data) {
+    // ...
+});
+```
+
 ### Logging
 
 UTXO-Z supports three logging backends configured at build time:
 
 ```bash
-./scripts/build-create.sh 0.1.0 custom   # Callback-based (default)
-./scripts/build-create.sh 0.1.0 spdlog   # spdlog integration
-./scripts/build-create.sh 0.1.0 none     # Disabled
+./scripts/build-create.sh 0.3.0 custom   # Callback-based (default)
+./scripts/build-create.sh 0.3.0 spdlog   # spdlog integration
+./scripts/build-create.sh 0.3.0 none     # Disabled
 ```
 
 #### Custom callback
@@ -129,17 +145,27 @@ utxoz::set_log_prefix("utxoz");  // Messages will show as "[utxoz] ..."
 | `insert(key, value, height)` | Insert UTXO, returns success |
 | `find(key, height)` | Find UTXO, returns optional value |
 | `erase(key, height)` | Erase UTXO (may be deferred) |
-| `process_pending_deletions()` | Process deferred deletes, returns (count, failed entries with height) |
+| `process_pending_deletions()` | Process deferred deletes, returns (count, failed entries) |
+| `process_pending_lookups()` | Process deferred lookups, returns (results map, failed entries) |
+| `deferred_deletions_size()` | Count of pending deferred deletions |
+| `deferred_lookups_size()` | Count of pending deferred lookups |
+| `for_each_key(callback)` | Iterate over all stored keys |
+| `for_each_entry(callback)` | Iterate over all entries (key, height, data) |
 | `compact_all()` | Optimize storage |
 | `get_statistics()` | Get performance stats |
 | `print_statistics()` | Log formatted stats |
+| `get_sizing_report()` | Get container sizing analysis |
+| `print_height_range_stats()` | Log per-height-range insert/delete statistics |
+| `reset_all_statistics()` | Reset all counters |
 
-### `utxoz::key_t`
+### `utxoz::raw_outpoint`
 
 36-byte key: 32-byte transaction hash + 4-byte output index (little-endian).
 
 ```cpp
-auto key = utxoz::make_key(tx_hash, output_index);
+auto key = utxoz::make_outpoint(tx_hash, output_index);
+auto txid = utxoz::get_txid(key);
+auto index = utxoz::get_output_index(key);
 ```
 
 ## Performance
@@ -152,6 +178,24 @@ Benchmarks on consumer hardware (single thread):
 | IBD outputs/sec | 320K | 129K | 2.5x |
 | Recent lookups/sec | 33M | 740K | 45x |
 | Total lookups/sec | 1.5M | 740K | 2x |
+
+### Running benchmarks locally
+
+For accurate performance measurements, run the benchmarks on your own hardware:
+
+```bash
+cd build/build/Release/benchmarks
+./utxoz_benchmarks           # Quick operation benchmarks (insert, find, erase)
+./utxoz_benchmarks_large     # Large-scale IBD simulation (50M entries)
+```
+
+### CI benchmark tracking
+
+We track benchmark results on every commit in CI:
+
+[Benchmark Dashboard](https://utxo-z.github.io/utxo-z/dev/bench/)
+
+These results are **not** representative of real-world performance. GitHub Actions runners have limited and shared resources, which introduces high variability: you will see spikes in the charts where GHA assigned more or fewer resources to the run. The purpose of CI benchmarks is to detect performance regressions between commits, not to measure absolute throughput. For real UTXO-Z performance numbers, run the benchmarks locally on your machine.
 
 ## License
 
