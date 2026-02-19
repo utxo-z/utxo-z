@@ -10,7 +10,9 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 
 ## Features
 
-- **Multi-container architecture**: 5 size-optimized containers (48B, 94B, 128B, 256B, 10KB) matched to real BCH value size distribution
+- **Two storage modes**: Full mode (variable-size values) and Compact mode (fixed-size file references)
+- **Type-safe API**: `full_db` and `compact_db` with compile-time mode safety — no runtime dispatch
+- **Multi-container architecture**: 5 size-optimized containers (48B, 94B, 128B, 256B, 10KB) in full mode
 - **Memory-mapped files**: Automatic file rotation and OS-managed I/O
 - **Deferred deletions**: Batched deletes for optimal write performance
 - **Generational storage**: Recent outputs are faster to access
@@ -46,13 +48,15 @@ cd utxo-z
 
 ## Usage
 
-### Basic example
+### Full mode (default)
+
+Stores complete UTXO output data (scriptPubKey + amount). Use `utxoz::db` (alias for `utxoz::full_db`).
 
 ```cpp
 #include <utxoz/utxoz.hpp>
 
 int main() {
-    utxoz::db db;
+    utxoz::db db;  // or utxoz::full_db
     db.configure("./utxo_data", true);  // path, remove_existing
 
     // Create a key (32-byte tx hash + 4-byte output index)
@@ -63,10 +67,11 @@ int main() {
     std::vector<uint8_t> value = { /* serialized output */ };
     db.insert(key, value, block_height);
 
-    // Find UTXO
+    // Find UTXO — returns full_find_result {data, block_height}
     auto result = db.find(key, current_height);
     if (result) {
-        // Use result.value()
+        auto& data = result->data;            // std::vector<uint8_t>
+        auto height = result->block_height;   // uint32_t
     }
 
     // Erase UTXO (may be deferred)
@@ -74,10 +79,6 @@ int main() {
 
     // Process deferred deletions periodically
     auto [deleted, failed] = db.process_pending_deletions();
-    for (auto const& entry : failed) {
-        // entry.key   - the UTXO key that failed to delete
-        // entry.height - the block height that requested the deletion
-    }
 
     // Compact periodically for optimal performance
     db.compact_all();
@@ -86,18 +87,55 @@ int main() {
 }
 ```
 
+### Compact mode
+
+Stores only a fixed-size reference (file_number + offset) per UTXO. Use `utxoz::compact_db`.
+
+```cpp
+#include <utxoz/utxoz.hpp>
+
+int main() {
+    utxoz::compact_db db;
+    db.configure("./utxo_data", true);
+
+    auto key = utxoz::make_outpoint(tx_hash, 0);
+
+    // Insert with typed fields — no byte serialization needed
+    db.insert(key, file_number, offset, block_height);
+
+    // Find — returns compact_find_result {block_height, file_number, offset}
+    auto result = db.find(key, current_height);
+    if (result) {
+        auto height = result->block_height;   // uint32_t
+        auto fnum   = result->file_number;    // uint32_t
+        auto off    = result->offset;         // uint32_t
+    }
+
+    // erase, process_pending_deletions, compact_all, etc. work the same
+    db.close();
+}
+```
+
 ### Iterating over entries
 
 ```cpp
-// Iterate all keys
+// Iterate all keys (same for both modes)
 db.for_each_key([](utxoz::raw_outpoint const& key) {
     // ...
 });
 
-// Iterate all entries (key + block height + data)
-db.for_each_entry([](utxoz::raw_outpoint const& key,
-                     uint32_t block_height,
-                     std::span<uint8_t const> data) {
+// full_db: iterate entries with byte data
+full_db.for_each_entry([](utxoz::raw_outpoint const& key,
+                          uint32_t block_height,
+                          std::span<uint8_t const> data) {
+    // ...
+});
+
+// compact_db: iterate entries with typed fields
+compact_db.for_each_entry([](utxoz::raw_outpoint const& key,
+                             uint32_t height,
+                             uint32_t file_number,
+                             uint32_t offset) {
     // ...
 });
 ```
@@ -134,29 +172,53 @@ utxoz::set_log_prefix("utxoz");  // Messages will show as "[utxoz] ..."
 
 ## API Reference
 
-### `utxoz::db`
+### Class hierarchy
+
+```
+db_base                    — shared methods (close, size, erase, statistics, ...)
+  ├── full_db  (= db)      — variable-size byte values
+  └── compact_db            — typed file_number + offset fields
+```
+
+### `db_base` (shared by both modes)
 
 | Method | Description |
 |--------|-------------|
-| `configure(path, remove_existing)` | Open database at path |
-| `configure_for_testing(path, remove_existing)` | Open with smaller file sizes |
 | `close()` | Close and flush all data |
 | `size()` | Total UTXO count |
-| `insert(key, value, height)` | Insert UTXO, returns success |
-| `find(key, height)` | Find UTXO, returns optional value |
 | `erase(key, height)` | Erase UTXO (may be deferred) |
 | `process_pending_deletions()` | Process deferred deletes, returns (count, failed entries) |
-| `process_pending_lookups()` | Process deferred lookups, returns (results map, failed entries) |
 | `deferred_deletions_size()` | Count of pending deferred deletions |
 | `deferred_lookups_size()` | Count of pending deferred lookups |
 | `for_each_key(callback)` | Iterate over all stored keys |
-| `for_each_entry(callback)` | Iterate over all entries (key, height, data) |
 | `compact_all()` | Optimize storage |
 | `get_statistics()` | Get performance stats |
 | `print_statistics()` | Log formatted stats |
 | `get_sizing_report()` | Get container sizing analysis |
 | `print_height_range_stats()` | Log per-height-range insert/delete statistics |
 | `reset_all_statistics()` | Reset all counters |
+
+### `full_db` (aliased as `db`)
+
+| Method | Description |
+|--------|-------------|
+| `configure(path, remove_existing)` | Open database in full mode |
+| `configure_for_testing(path, remove_existing)` | Open with smaller file sizes |
+| `insert(key, value, height)` | Insert UTXO with byte data |
+| `find(key, height)` | Returns `optional<full_find_result>` (`data`, `block_height`) |
+| `process_pending_lookups()` | Returns `(flat_map<key, full_find_result>, failed)` |
+| `for_each_entry(callback)` | Callback: `(key, height, span<uint8_t const>)` |
+
+### `compact_db`
+
+| Method | Description |
+|--------|-------------|
+| `configure(path, remove_existing)` | Open database in compact mode |
+| `configure_for_testing(path, remove_existing)` | Open with smaller file sizes |
+| `insert(key, file_number, offset, height)` | Insert UTXO with typed fields |
+| `find(key, height)` | Returns `optional<compact_find_result>` (`block_height`, `file_number`, `offset`) |
+| `process_pending_lookups()` | Returns `(flat_map<key, compact_find_result>, failed)` |
+| `for_each_entry(callback)` | Callback: `(key, height, file_number, offset)` |
 
 ### `utxoz::raw_outpoint`
 

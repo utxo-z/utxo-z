@@ -4,7 +4,7 @@
 
 /**
  * @file database.hpp
- * @brief Main database interface
+ * @brief Main database interface — db_base, full_db, compact_db
  */
 
 #pragma once
@@ -23,44 +23,26 @@ namespace detail {
 struct database_impl;
 } // namespace detail
 
+// =============================================================================
+// db_base — shared methods for both storage modes
+// =============================================================================
+
 /**
- * @brief Main UTXO Database interface
+ * @brief Base class with methods common to both storage modes.
  *
- * This class provides a high-performance UTXO database with the following features:
- * - Multi-container architecture optimized for different value sizes
- * - Memory-mapped file storage with automatic rotation
- * - Deferred deletion for optimal write performance
- * - Comprehensive statistics and performance monitoring
- * - File-based caching for historical data access
- * - Database compaction and optimization
+ * Not intended to be instantiated directly — use full_db or compact_db.
+ * Non-virtual, protected constructors.
  */
-struct db {
-    db();
-    ~db();
+struct db_base {
+    ~db_base();
 
     // Non-copyable
-    db(db const&) = delete;
-    db& operator=(db const&) = delete;
+    db_base(db_base const&) = delete;
+    db_base& operator=(db_base const&) = delete;
 
-    // Movable - allows returning from factory functions and storing in containers
-    db(db&&) noexcept;
-    db& operator=(db&&) noexcept;
-
-    /**
-     * @brief Configure and open the database
-     * @param path Database directory path
-     * @param remove_existing If true, remove existing database files
-     * @throws std::runtime_error on configuration failure
-     */
-    void configure(std::string_view path, bool remove_existing = false);
-
-    /**
-     * @brief Configure for testing with smaller file sizes
-     * @param path Database directory path
-     * @param remove_existing If true, remove existing database files
-     * @throws std::runtime_error on configuration failure
-     */
-    void configure_for_testing(std::string_view path, bool remove_existing = false);
+    // Movable
+    db_base(db_base&&) noexcept;
+    db_base& operator=(db_base&&) noexcept;
 
     /**
      * @brief Close the database and flush all data
@@ -72,25 +54,6 @@ struct db {
      */
     [[nodiscard]]
     size_t size() const;
-
-    /**
-     * @brief Insert a new UTXO
-     * @param key UTXO key (transaction hash + output index)
-     * @param value UTXO value data
-     * @param height Block height where this UTXO was created
-     * @return true if inserted successfully, false if already exists
-     */
-    [[nodiscard]]
-    bool insert(raw_outpoint const& key, output_data_span value, uint32_t height);
-
-    /**
-     * @brief Find a UTXO by key
-     * @param key UTXO key to search for
-     * @param height Current block height (for statistics)
-     * @return UTXO value if found, std::nullopt otherwise
-     */
-    [[nodiscard]]
-    bytes_opt find(raw_outpoint const& key, uint32_t height) const;
 
     /**
      * @brief Erase a UTXO by key
@@ -108,7 +71,6 @@ struct db {
     /**
      * @brief Process all pending deferred deletions
      * @return Pair of (successful_deletions_count, failed_deletions)
-     *         Each failed deletion includes the key and the block height that requested it
      */
     [[nodiscard]]
     std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
@@ -120,19 +82,6 @@ struct db {
     size_t deferred_deletions_size() const;
 
     /**
-     * @brief Process all pending deferred lookups
-     *
-     * Lookups not found in the latest version are deferred and batched for
-     * efficient processing across older file versions.
-     *
-     * @return Pair of (successful_lookups_map, failed_lookups)
-     *         - successful_lookups_map: key -> value for found UTXOs
-     *         - failed_lookups: entries that could not be found (includes key and height)
-     */
-    [[nodiscard]]
-    std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
-
-    /**
      * @brief Get the number of pending deferred lookups
      */
     [[nodiscard]]
@@ -140,17 +89,11 @@ struct db {
 
     /**
      * @brief Compact all containers
-     *
-     * Merges files, removes empty ones, and optimizes storage.
-     * Should be called periodically for optimal performance.
      */
     void compact_all();
 
     /**
      * @brief Iterate over all keys in the database
-     *
-     * Visits every key across all containers and all file versions.
-     * Order is unspecified. The callback receives each key exactly once.
      *
      * @param f Callable with signature void(raw_outpoint const&)
      */
@@ -161,11 +104,81 @@ struct db {
         }, &f);
     }
 
+    // Statistics
+    [[nodiscard]] database_statistics get_statistics();
+    void print_statistics();
+    [[nodiscard]] sizing_report get_sizing_report() const;
+    void print_sizing_report() const;
+    void print_height_range_stats() const;
+    void reset_all_statistics();
+    [[nodiscard]] search_stats const& get_search_stats() const;
+    void reset_search_stats();
+    [[nodiscard]] float get_cache_hit_rate() const;
+    [[nodiscard]] std::vector<std::pair<size_t, size_t>> get_cached_file_info() const;
+
+protected:
+    db_base();
+    void for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
+    std::unique_ptr<detail::database_impl> impl_;
+};
+
+// =============================================================================
+// full_db — full storage mode (variable-size values)
+// =============================================================================
+
+/**
+ * @brief Full-mode UTXO Database
+ *
+ * Stores complete UTXO output data (scriptPubKey + amount) across 5 size-tiered
+ * containers. Use this when you need the full transaction output data.
+ */
+struct full_db : db_base {
+    full_db();
+    ~full_db();
+
+    full_db(full_db&&) noexcept;
+    full_db& operator=(full_db&&) noexcept;
+
+    /**
+     * @brief Configure and open the database in full mode
+     * @param path Database directory path
+     * @param remove_existing If true, remove existing database files
+     */
+    void configure(std::string_view path, bool remove_existing = false);
+
+    /**
+     * @brief Configure for testing with smaller file sizes (full mode)
+     */
+    void configure_for_testing(std::string_view path, bool remove_existing = false);
+
+    /**
+     * @brief Insert a new UTXO with variable-size data
+     * @param key UTXO key (transaction hash + output index)
+     * @param value UTXO value data
+     * @param height Block height where this UTXO was created
+     * @return true if inserted successfully, false if already exists
+     */
+    [[nodiscard]]
+    bool insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+
+    /**
+     * @brief Find a UTXO by key
+     * @param key UTXO key to search for
+     * @param height Current block height (for statistics)
+     * @return full_find_result {data, block_height} if found, std::nullopt otherwise
+     */
+    [[nodiscard]]
+    std::optional<full_find_result> find(raw_outpoint const& key, uint32_t height) const;
+
+    /**
+     * @brief Process all pending deferred lookups
+     * @return Pair of (successful_lookups_map, failed_lookups)
+     */
+    [[nodiscard]]
+    std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+
     /**
      * @brief Iterate over all entries (key + value) in the database
-     *
-     * Visits every entry across all containers and all file versions.
-     * Order is unspecified. The callback receives each entry exactly once.
      *
      * @param f Callable with signature void(raw_outpoint const&, uint32_t block_height, std::span<uint8_t const> data)
      */
@@ -176,76 +189,88 @@ struct db {
         }, &f);
     }
 
+private:
+    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
+};
+
+// =============================================================================
+// compact_db — compact storage mode (fixed-size reference)
+// =============================================================================
+
+/**
+ * @brief Compact-mode UTXO Database
+ *
+ * Stores only a small fixed-size reference (block_height, file_number, offset)
+ * in a single container. Use this when the node stores full block data on disk
+ * and only needs to track which file/offset each UTXO lives at.
+ */
+struct compact_db : db_base {
+    compact_db();
+    ~compact_db();
+
+    compact_db(compact_db&&) noexcept;
+    compact_db& operator=(compact_db&&) noexcept;
+
     /**
-     * @brief Get comprehensive database statistics
+     * @brief Configure and open the database in compact mode
+     * @param path Database directory path
+     * @param remove_existing If true, remove existing database files
+     */
+    void configure(std::string_view path, bool remove_existing = false);
+
+    /**
+     * @brief Configure for testing with smaller file sizes (compact mode)
+     */
+    void configure_for_testing(std::string_view path, bool remove_existing = false);
+
+    /**
+     * @brief Insert a new UTXO with typed compact fields
+     * @param key UTXO key (transaction hash + output index)
+     * @param file_number Block file number
+     * @param offset Offset within the block file
+     * @param height Block height where this UTXO was created
+     * @return true if inserted successfully, false if already exists
      */
     [[nodiscard]]
-    database_statistics get_statistics();
+    bool insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height);
 
     /**
-     * @brief Print formatted statistics to log
+     * @brief Find a UTXO by key
+     * @param key UTXO key to search for
+     * @param height Current block height (for statistics)
+     * @return compact_find_result {block_height, file_number, offset} if found, std::nullopt otherwise
      */
-    void print_statistics();
+    [[nodiscard]]
+    std::optional<compact_find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     /**
-     * @brief Get sizing analysis report for optimizing container/file sizes
+     * @brief Process all pending deferred lookups
+     * @return Pair of (successful_lookups_map, failed_lookups)
+     */
+    [[nodiscard]]
+    std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+
+    /**
+     * @brief Iterate over all entries (key + compact fields) in the database
      *
-     * Computes waste analysis and value size histogram from existing statistics.
-     * No additional hot-path tracking required (uses data from UTXOZ_STATISTICS_ENABLED).
+     * @param f Callable with signature void(raw_outpoint const&, uint32_t height, uint32_t file_number, uint32_t offset)
      */
-    [[nodiscard]]
-    sizing_report get_sizing_report() const;
-
-    /**
-     * @brief Print formatted sizing report to log
-     *
-     * Call after a full chain sync to get data for sizing decisions.
-     */
-    void print_sizing_report() const;
-
-    /**
-     * @brief Print per-height-range statistics to log
-     *
-     * Shows inserts and deletes per container per height range (10,000 blocks).
-     * Call after a full chain sync to see how the value size distribution
-     * evolves across the blockchain.
-     */
-    void print_height_range_stats() const;
-
-    /**
-     * @brief Reset all statistics counters
-     */
-    void reset_all_statistics();
-
-    /**
-     * @brief Get search performance statistics
-     */
-    [[nodiscard]]
-    search_stats const& get_search_stats() const;
-
-    /**
-     * @brief Reset search statistics
-     */
-    void reset_search_stats();
-
-    /**
-     * @brief Get file cache hit rate
-     * @return Cache hit rate (0.0 to 1.0)
-     */
-    [[nodiscard]]
-    float get_cache_hit_rate() const;
-
-    /**
-     * @brief Get information about currently cached files
-     * @return Vector of (container_index, version) pairs
-     */
-    [[nodiscard]]
-    std::vector<std::pair<size_t, size_t>> get_cached_file_info() const;
+    template<typename F>
+    void for_each_entry(F&& f) const {
+        for_each_entry_impl([](void* ctx, raw_outpoint const& key, uint32_t height,
+                               uint32_t file_number, uint32_t offset) {
+            (*static_cast<std::remove_reference_t<F>*>(ctx))(key, height, file_number, offset);
+        }, &f);
+    }
 
 private:
-    void for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
-    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
-    std::unique_ptr<detail::database_impl> impl_;
+    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 };
+
+// =============================================================================
+// Backward-compatible alias
+// =============================================================================
+
+using db = full_db;
 
 } // namespace utxoz

@@ -103,6 +103,9 @@ struct fragmentation_stats {
  * @brief Complete database statistics
  */
 struct database_statistics {
+    // Storage mode
+    storage_mode mode = storage_mode::full;
+
     // Global statistics
     size_t total_entries = 0;        ///< Total entries across all containers
     size_t total_inserts = 0;        ///< Total insertions performed

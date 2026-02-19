@@ -336,17 +336,17 @@ void database_impl::load_metadata_from_disk(size_t index, size_t version) {
 // database_impl - Public interface: configure, close, size
 // =============================================================================
 
-void database_impl::configure(std::string_view path, bool remove_existing) {
+void database_impl::configure(std::string_view path, bool remove_existing, storage_mode mode) {
     active_file_sizes_ = file_sizes;
-    configure_internal(path, remove_existing);
+    configure_internal(path, remove_existing, mode);
 }
 
-void database_impl::configure_for_testing(std::string_view path, bool remove_existing) {
+void database_impl::configure_for_testing(std::string_view path, bool remove_existing, storage_mode mode) {
     active_file_sizes_ = test_file_sizes;
-    configure_internal(path, remove_existing);
+    configure_internal(path, remove_existing, mode);
 }
 
-void database_impl::configure_internal(std::string_view path, bool remove_existing) {
+void database_impl::configure_internal(std::string_view path, bool remove_existing, storage_mode mode) {
     db_path_ = path;
 
     if (remove_existing && fs::exists(path)) {
@@ -354,38 +354,70 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
     }
     fs::create_directories(path);
 
+    // Check config persistence (detect mode mismatch on reopen)
+    auto config_path = db_path_ / "utxoz_config.dat";
+    if (fs::exists(config_path) && !remove_existing) {
+        load_config_from_disk();
+        if (mode_ != mode) {
+            throw std::runtime_error(fmt::format(
+                "Storage mode mismatch: database was created with mode {}, but mode {} was requested",
+                static_cast<int>(mode_), static_cast<int>(mode)));
+        }
+    } else {
+        mode_ = mode;
+    }
+
     // Initialize file cache
     file_cache_ = std::make_unique<file_cache>(std::string(path));
 
-    // Find optimal bucket counts for each container
-    static_assert(container_count == 5);
-    auto path_str = db_path_.string();
-    min_buckets_ok_[0] = find_optimal_buckets<0>(path_str, active_file_sizes_[0], 7864304);
-    min_buckets_ok_[1] = find_optimal_buckets<1>(path_str, active_file_sizes_[1], 7864304);
-    min_buckets_ok_[2] = find_optimal_buckets<2>(path_str, active_file_sizes_[2], 7864304);
-    min_buckets_ok_[3] = find_optimal_buckets<3>(path_str, active_file_sizes_[3], 7864304);
-    min_buckets_ok_[4] = find_optimal_buckets<4>(path_str, active_file_sizes_[4], 7864304);
-
-    // Initialize containers
     entries_count_ = 0;
-    for_each_index<container_count>([&](auto I) {
-        size_t latest_version = find_latest_version_from_files(I);
-        open_or_create_container<I>(latest_version);
 
-        // Count existing entries in reopened containers
-        entries_count_ += container<I>().size();
+    if (mode_ == storage_mode::compact) {
+        // Compact mode: single container
+        compact_active_file_size_ = (active_file_sizes_[0] == file_sizes[0])
+            ? compact_file_size : compact_test_file_size;
 
-        // Load metadata for all versions
+        auto path_str = db_path_.string();
+        compact_min_buckets_ok_ = find_optimal_buckets_compact(path_str, compact_active_file_size_, 7864304);
+
+        size_t latest_version = find_latest_version_compact();
+        compact_open_or_create(latest_version);
+        entries_count_ += compact_map().size();
+
         for (size_t v = 0; v <= latest_version; ++v) {
-            load_metadata_from_disk(I, v);
+            compact_load_metadata(v);
         }
-    });
+    } else {
+        // Full mode: 5 containers
+        static_assert(container_count == 5);
+        auto path_str = db_path_.string();
+        min_buckets_ok_[0] = find_optimal_buckets<0>(path_str, active_file_sizes_[0], 7864304);
+        min_buckets_ok_[1] = find_optimal_buckets<1>(path_str, active_file_sizes_[1], 7864304);
+        min_buckets_ok_[2] = find_optimal_buckets<2>(path_str, active_file_sizes_[2], 7864304);
+        min_buckets_ok_[3] = find_optimal_buckets<3>(path_str, active_file_sizes_[3], 7864304);
+        min_buckets_ok_[4] = find_optimal_buckets<4>(path_str, active_file_sizes_[4], 7864304);
+
+        for_each_index<container_count>([&](auto I) {
+            size_t latest_version = find_latest_version_from_files(I);
+            open_or_create_container<I>(latest_version);
+            entries_count_ += container<I>().size();
+            for (size_t v = 0; v <= latest_version; ++v) {
+                load_metadata_from_disk(I, v);
+            }
+        });
+    }
+
+    save_config_to_disk();
 }
 
 void database_impl::close() {
-    for_each_index<container_count>([&](auto I) {
-        close_container<I>();
-    });
+    if (mode_ == storage_mode::compact) {
+        compact_close_container();
+    } else {
+        for_each_index<container_count>([&](auto I) {
+            close_container<I>();
+        });
+    }
 }
 
 size_t database_impl::size() const {
@@ -397,7 +429,9 @@ size_t database_impl::size() const {
 // =============================================================================
 
 bool database_impl::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
-    // log::debug("insert called at height {}", height);
+    if (mode_ == storage_mode::compact) {
+        return compact_insert(key, value, height);
+    }
 
     size_t const index = get_index_from_size(value.size());
     if (index >= container_count) {
@@ -469,7 +503,11 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
 // database_impl - Find
 // =============================================================================
 
-bytes_opt database_impl::find(raw_outpoint const& key, uint32_t height) const {
+std::optional<find_result> database_impl::find(raw_outpoint const& key, uint32_t height) const {
+    if (mode_ == storage_mode::compact) {
+        return compact_find(key, height);
+    }
+
     // Try current version first
     if (auto res = find_in_latest_version(key, height); res) {
         return res;
@@ -480,9 +518,9 @@ bytes_opt database_impl::find(raw_outpoint const& key, uint32_t height) const {
     return std::nullopt;
 }
 
-bytes_opt database_impl::find_in_latest_version(raw_outpoint const& key,
-                                                                           uint32_t height) const {
-    bytes_opt result;
+std::optional<find_result> database_impl::find_in_latest_version(raw_outpoint const& key,
+                                                                  uint32_t height) const {
+    std::optional<find_result> result;
 
     for_each_index<container_count>([&](auto I) {
         if (!result) {
@@ -492,7 +530,7 @@ bytes_opt database_impl::find_in_latest_version(raw_outpoint const& key,
                 search_stats_.add_record(height, it->second.block_height, 0, false, true, 'f');
 #endif
                 auto data = it->second.get_data();
-                result = bytes(data.begin(), data.end());
+                result = find_result{bytes(data.begin(), data.end()), it->second.block_height};
             }
         }
     });
@@ -500,54 +538,15 @@ bytes_opt database_impl::find_in_latest_version(raw_outpoint const& key,
     return result;
 }
 
-bytes_opt database_impl::find_in_previous_versions(raw_outpoint const& key,
-                                                                              uint32_t height) {
-    bytes_opt result;
-
-    for_each_index<container_count>([&](auto I) {
-        if (!result) {
-            result = find_in_prev_versions<I>(key, height);
-        }
-    });
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    if (!result) {
-        search_stats_.add_record(height, 0, 1, false, false, 'f');
-    }
-#endif
-
-    return result;
-}
-
-template<size_t Index>
-bytes_opt database_impl::find_in_prev_versions(raw_outpoint const& key,
-                                                                          uint32_t height) {
-    for (size_t v = current_versions_[Index]; v-- > 0;) {
-        // Check metadata first
-        if (file_metadata_[Index].size() > v && !file_metadata_[Index][v].key_in_range(key)) {
-            continue;
-        }
-
-        auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, v);
-
-        if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
-            auto depth = static_cast<uint32_t>(current_versions_[Index] - v);
-            search_stats_.add_record(height, it->second.block_height, depth, cache_hit, true, 'f');
-#endif
-            auto data = it->second.get_data();
-            return bytes(data.begin(), data.end());
-        }
-    }
-
-    return std::nullopt;
-}
-
 // =============================================================================
 // database_impl - Erase
 // =============================================================================
 
 size_t database_impl::erase(raw_outpoint const& key, uint32_t height) {
+    if (mode_ == storage_mode::compact) {
+        return compact_erase(key, height);
+    }
+
     size_t search_depth = 0;
 
     // Try current version first
@@ -723,25 +722,46 @@ std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process
 
     // Phase 2: Process remaining files
     if (!deferred_deletions_.empty()) {
-        std::array<std::set<size_t>, container_count> processed_versions;
-        for (auto const& [container_index, version] : cached_files) {
-            processed_versions[container_index].insert(version);
-        }
-
-        for_each_index<container_count>([&](auto I) {
-            if (deferred_deletions_.empty()) return;
-            if (current_versions_[I.value] == 0) return;
-
-            for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
-                if (deferred_deletions_.empty()) break;
-                if (processed_versions[I.value].contains(v)) continue;
-
-                auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-                if (!fs::exists(file_name)) continue;
-
-                successful_deletions += process_deferred_deletions_in_file(I.value, v, false);
+        if (mode_ == storage_mode::compact) {
+            std::set<size_t> processed_versions_compact;
+            for (auto const& [ci, version] : cached_files) {
+                if (ci == compact_sentinel_index) {
+                    processed_versions_compact.insert(version);
+                }
             }
-        });
+
+            if (compact_current_version_ > 0) {
+                for (size_t v = compact_current_version_ - 1; v != SIZE_MAX; --v) {
+                    if (deferred_deletions_.empty()) break;
+                    if (processed_versions_compact.contains(v)) continue;
+
+                    auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+                    if (!fs::exists(file_name)) continue;
+
+                    successful_deletions += process_deferred_deletions_in_file(compact_sentinel_index, v, false);
+                }
+            }
+        } else {
+            std::array<std::set<size_t>, container_count> processed_versions;
+            for (auto const& [container_index, version] : cached_files) {
+                processed_versions[container_index].insert(version);
+            }
+
+            for_each_index<container_count>([&](auto I) {
+                if (deferred_deletions_.empty()) return;
+                if (current_versions_[I.value] == 0) return;
+
+                for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
+                    if (deferred_deletions_.empty()) break;
+                    if (processed_versions[I.value].contains(v)) continue;
+
+                    auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+                    if (!fs::exists(file_name)) continue;
+
+                    successful_deletions += process_deferred_deletions_in_file(I.value, v, false);
+                }
+            });
+        }
     }
 
     // Collect failed deletions (includes key and block height that requested it)
@@ -812,6 +832,40 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
         }
     };
 
+    if (container_index == compact_sentinel_index) {
+        // Compact mode deferred deletions
+        try {
+            auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+
+            auto it = deferred_deletions_.begin();
+            while (it != deferred_deletions_.end()) {
+                auto erased_count = map.erase(it->key);
+                if (erased_count > 0) {
+                    if (compact_file_metadata_.size() > version) {
+                        compact_file_metadata_[version].update_on_delete();
+                    }
+#ifdef UTXOZ_STATISTICS_ENABLED
+                    auto depth = static_cast<uint32_t>(compact_current_version_ - version);
+                    ++deferred_stats_.deletions_by_depth[depth];
+                    search_stats_.add_record(it->height, 0, depth, cache_hit, true, 'e');
+                    --container_stats_[0].deferred_deletes;
+                    --container_stats_[0].current_size;
+                    ++container_stats_[0].total_deletes;
+                    ++height_range_stats_.ranges[it->height / height_range_stats::range_size].deletes[0];
+#endif
+                    it = deferred_deletions_.erase(it);
+                    ++successful_deletions;
+                } else {
+                    ++it;
+                }
+            }
+            return successful_deletions;
+        } catch (std::exception const& e) {
+            log::error("Error processing compact file v{}: {}", version, e.what());
+            return 0;
+        }
+    }
+
     switch (container_index) {
         case 0: return process_with_container(std::integral_constant<size_t, 0>{});
         case 1: return process_with_container(std::integral_constant<size_t, 1>{});
@@ -863,25 +917,46 @@ std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> dat
 
     // Phase 2: Process remaining files
     if (!deferred_lookups_.empty()) {
-        std::array<std::set<size_t>, container_count> processed_versions;
-        for (auto const& [container_index, version] : cached_files) {
-            processed_versions[container_index].insert(version);
-        }
-
-        for_each_index<container_count>([&](auto I) {
-            if (deferred_lookups_.empty()) return;
-            if (current_versions_[I.value] == 0) return;
-
-            for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
-                if (deferred_lookups_.empty()) break;
-                if (processed_versions[I.value].contains(v)) continue;
-
-                auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-                if (!fs::exists(file_name)) continue;
-
-                process_deferred_lookups_in_file(I.value, v, false, successful_lookups);
+        if (mode_ == storage_mode::compact) {
+            std::set<size_t> processed_versions_compact;
+            for (auto const& [ci, version] : cached_files) {
+                if (ci == compact_sentinel_index) {
+                    processed_versions_compact.insert(version);
+                }
             }
-        });
+
+            if (compact_current_version_ > 0) {
+                for (size_t v = compact_current_version_ - 1; v != SIZE_MAX; --v) {
+                    if (deferred_lookups_.empty()) break;
+                    if (processed_versions_compact.contains(v)) continue;
+
+                    auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+                    if (!fs::exists(file_name)) continue;
+
+                    process_deferred_lookups_in_file(compact_sentinel_index, v, false, successful_lookups);
+                }
+            }
+        } else {
+            std::array<std::set<size_t>, container_count> processed_versions;
+            for (auto const& [container_index, version] : cached_files) {
+                processed_versions[container_index].insert(version);
+            }
+
+            for_each_index<container_count>([&](auto I) {
+                if (deferred_lookups_.empty()) return;
+                if (current_versions_[I.value] == 0) return;
+
+                for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
+                    if (deferred_lookups_.empty()) break;
+                    if (processed_versions[I.value].contains(v)) continue;
+
+                    auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+                    if (!fs::exists(file_name)) continue;
+
+                    process_deferred_lookups_in_file(I.value, v, false, successful_lookups);
+                }
+            });
+        }
     }
 
     // Collect failed lookups (includes key and block height)
@@ -940,6 +1015,32 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
             log::error("Error processing lookups in file ({}, v{}): {}", container_index, version, e.what());
         }
     };
+
+    if (container_index == compact_sentinel_index) {
+        try {
+            auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+
+            deferred_lookups_.erase_if([&](auto const& entry) {
+                auto map_it = map.find(entry.key);
+                if (map_it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
+                    auto depth = static_cast<uint32_t>(compact_current_version_ - version);
+                    ++deferred_stats_.lookups_by_depth[depth];
+                    search_stats_.add_record(entry.height, map_it->second.height, depth, cache_hit, true, 'f');
+#endif
+                    bytes data(sizeof(uint32_t) * 2);
+                    std::memcpy(data.data(), &map_it->second.file_number, sizeof(uint32_t));
+                    std::memcpy(data.data() + sizeof(uint32_t), &map_it->second.offset, sizeof(uint32_t));
+                    successful_lookups.emplace(entry.key, std::move(data));
+                    return true;
+                }
+                return false;
+            });
+        } catch (std::exception const& e) {
+            log::error("Error processing compact lookups v{}: {}", version, e.what());
+        }
+        return;
+    }
 
     switch (container_index) {
         case 0: process_with_container(std::integral_constant<size_t, 0>{}); break;
@@ -1093,6 +1194,11 @@ void database_impl::compact_container() {
 }
 
 void database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
+    if (mode_ == storage_mode::compact) {
+        compact_for_each_key(cb, ctx);
+        return;
+    }
+
     for_each_index<container_count>([&](auto I) {
         // Current version (active container)
         auto const& map = container<I>();
@@ -1121,6 +1227,11 @@ void database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), voi
 }
 
 void database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
+    if (mode_ == storage_mode::compact) {
+        compact_for_each_entry(cb, ctx);
+        return;
+    }
+
     for_each_index<container_count>([&](auto I) {
         // Current version (active container)
         auto const& map = container<I>();
@@ -1151,9 +1262,13 @@ void database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, ui
 void database_impl::compact_all() {
     log::info("Starting full database compaction...");
 
-    for_each_index<container_count>([&](auto I) {
-        compact_container<I>();
-    });
+    if (mode_ == storage_mode::compact) {
+        compact_compact_container();
+    } else {
+        for_each_index<container_count>([&](auto I) {
+            compact_container<I>();
+        });
+    }
 
     log::info("Full database compaction complete");
 }
@@ -1207,7 +1322,7 @@ database_statistics database_impl::get_statistics() {
     update_fragmentation_stats();
 
     database_statistics stats;
-
+    stats.mode = mode_;
     stats.total_entries = entries_count_;
     stats.cache_hit_rate = get_cache_hit_rate();
     stats.cached_files_count = file_cache_ ? file_cache_->get_cached_files().size() : 0;
@@ -1217,12 +1332,20 @@ database_statistics database_impl::get_statistics() {
     stats.total_inserts = 0;
     stats.total_deletes = 0;
 
-    for (size_t i = 0; i < container_count; ++i) {
-        stats.containers[i] = container_stats_[i];
-        stats.total_inserts += container_stats_[i].total_inserts;
-        stats.total_deletes += container_stats_[i].total_deletes;
-        stats.rotations_per_container[i] = current_versions_[i];
-        stats.memory_usage_per_container[i] = estimate_memory_usage(i);
+    if (mode_ == storage_mode::compact) {
+        stats.containers[0] = container_stats_[0];
+        stats.total_inserts = container_stats_[0].total_inserts;
+        stats.total_deletes = container_stats_[0].total_deletes;
+        stats.rotations_per_container[0] = compact_current_version_;
+        stats.memory_usage_per_container[0] = compact_active_file_size_;
+    } else {
+        for (size_t i = 0; i < container_count; ++i) {
+            stats.containers[i] = container_stats_[i];
+            stats.total_inserts += container_stats_[i].total_inserts;
+            stats.total_deletes += container_stats_[i].total_deletes;
+            stats.rotations_per_container[i] = current_versions_[i];
+            stats.memory_usage_per_container[i] = estimate_memory_usage(i);
+        }
     }
 
     stats.deferred = deferred_stats_;
@@ -1237,18 +1360,28 @@ void database_impl::print_statistics() {
     auto stats = get_statistics();
 
     log::info("=== UTXO Database Statistics ===");
+    log::info("Storage mode: {}", stats.mode == storage_mode::compact ? "compact" : "full");
     log::info("Total entries: {}", stats.total_entries);
     log::info("Total inserts: {}", stats.total_inserts);
     log::info("Total deletes: {}", stats.total_deletes);
 
     log::info("--- Container Statistics ---");
-    for (size_t i = 0; i < container_count; ++i) {
-        log::info("Container {} (size <= {} bytes):", i, container_sizes[i]);
-        log::info("  Current entries: {}", stats.containers[i].current_size);
-        log::info("  Total inserts: {}", stats.containers[i].total_inserts);
-        log::info("  Total deletes: {}", stats.containers[i].total_deletes);
-        log::info("  File rotations: {}", stats.rotations_per_container[i]);
-        log::info("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[i] / (1024.0*1024.0));
+    if (stats.mode == storage_mode::compact) {
+        log::info("Compact container ({} bytes per entry):", sizeof(compact_value));
+        log::info("  Current entries: {}", stats.containers[0].current_size);
+        log::info("  Total inserts: {}", stats.containers[0].total_inserts);
+        log::info("  Total deletes: {}", stats.containers[0].total_deletes);
+        log::info("  File rotations: {}", stats.rotations_per_container[0]);
+        log::info("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[0] / (1024.0*1024.0));
+    } else {
+        for (size_t i = 0; i < container_count; ++i) {
+            log::info("Container {} (size <= {} bytes):", i, container_sizes[i]);
+            log::info("  Current entries: {}", stats.containers[i].current_size);
+            log::info("  Total inserts: {}", stats.containers[i].total_inserts);
+            log::info("  Total deletes: {}", stats.containers[i].total_deletes);
+            log::info("  File rotations: {}", stats.rotations_per_container[i]);
+            log::info("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[i] / (1024.0*1024.0));
+        }
     }
 
     log::info("--- Cache Statistics ---");
@@ -1265,19 +1398,19 @@ void database_impl::print_statistics() {
 sizing_report database_impl::get_sizing_report() const {
     sizing_report report{};
 
-    for (size_t i = 0; i < container_count; ++i) {
-        auto& info = report.containers[i];
-        info.container_size = container_sizes[i];
-        info.file_size_setting = active_file_sizes_[i];
-        info.file_count = current_versions_[i] + 1;
-        info.current_entries = container_stats_[i].current_size;
-        info.historical_inserts = container_stats_[i].total_inserts;
-        info.historical_deletes = container_stats_[i].total_deletes;
+    if (mode_ == storage_mode::compact) {
+        auto& info = report.containers[0];
+        info.container_size = sizeof(compact_value);
+        info.file_size_setting = compact_active_file_size_;
+        info.file_count = compact_current_version_ + 1;
+        info.current_entries = container_stats_[0].current_size;
+        info.historical_inserts = container_stats_[0].total_inserts;
+        info.historical_deletes = container_stats_[0].total_deletes;
         info.total_wasted_bytes = 0;
 
-        for (auto const& [value_size, count] : container_stats_[i].value_size_distribution) {
-            if (container_sizes[i] > value_size) {
-                info.total_wasted_bytes += (container_sizes[i] - value_size) * count;
+        for (auto const& [value_size, count] : container_stats_[0].value_size_distribution) {
+            if (sizeof(compact_value) > value_size) {
+                info.total_wasted_bytes += (sizeof(compact_value) - value_size) * count;
             }
             report.global_value_size_histogram[value_size] += count;
         }
@@ -1285,6 +1418,28 @@ sizing_report database_impl::get_sizing_report() const {
         info.avg_waste_per_entry = info.historical_inserts > 0
             ? double(info.total_wasted_bytes) / double(info.historical_inserts)
             : 0.0;
+    } else {
+        for (size_t i = 0; i < container_count; ++i) {
+            auto& info = report.containers[i];
+            info.container_size = container_sizes[i];
+            info.file_size_setting = active_file_sizes_[i];
+            info.file_count = current_versions_[i] + 1;
+            info.current_entries = container_stats_[i].current_size;
+            info.historical_inserts = container_stats_[i].total_inserts;
+            info.historical_deletes = container_stats_[i].total_deletes;
+            info.total_wasted_bytes = 0;
+
+            for (auto const& [value_size, count] : container_stats_[i].value_size_distribution) {
+                if (container_sizes[i] > value_size) {
+                    info.total_wasted_bytes += (container_sizes[i] - value_size) * count;
+                }
+                report.global_value_size_histogram[value_size] += count;
+            }
+
+            info.avg_waste_per_entry = info.historical_inserts > 0
+                ? double(info.total_wasted_bytes) / double(info.historical_inserts)
+                : 0.0;
+        }
     }
 
     return report;
@@ -1437,6 +1592,855 @@ std::vector<std::pair<size_t, size_t>> database_impl::get_cached_file_info() con
 }
 
 // =============================================================================
+// database_impl - Compact mode implementation
+// =============================================================================
+
+compact_map_t& database_impl::compact_map() {
+    return *static_cast<compact_map_t*>(compact_container_);
+}
+
+compact_map_t const& database_impl::compact_map() const {
+    return *static_cast<compact_map_t const*>(compact_container_);
+}
+
+size_t database_impl::find_latest_version_compact() const {
+    size_t version = 0;
+    while (fs::exists(fmt::format(compact_data_file_format, db_path_.string(), version))) {
+        ++version;
+    }
+    return version > 0 ? version - 1 : 0;
+}
+
+size_t database_impl::count_versions_compact() const {
+    size_t version = 0;
+    while (fs::exists(fmt::format(compact_data_file_format, db_path_.string(), version))) {
+        ++version;
+    }
+    return version;
+}
+
+size_t database_impl::find_optimal_buckets_compact(std::string const& file_path,
+                                                    size_t file_size,
+                                                    size_t initial_buckets) {
+    log::debug("Finding optimal buckets for compact container (file size: {})...", file_size);
+
+    size_t left = 1;
+    size_t right = initial_buckets;
+    size_t best_buckets = left;
+
+    while (left <= right) {
+        size_t mid = left + (right - left) / 2;
+
+        std::string temp_file = fmt::format("{}/temp_compact_{}_{}.dat", file_path, file_size, mid);
+        try {
+            bip::managed_mapped_file segment(bip::open_or_create, temp_file.c_str(), file_size);
+
+            (void)segment.find_or_construct<compact_map_t>("temp_map")(
+                mid,
+                outpoint_hash{},
+                outpoint_equal{},
+                segment.get_allocator<std::pair<raw_outpoint const, compact_value>>()
+            );
+
+            best_buckets = mid;
+            left = mid + 1;
+            log::trace("  {} buckets OK, trying more...", mid);
+        } catch (boost::interprocess::bad_alloc const&) {
+            right = mid - 1;
+        }
+
+        fs::remove(temp_file);
+    }
+
+    log::debug("Optimal buckets for compact container: {}", best_buckets);
+    return best_buckets;
+}
+
+void database_impl::compact_open_or_create(size_t version) {
+    auto file_name = fmt::format(compact_data_file_format, db_path_.string(), version);
+
+    compact_segment_ = std::make_unique<bip::managed_mapped_file>(
+        bip::open_or_create, file_name.c_str(), compact_active_file_size_);
+
+    compact_container_ = compact_segment_->find_or_construct<compact_map_t>("db_map")(
+        compact_min_buckets_ok_,
+        outpoint_hash{},
+        outpoint_equal{},
+        compact_segment_->get_allocator<typename compact_map_t::value_type>()
+    );
+
+    compact_current_version_ = version;
+}
+
+void database_impl::compact_close_container() {
+    if (compact_segment_) {
+        compact_save_metadata(compact_current_version_);
+        compact_segment_->flush();
+        compact_segment_.reset();
+        compact_container_ = nullptr;
+    }
+}
+
+void database_impl::compact_new_version() {
+    compact_close_container();
+    ++compact_current_version_;
+
+    if (compact_file_metadata_.size() <= compact_current_version_) {
+        compact_file_metadata_.resize(compact_current_version_ + 1);
+    }
+    compact_file_metadata_[compact_current_version_] = file_metadata{};
+
+    compact_open_or_create(compact_current_version_);
+    log::debug("Compact container rotated to version {}", compact_current_version_);
+}
+
+bool database_impl::compact_can_insert_safely() const {
+    auto const& map = compact_map();
+
+    if (map.bucket_count() > 0) {
+        float next_load = float(map.size() + 1) / float(map.bucket_count());
+        if (next_load >= map.max_load_factor() * 0.95f) {
+            return false;
+        }
+    }
+
+    if (compact_segment_) {
+        try {
+            size_t free_memory = compact_segment_->get_free_memory();
+            size_t entry_size = sizeof(typename compact_map_t::value_type);
+            size_t buffer_size = entry_size * 10;
+            return free_memory > buffer_size;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool database_impl::compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
+    if (value.size() != sizeof(uint32_t) * 2) {
+        throw std::invalid_argument(fmt::format(
+            "Compact mode requires exactly {} bytes (file_number + offset), got {}",
+            sizeof(uint32_t) * 2, value.size()));
+    }
+
+    if (!compact_can_insert_safely()) {
+        log::debug("Rotating compact container due to safety constraints");
+        compact_new_version();
+    }
+
+    compact_value val;
+    val.height = height;
+    std::memcpy(&val.file_number, value.data(), sizeof(uint32_t));
+    std::memcpy(&val.offset, value.data() + sizeof(uint32_t), sizeof(uint32_t));
+
+    size_t max_retries = 3;
+    while (max_retries > 0) {
+        try {
+            auto& map = compact_map();
+            [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
+
+            auto [it, inserted] = map.emplace(key, val);
+            if (!inserted) {
+                log::warn("compact_insert: duplicate key at height {}, outpoint={}",
+                    height, outpoint_to_string(key));
+            }
+            if (inserted) {
+                ++entries_count_;
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+                ++container_stats_[0].total_inserts;
+                ++container_stats_[0].current_size;
+                ++container_stats_[0].value_size_distribution[value.size()];
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[0];
+
+                if (map.bucket_count() != bucket_count_before) {
+                    ++container_stats_[0].rehash_count;
+                }
+#endif
+
+                // Update compact metadata
+                if (compact_file_metadata_.size() <= compact_current_version_) {
+                    compact_file_metadata_.resize(compact_current_version_ + 1);
+                }
+                compact_file_metadata_[compact_current_version_].update_on_insert(key, height);
+            }
+            return inserted;
+
+        } catch (boost::interprocess::bad_alloc const& e) {
+            log::error("Error inserting into compact container: {}", e.what());
+            compact_new_version();
+        }
+        --max_retries;
+    }
+
+    log::error("Failed to insert into compact container after 3 retries");
+    throw boost::interprocess::bad_alloc();
+}
+
+std::optional<find_result> database_impl::compact_find(raw_outpoint const& key, uint32_t height) const {
+    if (auto res = compact_find_in_latest(key, height); res) {
+        return res;
+    }
+
+    add_to_deferred_lookups(key, height);
+    return std::nullopt;
+}
+
+std::optional<find_result> database_impl::compact_find_in_latest(raw_outpoint const& key, uint32_t height) const {
+    auto const& map = compact_map();
+    if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
+        search_stats_.add_record(height, it->second.height, 0, false, true, 'f');
+#endif
+        bytes data(sizeof(uint32_t) * 2);
+        std::memcpy(data.data(), &it->second.file_number, sizeof(uint32_t));
+        std::memcpy(data.data() + sizeof(uint32_t), &it->second.offset, sizeof(uint32_t));
+        return find_result{std::move(data), it->second.height};
+    }
+    return std::nullopt;
+}
+
+size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
+    // Try current version first
+    if (auto res = compact_erase_in_latest(key, height); res > 0) {
+        entries_count_ -= res;
+        return res;
+    }
+
+    // Try cached files
+    size_t search_depth = 1;
+    auto cached_files = file_cache_->get_cached_files();
+    for (auto const& [ci, version] : cached_files) {
+        if (ci != compact_sentinel_index) continue;
+        ++search_depth;
+
+        if (file_cache_->is_cached(compact_sentinel_index, version)) {
+            try {
+                auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+
+                if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
+                    uint32_t age = height - it->second.height;
+                    ++lifetime_stats_.age_distribution[age];
+                    lifetime_stats_.max_age = std::max(lifetime_stats_.max_age, age);
+                    ++lifetime_stats_.total_spent;
+                    lifetime_stats_.average_age =
+                        (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
+                        / lifetime_stats_.total_spent;
+
+                    search_stats_.add_record(height, it->second.height,
+                        static_cast<uint32_t>(compact_current_version_ - version), cache_hit, true, 'e');
+                    --container_stats_[0].current_size;
+                    ++container_stats_[0].total_deletes;
+                    ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
+#endif
+                    map.erase(it);
+
+                    if (compact_file_metadata_.size() > version) {
+                        compact_file_metadata_[version].update_on_delete();
+                    }
+
+                    --entries_count_;
+                    return 1;
+                }
+            } catch (std::exception const& e) {
+                log::error("Error accessing cached compact file v{}: {}", version, e.what());
+            }
+        }
+    }
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    ++not_found_stats_.total_not_found;
+    not_found_stats_.total_search_depth += search_depth;
+    not_found_stats_.max_search_depth = std::max(not_found_stats_.max_search_depth, search_depth);
+    ++not_found_stats_.depth_distribution[search_depth];
+#endif
+
+    add_to_deferred_deletions(key, height);
+    return 0;
+}
+
+size_t database_impl::compact_erase_in_latest(raw_outpoint const& key, uint32_t height) {
+    auto& map = compact_map();
+    if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
+        uint32_t age = height - it->second.height;
+        ++lifetime_stats_.age_distribution[age];
+        lifetime_stats_.max_age = std::max(lifetime_stats_.max_age, age);
+        ++lifetime_stats_.total_spent;
+        lifetime_stats_.average_age =
+            (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
+            / lifetime_stats_.total_spent;
+
+        search_stats_.add_record(height, it->second.height, 0, false, true, 'e');
+        --container_stats_[0].current_size;
+        ++container_stats_[0].total_deletes;
+        ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
+#endif
+        map.erase(it);
+        return 1;
+    }
+    return 0;
+}
+
+void database_impl::compact_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
+    // Current version
+    auto const& map = compact_map();
+    for (auto const& [key, _] : map) {
+        cb(ctx, key);
+    }
+
+    // Previous versions
+    for (size_t v = 0; v < compact_current_version_; ++v) {
+        auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+        if (!fs::exists(file_name)) continue;
+
+        try {
+            auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+            auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+            if (!map_ptr) continue;
+
+            for (auto const& [key, _] : *map_ptr) {
+                cb(ctx, key);
+            }
+        } catch (std::exception const& e) {
+            log::error("compact_for_each_key: error reading compact v{}: {}", v, e.what());
+        }
+    }
+}
+
+void database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
+    auto emit = [&](raw_outpoint const& key, compact_value const& val) {
+        std::array<uint8_t, sizeof(uint32_t) * 2> buf;
+        std::memcpy(buf.data(), &val.file_number, sizeof(uint32_t));
+        std::memcpy(buf.data() + sizeof(uint32_t), &val.offset, sizeof(uint32_t));
+        cb(ctx, key, val.height, {buf.data(), buf.size()});
+    };
+
+    // Current version
+    auto const& map = compact_map();
+    for (auto const& [key, val] : map) {
+        emit(key, val);
+    }
+
+    // Previous versions
+    for (size_t v = 0; v < compact_current_version_; ++v) {
+        auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+        if (!fs::exists(file_name)) continue;
+
+        try {
+            auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+            auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+            if (!map_ptr) continue;
+
+            for (auto const& [key, val] : *map_ptr) {
+                emit(key, val);
+            }
+        } catch (std::exception const& e) {
+            log::error("compact_for_each_entry: error reading compact v{}: {}", v, e.what());
+        }
+    }
+}
+
+void database_impl::compact_compact_container() {
+    log::debug("Starting compaction for compact container...");
+
+    size_t files_deleted = 0;
+    size_t entries_moved = 0;
+
+    compact_close_container();
+
+    size_t total_versions = count_versions_compact();
+    if (total_versions <= 1) {
+        log::trace("Compact container has {} files, no compaction needed", total_versions);
+        compact_open_or_create(total_versions > 0 ? total_versions - 1 : 0);
+        return;
+    }
+
+    size_t target_idx = 0;
+    size_t source_idx = 1;
+
+    auto open_compact_file = [&](size_t version) {
+        auto file_name = fmt::format(compact_data_file_format, db_path_.string(), version);
+        return std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+    };
+
+    auto target_segment = open_compact_file(target_idx);
+    auto source_segment = open_compact_file(source_idx);
+
+    auto* target_map = target_segment->find<compact_map_t>("db_map").first;
+    auto* source_map = source_segment->find<compact_map_t>("db_map").first;
+
+    auto can_insert_in_map = [](compact_map_t const& map,
+                                bip::managed_mapped_file const& segment) -> bool {
+        if (map.bucket_count() > 0) {
+            float next_load = float(map.size() + 1) / float(map.bucket_count());
+            if (next_load >= map.max_load_factor() * 0.95f) {
+                return false;
+            }
+        }
+        try {
+            size_t free_memory = segment.get_free_memory();
+            size_t entry_size = sizeof(typename compact_map_t::value_type);
+            return free_memory > entry_size * 100;
+        } catch (...) {
+            return false;
+        }
+    };
+
+    while (source_idx < total_versions) {
+        auto it = source_map->begin();
+
+        while (it != source_map->end()) {
+            if (!can_insert_in_map(*target_map, *target_segment)) {
+                target_segment.reset();
+                target_idx = source_idx;
+                target_segment = std::move(source_segment);
+                target_map = source_map;
+
+                ++source_idx;
+                if (source_idx >= total_versions) break;
+
+                source_segment = open_compact_file(source_idx);
+                source_map = source_segment->find<compact_map_t>("db_map").first;
+                break;
+            }
+
+            auto key = it->first;
+            auto value = it->second;
+
+            try {
+                target_map->emplace(key, value);
+                it = source_map->erase(it);
+                ++entries_moved;
+            } catch (boost::interprocess::bad_alloc const&) {
+                target_segment.reset();
+                target_idx = source_idx;
+                target_segment = std::move(source_segment);
+                target_map = source_map;
+
+                ++source_idx;
+                if (source_idx >= total_versions) break;
+
+                source_segment = open_compact_file(source_idx);
+                source_map = source_segment->find<compact_map_t>("db_map").first;
+                it = source_map->begin();
+            }
+        }
+
+        if (source_map && source_map->empty()) {
+            source_segment.reset();
+            auto source_path = fmt::format(compact_data_file_format, db_path_.string(), source_idx);
+            fs::remove(source_path);
+            ++files_deleted;
+
+            for (size_t i = source_idx + 1; i < total_versions; ++i) {
+                auto old_path = fmt::format(compact_data_file_format, db_path_.string(), i);
+                auto new_path = fmt::format(compact_data_file_format, db_path_.string(), i - 1);
+                fs::rename(old_path, new_path);
+            }
+
+            --total_versions;
+
+            if (source_idx < total_versions) {
+                source_segment = open_compact_file(source_idx);
+                source_map = source_segment->find<compact_map_t>("db_map").first;
+            }
+        }
+    }
+
+    target_segment.reset();
+    source_segment.reset();
+
+    // Rebuild metadata
+    {
+        size_t old_meta_idx = 0;
+        while (true) {
+            auto meta_path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), old_meta_idx);
+            if (!fs::exists(meta_path)) break;
+            fs::remove(meta_path);
+            ++old_meta_idx;
+        }
+
+        compact_file_metadata_.clear();
+        compact_file_metadata_.resize(total_versions);
+
+        for (size_t v = 0; v < total_versions; ++v) {
+            auto& meta = compact_file_metadata_[v];
+            meta.container_index = compact_sentinel_index;
+            meta.version = v;
+
+            auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+            if (!fs::exists(file_name)) continue;
+
+            try {
+                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+                if (!map_ptr) continue;
+
+                for (auto const& [key, val] : *map_ptr) {
+                    meta.update_on_insert(key, val.height);
+                }
+            } catch (std::exception const& e) {
+                log::error("compact_compact_container: error scanning compact v{} for metadata: {}", v, e.what());
+            }
+
+            compact_save_metadata(v);
+        }
+    }
+
+    compact_current_version_ = total_versions > 0 ? total_versions - 1 : 0;
+    compact_open_or_create(compact_current_version_);
+
+    log::debug("Compact compaction complete: {} files deleted, {} entries moved",
+              files_deleted, entries_moved);
+}
+
+// =============================================================================
+// database_impl - Compact metadata helpers
+// =============================================================================
+
+void database_impl::compact_save_metadata(size_t version) {
+    if (version >= compact_file_metadata_.size()) return;
+
+    auto const& meta = compact_file_metadata_[version];
+    auto metadata_file = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
+
+    std::ofstream ofs(metadata_file, std::ios::binary);
+    if (!ofs) {
+        log::warn("Failed to save compact metadata: {}", metadata_file);
+        return;
+    }
+
+    uint64_t entry_count = meta.entry_count;
+    ofs.write(reinterpret_cast<char const*>(&meta.min_block_height), sizeof(meta.min_block_height));
+    ofs.write(reinterpret_cast<char const*>(&meta.max_block_height), sizeof(meta.max_block_height));
+    ofs.write(reinterpret_cast<char const*>(meta.min_key.data()), meta.min_key.size());
+    ofs.write(reinterpret_cast<char const*>(meta.max_key.data()), meta.max_key.size());
+    ofs.write(reinterpret_cast<char const*>(&entry_count), sizeof(entry_count));
+}
+
+void database_impl::compact_load_metadata(size_t version) {
+    auto metadata_file = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
+
+    std::ifstream ifs(metadata_file, std::ios::binary);
+    if (!ifs) return;
+
+    if (compact_file_metadata_.size() <= version) {
+        compact_file_metadata_.resize(version + 1);
+    }
+
+    auto& meta = compact_file_metadata_[version];
+    meta.container_index = compact_sentinel_index;
+    meta.version = version;
+
+    uint64_t entry_count = 0;
+    ifs.read(reinterpret_cast<char*>(&meta.min_block_height), sizeof(meta.min_block_height));
+    ifs.read(reinterpret_cast<char*>(&meta.max_block_height), sizeof(meta.max_block_height));
+    ifs.read(reinterpret_cast<char*>(meta.min_key.data()), meta.min_key.size());
+    ifs.read(reinterpret_cast<char*>(meta.max_key.data()), meta.max_key.size());
+    ifs.read(reinterpret_cast<char*>(&entry_count), sizeof(entry_count));
+    meta.entry_count = static_cast<size_t>(entry_count);
+}
+
+// =============================================================================
+// database_impl - Config persistence
+// =============================================================================
+
+void database_impl::save_config_to_disk() {
+    auto config_path = db_path_ / "utxoz_config.dat";
+    std::ofstream ofs(config_path, std::ios::binary);
+    if (!ofs) {
+        log::warn("Failed to save config: {}", config_path.string());
+        return;
+    }
+
+    // Magic: "UTXO"
+    char magic[4] = {'U', 'T', 'X', 'O'};
+    ofs.write(magic, 4);
+
+    // Version
+    uint32_t version = 1;
+    ofs.write(reinterpret_cast<char const*>(&version), sizeof(version));
+
+    // Mode
+    uint8_t mode_byte = static_cast<uint8_t>(mode_);
+    ofs.write(reinterpret_cast<char const*>(&mode_byte), sizeof(mode_byte));
+}
+
+void database_impl::load_config_from_disk() {
+    auto config_path = db_path_ / "utxoz_config.dat";
+    std::ifstream ifs(config_path, std::ios::binary);
+    if (!ifs) {
+        // No config file = legacy full mode
+        mode_ = storage_mode::full;
+        return;
+    }
+
+    char magic[4];
+    ifs.read(magic, 4);
+    if (magic[0] != 'U' || magic[1] != 'T' || magic[2] != 'X' || magic[3] != 'O') {
+        throw std::runtime_error("Invalid config file: bad magic");
+    }
+
+    uint32_t version;
+    ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (version != 1) {
+        throw std::runtime_error(fmt::format("Unsupported config version: {}", version));
+    }
+
+    uint8_t mode_byte;
+    ifs.read(reinterpret_cast<char*>(&mode_byte), sizeof(mode_byte));
+    mode_ = static_cast<storage_mode>(mode_byte);
+}
+
+// =============================================================================
+// database_impl - Typed full-mode methods
+// =============================================================================
+
+std::optional<full_find_result> database_impl::full_find(raw_outpoint const& key, uint32_t height) const {
+    // Try current version first
+    std::optional<full_find_result> result;
+
+    for_each_index<container_count>([&](auto I) {
+        if (!result) {
+            auto& map = container<I>();
+            if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
+                search_stats_.add_record(height, it->second.block_height, 0, false, true, 'f');
+#endif
+                auto data = it->second.get_data();
+                result = full_find_result{bytes(data.begin(), data.end()), it->second.block_height};
+            }
+        }
+    });
+
+    if (result) return result;
+
+    // Defer lookup to batch processing for efficiency
+    add_to_deferred_lookups(key, height);
+    return std::nullopt;
+}
+
+std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>
+database_impl::full_process_pending_lookups() {
+    if (deferred_lookups_.empty()) return {};
+
+    // Use the existing untyped process_pending_lookups, then convert
+    auto [untyped_map, failed] = process_pending_lookups();
+
+    flat_map<raw_outpoint, full_find_result> typed_map;
+    typed_map.reserve(untyped_map.size());
+    for (auto& [key, data] : untyped_map) {
+        // The untyped map stores bytes — wrap into full_find_result
+        // Note: block_height is not preserved in untyped lookups, so we store 0.
+        // This is a limitation of the internal path; the bytes *are* the value data.
+        typed_map.emplace(key, full_find_result{std::move(data), 0});
+    }
+
+    return {std::move(typed_map), std::move(failed)};
+}
+
+// =============================================================================
+// database_impl - Typed compact-mode methods
+// =============================================================================
+
+bool database_impl::compact_insert_typed(raw_outpoint const& key, uint32_t height,
+                                          uint32_t file_number, uint32_t offset) {
+    if (!compact_can_insert_safely()) {
+        log::debug("Rotating compact container due to safety constraints");
+        compact_new_version();
+    }
+
+    compact_value val;
+    val.height = height;
+    val.file_number = file_number;
+    val.offset = offset;
+
+    size_t max_retries = 3;
+    while (max_retries > 0) {
+        try {
+            auto& map = compact_map();
+            [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
+
+            auto [it, inserted] = map.emplace(key, val);
+            if (!inserted) {
+                log::warn("compact_insert_typed: duplicate key at height {}, outpoint={}",
+                    height, outpoint_to_string(key));
+            }
+            if (inserted) {
+                ++entries_count_;
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+                ++container_stats_[0].total_inserts;
+                ++container_stats_[0].current_size;
+                ++container_stats_[0].value_size_distribution[sizeof(uint32_t) * 2];
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[0];
+
+                if (map.bucket_count() != bucket_count_before) {
+                    ++container_stats_[0].rehash_count;
+                }
+#endif
+
+                if (compact_file_metadata_.size() <= compact_current_version_) {
+                    compact_file_metadata_.resize(compact_current_version_ + 1);
+                }
+                compact_file_metadata_[compact_current_version_].update_on_insert(key, height);
+            }
+            return inserted;
+
+        } catch (boost::interprocess::bad_alloc const& e) {
+            log::error("Error inserting into compact container: {}", e.what());
+            compact_new_version();
+        }
+        --max_retries;
+    }
+
+    log::error("Failed to insert into compact container after 3 retries");
+    throw boost::interprocess::bad_alloc();
+}
+
+std::optional<compact_find_result> database_impl::compact_find_typed(raw_outpoint const& key, uint32_t height) const {
+    auto const& map = compact_map();
+    if (auto it = map.find(key); it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
+        search_stats_.add_record(height, it->second.height, 0, false, true, 'f');
+#endif
+        return compact_find_result{it->second.height, it->second.file_number, it->second.offset};
+    }
+
+    add_to_deferred_lookups(key, height);
+    return std::nullopt;
+}
+
+std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>>
+database_impl::compact_process_pending_lookups() {
+    if (deferred_lookups_.empty()) return {};
+
+    flat_map<raw_outpoint, compact_find_result> successful_lookups;
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    auto const start_time = std::chrono::steady_clock::now();
+    ++deferred_stats_.processing_runs;
+#endif
+
+    size_t initial_size = deferred_lookups_.size();
+    log::debug("Processing {} deferred compact lookups...", initial_size);
+
+    auto process_compact_file = [&](size_t version, bool /*is_cached*/) {
+        try {
+            auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+
+            deferred_lookups_.erase_if([&](auto const& entry) {
+                auto map_it = map.find(entry.key);
+                if (map_it != map.end()) {
+#ifdef UTXOZ_STATISTICS_ENABLED
+                    auto depth = static_cast<uint32_t>(compact_current_version_ - version);
+                    ++deferred_stats_.lookups_by_depth[depth];
+                    search_stats_.add_record(entry.height, map_it->second.height, depth, cache_hit, true, 'f');
+#endif
+                    successful_lookups.emplace(entry.key,
+                        compact_find_result{map_it->second.height, map_it->second.file_number, map_it->second.offset});
+                    return true;
+                }
+                return false;
+            });
+        } catch (std::exception const& e) {
+            log::error("Error processing compact lookups v{}: {}", version, e.what());
+        }
+    };
+
+    // Phase 1: cached files first
+    auto cached_files = file_cache_->get_cached_files();
+    if (!cached_files.empty()) {
+        std::ranges::sort(cached_files, [](auto const& a, auto const& b) {
+            if (a.first != b.first) return a.first < b.first;
+            return a.second > b.second;
+        });
+
+        for (auto const& [ci, version] : cached_files) {
+            if (deferred_lookups_.empty()) break;
+            if (ci == compact_sentinel_index) {
+                process_compact_file(version, true);
+            }
+        }
+    }
+
+    // Phase 2: remaining files
+    if (!deferred_lookups_.empty() && compact_current_version_ > 0) {
+        std::set<size_t> processed_versions;
+        for (auto const& [ci, version] : cached_files) {
+            if (ci == compact_sentinel_index) {
+                processed_versions.insert(version);
+            }
+        }
+
+        for (size_t v = compact_current_version_ - 1; v != SIZE_MAX; --v) {
+            if (deferred_lookups_.empty()) break;
+            if (processed_versions.contains(v)) continue;
+
+            auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+            if (!fs::exists(file_name)) continue;
+
+            process_compact_file(v, false);
+        }
+    }
+
+    // Collect failed lookups
+    std::vector<deferred_lookup_entry> failed_lookups;
+    failed_lookups.reserve(deferred_lookups_.size());
+    deferred_lookups_.visit_all([&](auto const& entry) {
+        failed_lookups.push_back(entry);
+    });
+
+    deferred_lookups_.clear();
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    auto const end_time = std::chrono::steady_clock::now();
+    deferred_stats_.total_processing_time +=
+        std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    deferred_stats_.successfully_processed += successful_lookups.size();
+    deferred_stats_.failed_to_delete += failed_lookups.size();
+#endif
+
+    log::debug("Deferred compact lookup complete: {} successful, {} failed",
+              successful_lookups.size(), failed_lookups.size());
+
+    return {std::move(successful_lookups), std::move(failed_lookups)};
+}
+
+void database_impl::compact_for_each_entry_typed(
+    void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const {
+
+    // Current version
+    auto const& map = compact_map();
+    for (auto const& [key, val] : map) {
+        cb(ctx, key, val.height, val.file_number, val.offset);
+    }
+
+    // Previous versions
+    for (size_t v = 0; v < compact_current_version_; ++v) {
+        auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+        if (!fs::exists(file_name)) continue;
+
+        try {
+            auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+            auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+            if (!map_ptr) continue;
+
+            for (auto const& [key, val] : *map_ptr) {
+                cb(ctx, key, val.height, val.file_number, val.offset);
+            }
+        } catch (std::exception const& e) {
+            log::error("compact_for_each_entry_typed: error reading compact v{}: {}", v, e.what());
+        }
+    }
+}
+
+// =============================================================================
 // Explicit template instantiations
 // =============================================================================
 
@@ -1469,11 +2473,5 @@ template bool database_impl::insert_in_index<1>(raw_outpoint const&, output_data
 template bool database_impl::insert_in_index<2>(raw_outpoint const&, output_data_span, uint32_t);
 template bool database_impl::insert_in_index<3>(raw_outpoint const&, output_data_span, uint32_t);
 template bool database_impl::insert_in_index<4>(raw_outpoint const&, output_data_span, uint32_t);
-
-template bytes_opt database_impl::find_in_prev_versions<0>(raw_outpoint const&, uint32_t);
-template bytes_opt database_impl::find_in_prev_versions<1>(raw_outpoint const&, uint32_t);
-template bytes_opt database_impl::find_in_prev_versions<2>(raw_outpoint const&, uint32_t);
-template bytes_opt database_impl::find_in_prev_versions<3>(raw_outpoint const&, uint32_t);
-template bytes_opt database_impl::find_in_prev_versions<4>(raw_outpoint const&, uint32_t);
 
 } // namespace utxoz::detail
