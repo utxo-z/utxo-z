@@ -142,23 +142,26 @@ struct full_db : db_base {
      * @brief Configure and open the database in full mode
      * @param path Database directory path
      * @param remove_existing If true, remove existing database files
+     * @return void on success, error on failure
      */
-    void configure(std::string_view path, bool remove_existing = false);
+    [[nodiscard]]
+    result<> configure(std::string_view path, bool remove_existing = false);
 
     /**
      * @brief Configure for testing with smaller file sizes (full mode)
      */
-    void configure_for_testing(std::string_view path, bool remove_existing = false);
+    [[nodiscard]]
+    result<> configure_for_testing(std::string_view path, bool remove_existing = false);
 
     /**
      * @brief Insert a new UTXO with variable-size data
      * @param key UTXO key (transaction hash + output index)
      * @param value UTXO value data
      * @param height Block height where this UTXO was created
-     * @return true if inserted successfully, false if already exists
+     * @return true if inserted, false if duplicate, error on failure
      */
     [[nodiscard]]
-    bool insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+    result<bool> insert(raw_outpoint const& key, output_data_span value, uint32_t height);
 
     /**
      * @brief Find a UTXO by key
@@ -214,13 +217,16 @@ struct compact_db : db_base {
      * @brief Configure and open the database in compact mode
      * @param path Database directory path
      * @param remove_existing If true, remove existing database files
+     * @return void on success, error on failure
      */
-    void configure(std::string_view path, bool remove_existing = false);
+    [[nodiscard]]
+    result<> configure(std::string_view path, bool remove_existing = false);
 
     /**
      * @brief Configure for testing with smaller file sizes (compact mode)
      */
-    void configure_for_testing(std::string_view path, bool remove_existing = false);
+    [[nodiscard]]
+    result<> configure_for_testing(std::string_view path, bool remove_existing = false);
 
     /**
      * @brief Insert a new UTXO with typed compact fields
@@ -228,10 +234,10 @@ struct compact_db : db_base {
      * @param file_number Block file number
      * @param offset Offset within the block file
      * @param height Block height where this UTXO was created
-     * @return true if inserted successfully, false if already exists
+     * @return true if inserted, false if duplicate, error on failure
      */
     [[nodiscard]]
-    bool insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height);
+    result<bool> insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height);
 
     /**
      * @brief Find a UTXO by key

@@ -43,12 +43,12 @@ struct database_impl {
     database_impl& operator=(database_impl&&) = delete;
 
     // Public interface implementation
-    void configure(std::string_view path, bool remove_existing, storage_mode mode = storage_mode::full);
-    void configure_for_testing(std::string_view path, bool remove_existing, storage_mode mode = storage_mode::full);
+    result<> configure(std::string_view path, bool remove_existing, storage_mode mode = storage_mode::full);
+    result<> configure_for_testing(std::string_view path, bool remove_existing, storage_mode mode = storage_mode::full);
     void close();
     size_t size() const;
 
-    bool insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+    result<bool> insert(raw_outpoint const& key, output_data_span value, uint32_t height);
     std::optional<find_result> find(raw_outpoint const& key, uint32_t height) const;
     size_t erase(raw_outpoint const& key, uint32_t height);
 
@@ -67,7 +67,7 @@ struct database_impl {
     std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>> full_process_pending_lookups();
 
     // Typed compact-mode methods (no serialization)
-    bool compact_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
+    result<bool> compact_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
     std::optional<compact_find_result> compact_find_typed(raw_outpoint const& key, uint32_t height) const;
     std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>> compact_process_pending_lookups();
     void compact_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
@@ -163,7 +163,7 @@ private:
     size_t estimate_memory_usage(size_t index) const;
 
     // Internal configuration
-    void configure_internal(std::string_view path, bool remove_existing, storage_mode mode);
+    result<> configure_internal(std::string_view path, bool remove_existing, storage_mode mode);
 
     // Metadata management
     void update_metadata_on_insert(size_t index, size_t version, raw_outpoint const& key, uint32_t height);
@@ -175,7 +175,7 @@ private:
     void update_fragmentation_stats();
 
     // Compact mode operations
-    bool compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+    result<bool> compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height);
     std::optional<find_result> compact_find(raw_outpoint const& key, uint32_t height) const;
     std::optional<find_result> compact_find_in_latest(raw_outpoint const& key, uint32_t height) const;
     size_t compact_erase(raw_outpoint const& key, uint32_t height);
@@ -198,7 +198,7 @@ private:
 
     // Config persistence
     void save_config_to_disk();
-    void load_config_from_disk();
+    result<> load_config_from_disk();
 
     // Compact metadata helpers
     void compact_save_metadata(size_t version);

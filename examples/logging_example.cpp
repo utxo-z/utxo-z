@@ -30,7 +30,7 @@ void do_some_operations(utxoz::db& db, uint32_t base_height) {
         tx_hash[1] = static_cast<uint8_t>(base_height & 0xFF);
         auto key = utxoz::make_outpoint(tx_hash, static_cast<uint32_t>(i));
         std::vector<uint8_t> value{1, 2, 3, 4, 5};
-        [[maybe_unused]] auto inserted = db.insert(key, value, base_height);
+        [[maybe_unused]] auto inserted = db.insert(key, value, base_height).value();
     }
     db.print_statistics();
 }
@@ -51,7 +51,7 @@ int main() {
 
     try {
         utxoz::db db;
-        db.configure_for_testing("./logging_example_data", true);
+        db.configure_for_testing("./logging_example_data", true).value();
 
 #ifdef UTXOZ_LOG_CUSTOM
         // =====================================================================

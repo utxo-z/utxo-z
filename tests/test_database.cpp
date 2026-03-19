@@ -57,7 +57,7 @@ struct DatabaseFixture {
         if (std::filesystem::exists(test_path_)) {
             std::filesystem::remove_all(test_path_);
         }
-        db_.configure_for_testing(test_path_, true);
+        db_.configure_for_testing(test_path_, true).value();
     }
 
     ~DatabaseFixture() {
@@ -79,7 +79,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Basic insert and find", "[database]") {
     uint32_t height = 100;
 
     // Insert
-    CHECK(db_.insert(key, value, height));
+    CHECK(db_.insert(key, value, height).value());
     CHECK(db_.size() == 1);
 
     // Find
@@ -90,7 +90,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Basic insert and find", "[database]") {
     CHECK(result->block_height == height);
 
     // Duplicate insert should fail
-    CHECK_FALSE(db_.insert(key, value, height));
+    CHECK_FALSE(db_.insert(key, value, height).value());
     CHECK(db_.size() == 1);
 }
 
@@ -111,7 +111,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Multiple containers by value size", "[databas
         auto key = make_test_key(static_cast<uint32_t>(i + 1), 0);
         auto value = make_test_value(test_cases[i].value_size);
 
-        CHECK(db_.insert(key, value, static_cast<uint32_t>(100 + i)));
+        CHECK(db_.insert(key, value, static_cast<uint32_t>(100 + i)).value());
 
         auto result = db_.find(key, static_cast<uint32_t>(100 + i));
         REQUIRE(result.has_value());
@@ -127,7 +127,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Erase operations", "[database]") {
     uint32_t height = 100;
 
     // Insert and verify
-    CHECK(db_.insert(key, value, height));
+    CHECK(db_.insert(key, value, height).value());
     CHECK(db_.size() == 1);
 
     // Erase
@@ -149,7 +149,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Deferred deletions", "[database]") {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto value = make_test_value(50);
         keys.push_back(key);
-        CHECK(db_.insert(key, value, 100));
+        CHECK(db_.insert(key, value, 100).value());
     }
 
     CHECK(db_.size() == 10);
@@ -181,7 +181,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Statistics", "[database]") {
     for (int i = 0; i < 100; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto value = make_test_value(50 + i % 50);
-        CHECK(db_.insert(key, value, static_cast<uint32_t>(100 + i)));
+        CHECK(db_.insert(key, value, static_cast<uint32_t>(100 + i)).value());
     }
 
     auto stats = db_.get_statistics();
@@ -221,7 +221,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Large data set", "[database][.slow]") {
         auto value = make_test_value(50 + (i % 100));
         keys.push_back(key);
 
-        CHECK(db_.insert(key, value, static_cast<uint32_t>(100 + i)));
+        CHECK(db_.insert(key, value, static_cast<uint32_t>(100 + i)).value());
     }
 
     CHECK(db_.size() == num_utxos);

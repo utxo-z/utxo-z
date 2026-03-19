@@ -194,7 +194,7 @@ int main() {
         // Initialize database
         utxoz::db db;
         log_print("Opening database...\n");
-        db.configure("utxo_blockchain_example", true);
+        db.configure("utxo_blockchain_example", true).value();
         log_print("Database opened with size: {}\n", db.size());
 
         // Simulation parameters
@@ -264,7 +264,7 @@ int main() {
             // Insert new UTXOs
             for (auto const& [key, output] : to_insert) {
                 auto data = output.to_data();
-                [[maybe_unused]] auto inserted = db.insert(key, data, block_height);
+                [[maybe_unused]] auto inserted = db.insert(key, data, block_height).value();
                 ++total_insertions;
             }
 

@@ -23,7 +23,7 @@ int main() {
 
         // Create and configure database
         utxoz::db db;
-        db.configure("./example_utxo_data", true); // Remove existing data
+        db.configure("./example_utxo_data", true).value(); // Remove existing data
 
         fmt::println("Database configured successfully");
         fmt::println("Initial size: {} UTXOs\n", db.size());
@@ -60,7 +60,7 @@ int main() {
 
             // Insert UTXO
             uint32_t height = height_dist(gen);
-            bool inserted = db.insert(key, value, height);
+            bool inserted = db.insert(key, value, height).value();
 
             if (!inserted) {
                 fmt::println("Warning: UTXO already exists");
