@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773935563354,
+  "lastUpdate": 1773937417782,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -5082,6 +5082,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 53.76,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f251ed2e9f2bacd7ef2f2ccbd0c535bad707b975",
+          "message": "feat: add compact storage mode with type-safe split API (#35)\n\nAdd storage_mode::compact for non-pruned nodes that can recover full\nUTXO data from block files. In compact mode, UTXO-Z stores only a\nsmall fixed-size reference (file_number + offset) in a single container,\nreducing storage from ~5 GiB to ~3.6 GiB for 60M UTXOs.\n\nSplit the monolithic `db` class into a type-safe hierarchy:\n- `db_base`: shared methods (close, size, erase, statistics, iteration)\n- `full_db`: variable-size byte values, returns `full_find_result`\n- `compact_db`: typed insert(key, file_number, offset, height),\n  returns `compact_find_result` with named fields — no byte serialization\n- `using db = full_db;` preserves backward compatibility\n\nInternal changes:\n- Add storage_mode enum and compact constants to types.hpp\n- Add full_find_result / compact_find_result result types\n- Add typed methods to database_impl (compact_insert_typed,\n  compact_find_typed, compact_process_pending_lookups, etc.)\n- Implement single-container architecture with dedicated compact_v*.dat files\n- Add config persistence (utxoz_config.dat) with mode mismatch detection\n- Update all tests for the new class hierarchy\n- Update README with new API documentation",
+          "timestamp": "2026-03-19T17:21:21+01:00",
+          "tree_id": "34bfa6016d3052232721118fc3095614a9d16aea",
+          "url": "https://github.com/utxo-z/utxo-z/commit/f251ed2e9f2bacd7ef2f2ccbd0c535bad707b975"
+        },
+        "date": 1773937417489,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 275562.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 298272.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 321232.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 413582.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 403.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 449.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11502543.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 11855073.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12601460.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13925.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 12612318.22,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14280774.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 109111.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 12041.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2377.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3035.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3129.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 53.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 53.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 53.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 53.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 53.66,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.98,
             "unit": "ops/sec"
           }
         ]
