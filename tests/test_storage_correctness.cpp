@@ -1965,3 +1965,84 @@ TEST_CASE("for_each_entry: empty database visits nothing", "[storage][iteration]
 
     db.close();
 }
+
+// =============================================================================
+// Regression: entries_count_ must include all versions on reopen
+// =============================================================================
+
+TEST_CASE("Reopen after rotation: size() counts entries from all versions", "[storage][persistence][rotation][regression]") {
+    ScopedTestDir dir;
+
+    constexpr size_t N = 200'000;
+    size_t size_before_close = 0;
+
+    // Phase 1: insert enough to trigger rotation, record size, close
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, true);
+
+        for (size_t i = 0; i < N; ++i) {
+            auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
+            auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        }
+
+        auto stats = db.get_statistics();
+        bool any_rotation = false;
+        for (size_t i = 0; i < utxoz::container_count; ++i) {
+            if (stats.rotations_per_container[i] > 0) any_rotation = true;
+        }
+        REQUIRE(any_rotation);
+
+        size_before_close = db.size();
+        CHECK(size_before_close == N);
+
+        db.close();
+    }
+
+    // Phase 2: reopen and verify size() matches
+    {
+        utxoz::db db;
+        db.configure_for_testing(dir.path, false);
+
+        CHECK(db.size() == size_before_close);
+
+        db.close();
+    }
+}
+
+// =============================================================================
+// Regression: close() must release impl_ (use-after-close)
+// =============================================================================
+
+TEST_CASE("Close: operations after close throw or return safely", "[database][close][regression]") {
+    ScopedTestDir dir;
+
+    utxoz::db db;
+    db.configure_for_testing(dir.path, true);
+
+    auto key = make_test_key(1, 0);
+    auto val = make_test_value(30);
+    REQUIRE(db.insert(key, val, 100));
+    CHECK(db.size() == 1);
+
+    db.close();
+
+    // After close, size() should return 0 (no impl_)
+    CHECK(db.size() == 0);
+
+    // find should return nullopt (no impl_)
+    auto result = db.find(key, 100);
+    CHECK_FALSE(result.has_value());
+
+    // insert should throw (no impl_)
+    CHECK_THROWS(db.insert(key, val, 200));
+
+    // Reconfigure should work (creates fresh impl_)
+    db.configure_for_testing(dir.path, true);
+    CHECK(db.size() == 0);
+    REQUIRE(db.insert(key, val, 300));
+    CHECK(db.size() == 1);
+
+    db.close();
+}

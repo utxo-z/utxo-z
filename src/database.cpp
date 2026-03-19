@@ -34,6 +34,7 @@ void db::configure_for_testing(std::string_view path, bool remove_existing) {
 void db::close() {
     if (impl_) {
         impl_->close();
+        impl_.reset();
     }
 }
 
