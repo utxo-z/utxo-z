@@ -14,7 +14,6 @@
 #include <cstring>
 #include <expected>
 #include <span>
-#include <string>
 #include <vector>
 #include <optional>
 #include <chrono>
@@ -129,25 +128,18 @@ enum class storage_mode : uint8_t { full = 0, compact = 1 };
  * @brief Error codes for database operations
  */
 enum class error_code : uint8_t {
-    not_configured,         ///< Database not configured (configure() not called)
+    not_found,              ///< Key not found in the database (may be deferred)
+    closed,                 ///< Operation on a closed or moved-from database
     storage_mode_mismatch,  ///< Existing database has a different storage mode
     config_file_corrupt,    ///< Config file is invalid, truncated, or has bad magic
     value_too_large,        ///< Value exceeds maximum container capacity
 };
 
 /**
- * @brief Error type carrying an error_code and a descriptive message
- */
-struct error {
-    error_code code;
-    std::string message;
-};
-
-/**
  * @brief Result type for operations that can fail
  */
 template<typename T = void>
-using result = std::expected<T, error>;
+using result = std::expected<T, error_code>;
 
 /// Result of full_db::find(): data bytes + block height at which the UTXO was inserted.
 struct full_find_result {

@@ -361,9 +361,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
             return std::unexpected(r.error());
         }
         if (mode_ != mode) {
-            return std::unexpected(error{error_code::storage_mode_mismatch,
-                fmt::format("Storage mode mismatch: database was created with mode {}, but mode {} was requested",
-                    static_cast<int>(mode_), static_cast<int>(mode))});
+            return std::unexpected(error_code::storage_mode_mismatch);
         }
     } else {
         // No config file — check for pre-existing data files from the other mode
@@ -371,16 +369,12 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
             if (mode == storage_mode::compact) {
                 auto full_mode_file = fmt::format(data_file_format, db_path_.string(), 0, 0);
                 if (fs::exists(full_mode_file)) {
-                    return std::unexpected(error{error_code::storage_mode_mismatch,
-                        "Storage mode mismatch: directory contains full-mode data files, "
-                        "but compact mode was requested"});
+                    return std::unexpected(error_code::storage_mode_mismatch);
                 }
             } else {
                 auto compact_mode_file = fmt::format(compact_data_file_format, db_path_.string(), 0);
                 if (fs::exists(compact_mode_file)) {
-                    return std::unexpected(error{error_code::storage_mode_mismatch,
-                        "Storage mode mismatch: directory contains compact-mode data files, "
-                        "but full mode was requested"});
+                    return std::unexpected(error_code::storage_mode_mismatch);
                 }
             }
         }
@@ -491,8 +485,7 @@ result<bool> database_impl::insert(raw_outpoint const& key, output_data_span val
     if (index >= container_count) {
         log::error("insert: value too large ({} bytes) for any container (max capacity {}). height={}, outpoint={}",
             value.size(), container_capacities[container_count - 1], height, outpoint_to_string(key));
-        return std::unexpected(error{error_code::value_too_large,
-            fmt::format("Value size {} exceeds maximum capacity {}", value.size(), container_capacities[container_count - 1])});
+        return std::unexpected(error_code::value_too_large);
     }
 
     return std::visit([&](auto ic) -> result<bool> {
@@ -1775,9 +1768,7 @@ bool database_impl::compact_can_insert_safely() const {
 
 result<bool> database_impl::compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     if (value.size() != sizeof(uint32_t) * 2) {
-        return std::unexpected(error{error_code::value_too_large,
-            fmt::format("Compact mode requires exactly {} bytes (file_number + offset), got {}",
-                sizeof(uint32_t) * 2, value.size())});
+        return std::unexpected(error_code::value_too_large);
     }
 
     uint32_t file_number;
@@ -2183,34 +2174,32 @@ result<> database_impl::load_config_from_disk() {
     auto config_path = db_path_ / "utxoz_config.dat";
     std::ifstream ifs(config_path, std::ios::binary);
     if (!ifs) {
-        return std::unexpected(error{error_code::config_file_corrupt, "Unable to open config file"});
+        return std::unexpected(error_code::config_file_corrupt);
     }
 
     char magic[4];
     ifs.read(magic, 4);
     if (!ifs || magic[0] != 'U' || magic[1] != 'T' || magic[2] != 'X' || magic[3] != 'O') {
-        return std::unexpected(error{error_code::config_file_corrupt, "Invalid config file: bad magic or truncated"});
+        return std::unexpected(error_code::config_file_corrupt);
     }
 
     uint32_t version;
     ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (!ifs) {
-        return std::unexpected(error{error_code::config_file_corrupt, "Invalid config file: truncated at version"});
+        return std::unexpected(error_code::config_file_corrupt);
     }
     if (version != 1) {
-        return std::unexpected(error{error_code::config_file_corrupt,
-            fmt::format("Unsupported config version: {}", version)});
+        return std::unexpected(error_code::config_file_corrupt);
     }
 
     uint8_t mode_byte;
     ifs.read(reinterpret_cast<char*>(&mode_byte), sizeof(mode_byte));
     if (!ifs) {
-        return std::unexpected(error{error_code::config_file_corrupt, "Invalid config file: truncated at mode"});
+        return std::unexpected(error_code::config_file_corrupt);
     }
     if (mode_byte != static_cast<uint8_t>(storage_mode::full) &&
         mode_byte != static_cast<uint8_t>(storage_mode::compact)) {
-        return std::unexpected(error{error_code::config_file_corrupt,
-            fmt::format("Invalid config file: unknown storage mode {}", mode_byte)});
+        return std::unexpected(error_code::config_file_corrupt);
     }
     mode_ = static_cast<storage_mode>(mode_byte);
     return {};

@@ -192,9 +192,14 @@ int main() {
 
     try {
         // Initialize database
-        utxoz::db db;
         log_print("Opening database...\n");
-        db.configure("utxo_blockchain_example", true).value();
+        auto r = utxoz::db::open("utxo_blockchain_example", true);
+        if (!r) {
+            log_print("Error: failed to open database\n");
+            close_log_file();
+            return 1;
+        }
+        auto& db = *r;
         log_print("Database opened with size: {}\n", db.size());
 
         // Simulation parameters
@@ -264,7 +269,7 @@ int main() {
             // Insert new UTXOs
             for (auto const& [key, output] : to_insert) {
                 auto data = output.to_data();
-                [[maybe_unused]] auto inserted = db.insert(key, data, block_height).value();
+                (void)db.insert(key, data, block_height);
                 ++total_insertions;
             }
 
@@ -315,9 +320,7 @@ int main() {
         log_print("  Final UTXO count: {}\n", stats.total_entries);
         log_print("  Cache hit rate: {}%\n", stats.cache_hit_rate * 100);
 
-        // Close database
-        db.close();
-        log_print("Database closed successfully\n");
+        log_print("Processing completed successfully\n");
 
     } catch (std::exception const& e) {
         log_print("Error: {}\n", e.what());

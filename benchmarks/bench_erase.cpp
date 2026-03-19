@@ -14,7 +14,7 @@ void register_erase_benchmarks(ankerl::nanobench::Bench& bench) {
         uint32_t id = 0;
         bench.run("erase hit", [&] {
             ankerl::nanobench::doNotOptimizeAway(
-                f.db.erase(make_test_key(id++, 0), 200)
+                f.db->erase(make_test_key(id++, 0), 200)
             );
         });
     }
@@ -26,7 +26,7 @@ void register_erase_benchmarks(ankerl::nanobench::Bench& bench) {
         uint32_t id = 100'000;
         bench.run("erase miss", [&] {
             ankerl::nanobench::doNotOptimizeAway(
-                f.db.erase(make_test_key(id++, 0), 200)
+                f.db->erase(make_test_key(id++, 0), 200)
             );
         });
     }
@@ -38,9 +38,9 @@ void register_erase_benchmarks(ankerl::nanobench::Bench& bench) {
         uint32_t id = 0;
         bench.run("erase + process_pending_deletions (100 entries)", [&] {
             for (uint32_t i = 0; i < 100; ++i) {
-                (void)f.db.erase(make_test_key(id++, 0), 200);
+                (void)f.db->erase(make_test_key(id++, 0), 200);
             }
-            ankerl::nanobench::doNotOptimizeAway(f.db.process_pending_deletions());
+            ankerl::nanobench::doNotOptimizeAway(f.db->process_pending_deletions());
         });
     }
 
@@ -51,7 +51,7 @@ void register_erase_benchmarks(ankerl::nanobench::Bench& bench) {
         uint32_t id = 0;
         bench.run("batch erase 1K", [&] {
             for (uint32_t i = 0; i < 1000; ++i) {
-                (void)f.db.erase(make_test_key(id++, 0), 200);
+                (void)f.db->erase(make_test_key(id++, 0), 200);
             }
         });
     }

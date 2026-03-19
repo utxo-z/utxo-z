@@ -30,8 +30,7 @@ struct database_impl;
 /**
  * @brief Base class with methods common to both storage modes.
  *
- * Not intended to be instantiated directly — use full_db or compact_db.
- * Non-virtual, protected constructors.
+ * Not intended to be instantiated directly — use full_db::open() or compact_db::open().
  */
 struct db_base {
     // Non-copyable
@@ -43,7 +42,8 @@ struct db_base {
     db_base& operator=(db_base&&) noexcept;
 
     /**
-     * @brief Close the database and flush all data
+     * @brief Close the database and flush all data.
+     * Safe to call multiple times. Also called by the destructor.
      */
     void close();
 
@@ -130,28 +130,29 @@ protected:
  *
  * Stores complete UTXO output data (scriptPubKey + amount) across 5 size-tiered
  * containers. Use this when you need the full transaction output data.
+ *
+ * Create via full_db::open() or full_db::open_for_testing().
  */
 struct full_db : db_base {
-    full_db();
     ~full_db();
 
     full_db(full_db&&) noexcept;
     full_db& operator=(full_db&&) noexcept;
 
     /**
-     * @brief Configure and open the database in full mode
+     * @brief Open or create a database in full mode
      * @param path Database directory path
      * @param remove_existing If true, remove existing database files
-     * @return void on success, error on failure
+     * @return full_db on success, error on failure
      */
     [[nodiscard]]
-    result<> configure(std::string_view path, bool remove_existing = false);
+    static result<full_db> open(std::string_view path, bool remove_existing = false);
 
     /**
-     * @brief Configure for testing with smaller file sizes (full mode)
+     * @brief Open for testing with smaller file sizes (full mode)
      */
     [[nodiscard]]
-    result<> configure_for_testing(std::string_view path, bool remove_existing = false);
+    static result<full_db> open_for_testing(std::string_view path, bool remove_existing = false);
 
     /**
      * @brief Insert a new UTXO with variable-size data
@@ -167,10 +168,10 @@ struct full_db : db_base {
      * @brief Find a UTXO by key
      * @param key UTXO key to search for
      * @param height Current block height (for statistics)
-     * @return full_find_result {data, block_height} if found, std::nullopt otherwise
+     * @return full_find_result if found, error with not_found or other code on failure
      */
     [[nodiscard]]
-    std::optional<full_find_result> find(raw_outpoint const& key, uint32_t height) const;
+    result<full_find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     /**
      * @brief Process all pending deferred lookups
@@ -192,6 +193,7 @@ struct full_db : db_base {
     }
 
 private:
+    full_db();
     void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 };
 
@@ -205,28 +207,29 @@ private:
  * Stores only a small fixed-size reference (block_height, file_number, offset)
  * in a single container. Use this when the node stores full block data on disk
  * and only needs to track which file/offset each UTXO lives at.
+ *
+ * Create via compact_db::open() or compact_db::open_for_testing().
  */
 struct compact_db : db_base {
-    compact_db();
     ~compact_db();
 
     compact_db(compact_db&&) noexcept;
     compact_db& operator=(compact_db&&) noexcept;
 
     /**
-     * @brief Configure and open the database in compact mode
+     * @brief Open or create a database in compact mode
      * @param path Database directory path
      * @param remove_existing If true, remove existing database files
-     * @return void on success, error on failure
+     * @return compact_db on success, error on failure
      */
     [[nodiscard]]
-    result<> configure(std::string_view path, bool remove_existing = false);
+    static result<compact_db> open(std::string_view path, bool remove_existing = false);
 
     /**
-     * @brief Configure for testing with smaller file sizes (compact mode)
+     * @brief Open for testing with smaller file sizes (compact mode)
      */
     [[nodiscard]]
-    result<> configure_for_testing(std::string_view path, bool remove_existing = false);
+    static result<compact_db> open_for_testing(std::string_view path, bool remove_existing = false);
 
     /**
      * @brief Insert a new UTXO with typed compact fields
@@ -243,10 +246,10 @@ struct compact_db : db_base {
      * @brief Find a UTXO by key
      * @param key UTXO key to search for
      * @param height Current block height (for statistics)
-     * @return compact_find_result {block_height, file_number, offset} if found, std::nullopt otherwise
+     * @return compact_find_result if found, error with not_found or other code on failure
      */
     [[nodiscard]]
-    std::optional<compact_find_result> find(raw_outpoint const& key, uint32_t height) const;
+    result<compact_find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     /**
      * @brief Process all pending deferred lookups
@@ -269,6 +272,7 @@ struct compact_db : db_base {
     }
 
 private:
+    compact_db();
     void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 };
 

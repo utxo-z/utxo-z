@@ -9,6 +9,8 @@
 #include <cstring>
 #include <filesystem>
 #include <numeric>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -72,11 +74,13 @@ struct BenchFixture {
         if (std::filesystem::exists(path)) {
             std::filesystem::remove_all(path);
         }
-        db.configure_for_testing(path, true);
+        auto r = utxoz::db::open_for_testing(path, true);
+        if (!r) throw std::runtime_error("Failed to open test database");
+        db.emplace(std::move(*r));
     }
 
     ~BenchFixture() {
-        db.close();
+        db.reset();
         if (std::filesystem::exists(path)) {
             std::filesystem::remove_all(path);
         }
@@ -89,7 +93,7 @@ struct BenchFixture {
         auto value = make_test_value(value_size);
         for (size_t i = 0; i < n; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
-            (void)db.insert(key, value, 100);
+            (void)db->insert(key, value, 100);
         }
     }
 
@@ -109,11 +113,11 @@ struct BenchFixture {
                 case 123: value = val_123; break;
                 default:  value = val_89;  break;
             }
-            (void)db.insert(key, value, static_cast<uint32_t>(i / 100));
+            (void)db->insert(key, value, static_cast<uint32_t>(i / 100));
         }
     }
 
-    utxoz::db db;
+    std::optional<utxoz::db> db;
     std::string path;
 };
 

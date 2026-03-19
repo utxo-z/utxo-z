@@ -53,17 +53,19 @@ struct CompactFixture {
         if (std::filesystem::exists(test_path_)) {
             std::filesystem::remove_all(test_path_);
         }
-        db_.configure_for_testing(test_path_, true).value();
+        auto r = utxoz::compact_db::open_for_testing(test_path_, true);
+        if (!r) throw std::runtime_error("Failed to open test database");
+        db_.emplace(std::move(*r));
     }
 
     ~CompactFixture() {
-        db_.close();
+        db_.reset();
         if (std::filesystem::exists(test_path_)) {
             std::filesystem::remove_all(test_path_);
         }
     }
 
-    utxoz::compact_db db_;
+    std::optional<utxoz::compact_db> db_;
     std::string test_path_;
 };
 
@@ -86,18 +88,18 @@ TEST_CASE_METHOD(CompactFixture, "Compact: basic insert and find", "[compact]") 
     uint32_t offset = 12345;
     uint32_t height = 100;
 
-    CHECK(db_.insert(key, file_number, offset, height).value());
-    CHECK(db_.size() == 1);
+    CHECK(db_->insert(key, file_number, offset, height).value());
+    CHECK(db_->size() == 1);
 
-    auto result = db_.find(key, height);
+    auto result = db_->find(key, height);
     REQUIRE(result.has_value());
     CHECK(result->file_number == file_number);
     CHECK(result->offset == offset);
     CHECK(result->block_height == height);
 
     // Duplicate insert should fail
-    CHECK_FALSE(db_.insert(key, file_number, offset, height).value());
-    CHECK(db_.size() == 1);
+    CHECK_FALSE(db_->insert(key, file_number, offset, height).value());
+    CHECK(db_->size() == 1);
 }
 
 TEST_CASE_METHOD(CompactFixture, "Compact: multiple inserts with typed fields", "[compact]") {
@@ -105,31 +107,31 @@ TEST_CASE_METHOD(CompactFixture, "Compact: multiple inserts with typed fields", 
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         uint32_t file_number = static_cast<uint32_t>(i + 1);
         uint32_t offset = static_cast<uint32_t>(i * 1000);
-        CHECK(db_.insert(key, file_number, offset, 100).value());
+        CHECK(db_->insert(key, file_number, offset, 100).value());
 
-        auto result = db_.find(key, 100);
+        auto result = db_->find(key, 100);
         REQUIRE(result.has_value());
         CHECK(result->file_number == file_number);
         CHECK(result->offset == offset);
     }
-    CHECK(db_.size() == 10);
+    CHECK(db_->size() == 10);
 }
 
 TEST_CASE_METHOD(CompactFixture, "Compact: erase operations", "[compact]") {
     auto key = make_test_key(1, 0);
     uint32_t height = 100;
 
-    CHECK(db_.insert(key, 1, 100, height).value());
-    CHECK(db_.size() == 1);
+    CHECK(db_->insert(key, 1, 100, height).value());
+    CHECK(db_->size() == 1);
 
-    CHECK(db_.erase(key, height) == 1);
+    CHECK(db_->erase(key, height) == 1);
 
-    auto result = db_.find(key, height);
+    auto result = db_->find(key, height);
     CHECK_FALSE(result.has_value());
 
     // Erase non-existent key
     auto key2 = make_test_key(2, 0);
-    CHECK(db_.erase(key2, height) == 0);
+    CHECK(db_->erase(key2, height) == 0);
 }
 
 TEST_CASE("Compact: close and reopen", "[compact]") {
@@ -137,8 +139,9 @@ TEST_CASE("Compact: close and reopen", "[compact]") {
 
     // Insert data
     {
-        utxoz::compact_db db;
-        db.configure_for_testing(path, true).value();
+        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        REQUIRE(r_db);
+        auto db = std::move(*r_db);
 
         for (int i = 0; i < 50; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
@@ -150,8 +153,9 @@ TEST_CASE("Compact: close and reopen", "[compact]") {
 
     // Reopen and verify
     {
-        utxoz::compact_db db;
-        db.configure_for_testing(path, false).value();
+        auto r_db = utxoz::compact_db::open_for_testing(path, false);
+        REQUIRE(r_db);
+        auto db = std::move(*r_db);
         CHECK(db.size() == 50);
 
         for (int i = 0; i < 50; ++i) {
@@ -172,8 +176,9 @@ TEST_CASE("Compact: mode mismatch detection", "[compact]") {
 
     // Create as compact
     {
-        utxoz::compact_db db;
-        db.configure_for_testing(path, true).value();
+        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        REQUIRE(r_db);
+        auto db = std::move(*r_db);
         auto key = make_test_key(1, 0);
         db.insert(key, 1, 100, 100).value();
         db.close();
@@ -181,17 +186,17 @@ TEST_CASE("Compact: mode mismatch detection", "[compact]") {
 
     // Try to open as full - should return error
     {
-        utxoz::full_db db;
-        auto r = db.configure_for_testing(path, false);
+        auto r = utxoz::full_db::open_for_testing(path, false);
         REQUIRE_FALSE(r.has_value());
-        CHECK(r.error().code == utxoz::error_code::storage_mode_mismatch);
+        CHECK(r.error() == utxoz::error_code::storage_mode_mismatch);
     }
 
     // Create as full in another path
     auto path2 = make_fresh_path();
     {
-        utxoz::full_db db;
-        db.configure_for_testing(path2, true).value();
+        auto r_db = utxoz::full_db::open_for_testing(path2, true);
+        REQUIRE(r_db);
+        auto db = std::move(*r_db);
         auto key = make_test_key(1, 0);
         auto value = std::vector<uint8_t>(30, 0x42);
         db.insert(key, value, 100).value();
@@ -200,10 +205,9 @@ TEST_CASE("Compact: mode mismatch detection", "[compact]") {
 
     // Try to open as compact - should return error
     {
-        utxoz::compact_db db;
-        auto r = db.configure_for_testing(path2, false);
+        auto r = utxoz::compact_db::open_for_testing(path2, false);
         REQUIRE_FALSE(r.has_value());
-        CHECK(r.error().code == utxoz::error_code::storage_mode_mismatch);
+        CHECK(r.error() == utxoz::error_code::storage_mode_mismatch);
     }
 
     std::filesystem::remove_all(path);
@@ -215,26 +219,26 @@ TEST_CASE_METHOD(CompactFixture, "Compact: deferred deletions", "[compact]") {
     for (int i = 0; i < 10; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         keys.push_back(key);
-        CHECK(db_.insert(key, static_cast<uint32_t>(i), static_cast<uint32_t>(i * 10), 100).value());
+        CHECK(db_->insert(key, static_cast<uint32_t>(i), static_cast<uint32_t>(i * 10), 100).value());
     }
 
-    CHECK(db_.size() == 10);
+    CHECK(db_->size() == 10);
 
     // Erase some - should find them in latest version
     for (int i = 0; i < 5; ++i) {
-        CHECK(db_.erase(keys[i], 200) == 1);
+        CHECK(db_->erase(keys[i], 200) == 1);
     }
 
-    auto [deleted, failed] = db_.process_pending_deletions();
+    auto [deleted, failed] = db_->process_pending_deletions();
     CHECK(failed.size() == 0);
 
     for (int i = 0; i < 5; ++i) {
-        auto result = db_.find(keys[i], 200);
+        auto result = db_->find(keys[i], 200);
         CHECK_FALSE(result.has_value());
     }
 
     for (int i = 5; i < 10; ++i) {
-        auto result = db_.find(keys[i], 200);
+        auto result = db_->find(keys[i], 200);
         CHECK(result.has_value());
     }
 }
@@ -242,11 +246,11 @@ TEST_CASE_METHOD(CompactFixture, "Compact: deferred deletions", "[compact]") {
 TEST_CASE_METHOD(CompactFixture, "Compact: for_each_key", "[compact]") {
     for (int i = 0; i < 20; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
-        db_.insert(key, static_cast<uint32_t>(i), 0, 100).value();
+        db_->insert(key, static_cast<uint32_t>(i), 0, 100).value();
     }
 
     size_t count = 0;
-    db_.for_each_key([&](utxoz::raw_outpoint const&) {
+    db_->for_each_key([&](utxoz::raw_outpoint const&) {
         ++count;
     });
 
@@ -256,12 +260,12 @@ TEST_CASE_METHOD(CompactFixture, "Compact: for_each_key", "[compact]") {
 TEST_CASE_METHOD(CompactFixture, "Compact: for_each_entry", "[compact]") {
     for (int i = 0; i < 20; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
-        db_.insert(key, static_cast<uint32_t>(i + 1), static_cast<uint32_t>(i * 100),
+        db_->insert(key, static_cast<uint32_t>(i + 1), static_cast<uint32_t>(i * 100),
                    static_cast<uint32_t>(100 + i)).value();
     }
 
     size_t count = 0;
-    db_.for_each_entry([&](utxoz::raw_outpoint const&, uint32_t height,
+    db_->for_each_entry([&](utxoz::raw_outpoint const&, uint32_t height,
                            uint32_t file_number, uint32_t offset) {
         CHECK(height >= 100);
         CHECK(file_number >= 1);
@@ -274,10 +278,10 @@ TEST_CASE_METHOD(CompactFixture, "Compact: for_each_entry", "[compact]") {
 TEST_CASE_METHOD(CompactFixture, "Compact: statistics", "[compact]") {
     for (int i = 0; i < 50; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
-        db_.insert(key, static_cast<uint32_t>(i), 0, static_cast<uint32_t>(100 + i)).value();
+        db_->insert(key, static_cast<uint32_t>(i), 0, static_cast<uint32_t>(100 + i)).value();
     }
 
-    auto stats = db_.get_statistics();
+    auto stats = db_->get_statistics();
     CHECK(stats.mode == utxoz::storage_mode::compact);
     CHECK(stats.total_entries == 50);
     CHECK(stats.total_inserts >= 50);
@@ -287,23 +291,23 @@ TEST_CASE_METHOD(CompactFixture, "Compact: compaction", "[compact]") {
     // Insert enough data to verify compaction works
     for (int i = 0; i < 100; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
-        db_.insert(key, static_cast<uint32_t>(i), 0, 100).value();
+        db_->insert(key, static_cast<uint32_t>(i), 0, 100).value();
     }
 
     // Erase half
     for (int i = 0; i < 50; ++i) {
-        CHECK(db_.erase(make_test_key(static_cast<uint32_t>(i), 0), 200) == 1);
+        CHECK(db_->erase(make_test_key(static_cast<uint32_t>(i), 0), 200) == 1);
     }
-    auto [deleted, failed] = db_.process_pending_deletions();
+    auto [deleted, failed] = db_->process_pending_deletions();
     CHECK(failed.empty());
 
     // Compact
-    db_.compact_all();
+    db_->compact_all();
 
     // Verify remaining entries
     for (int i = 50; i < 100; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
-        auto result = db_.find(key, 300);
+        auto result = db_->find(key, 300);
         CHECK(result.has_value());
     }
 }
@@ -312,8 +316,9 @@ TEST_CASE("Compact: file naming uses compact_v prefix", "[compact]") {
     auto path = make_fresh_path();
 
     {
-        utxoz::compact_db db;
-        db.configure_for_testing(path, true).value();
+        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        REQUIRE(r_db);
+        auto db = std::move(*r_db);
         auto key = make_test_key(1, 0);
         db.insert(key, 1, 100, 100).value();
         db.close();
@@ -339,8 +344,9 @@ TEST_CASE("Compact: config file is created", "[compact]") {
     auto path = make_fresh_path();
 
     {
-        utxoz::compact_db db;
-        db.configure_for_testing(path, true).value();
+        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        REQUIRE(r_db);
+        auto db = std::move(*r_db);
         db.close();
     }
 

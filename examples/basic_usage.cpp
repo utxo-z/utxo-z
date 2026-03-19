@@ -22,8 +22,12 @@ int main() {
         fmt::println("==================================\n");
 
         // Create and configure database
-        utxoz::db db;
-        db.configure("./example_utxo_data", true).value(); // Remove existing data
+        auto r = utxoz::db::open("./example_utxo_data", true); // Remove existing data
+        if (!r) {
+            fmt::println("Error: failed to open database");
+            return 1;
+        }
+        auto& db = *r;
 
         fmt::println("Database configured successfully");
         fmt::println("Initial size: {} UTXOs\n", db.size());
@@ -60,9 +64,14 @@ int main() {
 
             // Insert UTXO
             uint32_t height = height_dist(gen);
-            bool inserted = db.insert(key, value, height).value();
+            auto inserted = db.insert(key, value, height);
 
             if (!inserted) {
+                fmt::println("Warning: insert failed for UTXO {}", i);
+                continue;
+            }
+
+            if (!*inserted) {
                 fmt::println("Warning: UTXO already exists");
             }
 
@@ -126,9 +135,7 @@ int main() {
         fmt::println("Total deletes: {}", stats.total_deletes);
         fmt::println("Cache hit rate: {}%", stats.cache_hit_rate * 100);
 
-        // Close database
-        db.close();
-        fmt::println("\nDatabase closed successfully");
+        fmt::println("\nDone");
 
     } catch (std::exception const& e) {
         fmt::println(stderr, "Error: {}", e.what());
