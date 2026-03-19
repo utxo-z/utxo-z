@@ -34,8 +34,10 @@ void register_storage_benchmarks(ankerl::nanobench::Bench& bench) {
         auto path = f.path;
 
         bench.minEpochIterations(3).run(c.name, [&] {
-            f.db.close();
-            f.db.configure_for_testing(path, false);
+            f.db.reset();
+            auto r = utxoz::db::open_for_testing(path, false);
+            if (!r) throw std::runtime_error("Failed to reopen database");
+            f.db.emplace(std::move(*r));
         });
     }
 }

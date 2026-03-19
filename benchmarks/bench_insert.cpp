@@ -27,7 +27,7 @@ void register_insert_benchmarks(ankerl::nanobench::Bench& bench) {
         uint32_t id = 0;
         bench.run(c.name, [&] {
             ankerl::nanobench::doNotOptimizeAway(
-                f.db.insert(make_test_key(id++, 0), value, 100)
+                f.db->insert(make_test_key(id++, 0), value, 100)
             );
         });
     }
@@ -39,7 +39,7 @@ void register_insert_benchmarks(ankerl::nanobench::Bench& bench) {
         uint32_t next_id = 0;
         bench.run("bulk insert 10K (P2PKH)", [&] {
             for (uint32_t i = 0; i < 10'000; ++i) {
-                (void)f.db.insert(make_test_key(next_id++, 0), value, 100);
+                (void)f.db->insert(make_test_key(next_id++, 0), value, 100);
             }
         });
     }
@@ -62,7 +62,7 @@ void register_insert_benchmarks(ankerl::nanobench::Bench& bench) {
                     case 123: value = val_123; break;
                     default:  value = val_89;  break;
                 }
-                (void)f.db.insert(make_test_key(next_id++, 0), value, 100);
+                (void)f.db->insert(make_test_key(next_id++, 0), value, 100);
             }
         });
     }

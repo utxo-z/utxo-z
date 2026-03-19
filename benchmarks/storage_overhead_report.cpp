@@ -59,8 +59,8 @@ void run_storage_overhead_report() {
         size_t max_data = utxoz::container_capacities[i];
 
         BenchFixture f;
-        size_t entries = fill_until_rotation(f.db, f.path, max_data, i);
-        f.db.close();
+        size_t entries = fill_until_rotation(*f.db, f.path, max_data, i);
+        f.db.reset();
 
         size_t file_size = utxoz::test_file_sizes[i];
         size_t pair_size = key_size + container_size;

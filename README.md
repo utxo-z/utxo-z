@@ -56,8 +56,13 @@ Stores complete UTXO output data (scriptPubKey + amount). Use `utxoz::db` (alias
 #include <utxoz/utxoz.hpp>
 
 int main() {
-    utxoz::db db;  // or utxoz::full_db
-    db.configure("./utxo_data", true);  // path, remove_existing
+    // Open database — returns result<full_db>
+    auto r = utxoz::db::open("./utxo_data", true);  // path, remove_existing
+    if (!r) {
+        // r.error().message contains the error description
+        return 1;
+    }
+    auto& db = *r;
 
     // Create a key (32-byte tx hash + 4-byte output index)
     std::array<uint8_t, 32> tx_hash = { /* ... */ };
@@ -65,7 +70,9 @@ int main() {
 
     // Insert UTXO
     std::vector<uint8_t> value = { /* serialized output */ };
-    db.insert(key, value, block_height);
+    auto inserted = db.insert(key, value, block_height);
+    if (!inserted) { /* error: inserted.error() */ }
+    if (!*inserted) { /* duplicate key */ }
 
     // Find UTXO — returns full_find_result {data, block_height}
     auto result = db.find(key, current_height);
@@ -83,7 +90,7 @@ int main() {
     // Compact periodically for optimal performance
     db.compact_all();
 
-    db.close();
+    // close() is optional — destructor handles it
 }
 ```
 
@@ -95,8 +102,9 @@ Stores only a fixed-size reference (file_number + offset) per UTXO. Use `utxoz::
 #include <utxoz/utxoz.hpp>
 
 int main() {
-    utxoz::compact_db db;
-    db.configure("./utxo_data", true);
+    auto r = utxoz::compact_db::open("./utxo_data", true);
+    if (!r) return 1;
+    auto& db = *r;
 
     auto key = utxoz::make_outpoint(tx_hash, 0);
 
@@ -112,7 +120,6 @@ int main() {
     }
 
     // erase, process_pending_deletions, compact_all, etc. work the same
-    db.close();
 }
 ```
 
@@ -125,16 +132,16 @@ db.for_each_key([](utxoz::raw_outpoint const& key) {
 });
 
 // utxoz::full_db: iterate entries with byte data
-utxoz::full_db full{};
-full.for_each_entry([](utxoz::raw_outpoint const& key,
+// (assuming db is an open full_db instance)
+db.for_each_entry([](utxoz::raw_outpoint const& key,
                        uint32_t block_height,
                        std::span<uint8_t const> data) {
     // ...
 });
 
 // utxoz::compact_db: iterate entries with typed fields
-utxoz::compact_db compact{};
-compact.for_each_entry([](utxoz::raw_outpoint const& key,
+// (assuming cdb is an open compact_db instance)
+cdb.for_each_entry([](utxoz::raw_outpoint const& key,
                           uint32_t height,
                           uint32_t file_number,
                           uint32_t offset) {
@@ -186,7 +193,7 @@ db_base                    — shared methods (close, size, erase, statistics, .
 
 | Method | Description |
 |--------|-------------|
-| `close()` | Close and flush all data |
+| `close()` | Close and flush all data. Idempotent; also called by destructor |
 | `size()` | Total UTXO count |
 | `erase(key, height)` | Erase UTXO (may be deferred) |
 | `process_pending_deletions()` | Process deferred deletes, returns (count, failed entries) |
@@ -204,8 +211,8 @@ db_base                    — shared methods (close, size, erase, statistics, .
 
 | Method | Description |
 |--------|-------------|
-| `configure(path, remove_existing)` | Open database in full mode |
-| `configure_for_testing(path, remove_existing)` | Open with smaller file sizes |
+| `open(path, remove_existing)` | Static: open database, returns `result<full_db>` |
+| `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, value, height)` | Insert UTXO with byte data |
 | `find(key, height)` | Returns `optional<full_find_result>` (`data`, `block_height`) |
 | `process_pending_lookups()` | Returns `(flat_map<key, full_find_result>, failed)` |
@@ -215,8 +222,8 @@ db_base                    — shared methods (close, size, erase, statistics, .
 
 | Method | Description |
 |--------|-------------|
-| `configure(path, remove_existing)` | Open database in compact mode |
-| `configure_for_testing(path, remove_existing)` | Open with smaller file sizes |
+| `open(path, remove_existing)` | Static: open database, returns `result<compact_db>` |
+| `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, file_number, offset, height)` | Insert UTXO with typed fields |
 | `find(key, height)` | Returns `optional<compact_find_result>` (`block_height`, `file_number`, `offset`) |
 | `process_pending_lookups()` | Returns `(flat_map<key, compact_find_result>, failed)` |

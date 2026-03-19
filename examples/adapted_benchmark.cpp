@@ -145,9 +145,13 @@ int run_adapted_benchmark() {
 
     try {
         // Create database
-        utxoz::db db;
         fmt::println("Opening database...");
-        db.configure("utxo_adapted_benchmark", true).value();
+        auto r = utxoz::db::open("utxo_adapted_benchmark", true);
+        if (!r) {
+            fmt::println("Error: failed to open database");
+            return 1;
+        }
+        auto& db = *r;
         fmt::println("Database opened with size: {}", db.size());
 
         // Run benchmark simulation
@@ -166,7 +170,7 @@ int run_adapted_benchmark() {
                 tx_hash[0] = static_cast<uint8_t>(i);
                 auto key = utxoz::make_outpoint(tx_hash, static_cast<uint32_t>(i));
                 std::vector<uint8_t> value{1, 2, 3, 4, 5}; // sample data
-                [[maybe_unused]] auto inserted = db.insert(key, value, static_cast<uint32_t>(height)).value();
+                (void)db.insert(key, value, static_cast<uint32_t>(height));
             }
 
             // Process pending deletions
@@ -187,8 +191,7 @@ int run_adapted_benchmark() {
         fmt::println("\n=== Final Statistics ===");
         db.print_statistics();
 
-        db.close();
-        fmt::println("Database closed successfully");
+        fmt::println("Benchmark completed successfully");
 
     } catch (std::exception const& e) {
         fmt::println(stderr, "Error: {}", e.what());

@@ -24,11 +24,13 @@ struct LargeBenchFixture {
         if (fs::exists(path)) {
             fs::remove_all(path);
         }
-        db.configure(path, true);
+        auto r = utxoz::db::open(path, true);
+        if (!r) throw std::runtime_error("Failed to open benchmark database");
+        db.emplace(std::move(*r));
     }
 
     ~LargeBenchFixture() {
-        db.close();
+        db.reset();
         if (fs::exists(path)) {
             fs::remove_all(path);
         }
@@ -41,11 +43,11 @@ struct LargeBenchFixture {
         auto value = bench::make_test_value(value_size);
         for (size_t i = 0; i < n; ++i) {
             auto key = bench::make_test_key(static_cast<uint32_t>(i), 0);
-            (void)db.insert(key, value, 100);
+            (void)db->insert(key, value, 100);
         }
     }
 
-    utxoz::db db;
+    std::optional<utxoz::db> db;
     std::string path;
 };
 
@@ -70,14 +72,14 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
         f.populate(single_gen_entries);
         auto t1 = std::chrono::high_resolution_clock::now();
         fmt::println("  Done in {:.1f}s (db size: {:L})\n",
-            std::chrono::duration<double>(t1 - t0).count(), f.db.size());
+            std::chrono::duration<double>(t1 - t0).count(), f.db->size());
 
         // Find — random access pattern to stress TLB and cache
         std::mt19937 rng(42);
         std::uniform_int_distribution<uint32_t> dist(0, single_gen_entries - 1);
         bench.run("find in 2GB map (random)", [&] {
             auto key = bench::make_test_key(dist(rng), 0);
-            ankerl::nanobench::doNotOptimizeAway(f.db.find(key, 500));
+            ankerl::nanobench::doNotOptimizeAway(f.db->find(key, 500));
         });
 
         // Insert — append into already-populated map
@@ -85,14 +87,14 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
         uint32_t next_insert = single_gen_entries;
         bench.run("insert into populated 2GB map", [&] {
             auto key = bench::make_test_key(next_insert++, 0);
-            ankerl::nanobench::doNotOptimizeAway(f.db.insert(key, value, 500));
+            ankerl::nanobench::doNotOptimizeAway(f.db->insert(key, value, 500));
         });
 
         // Erase — sequential from the beginning (all keys in latest version)
         uint32_t next_erase = 0;
         bench.run("erase from 2GB map", [&] {
             auto key = bench::make_test_key(next_erase++, 0);
-            ankerl::nanobench::doNotOptimizeAway(f.db.erase(key, 500));
+            ankerl::nanobench::doNotOptimizeAway(f.db->erase(key, 500));
         });
     }
     fmt::println("");
@@ -108,21 +110,23 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
         f.populate(multi_gen_entries);
         auto t1 = std::chrono::high_resolution_clock::now();
         fmt::println("  Done in {:.1f}s (db size: {:L})\n",
-            std::chrono::duration<double>(t1 - t0).count(), f.db.size());
+            std::chrono::duration<double>(t1 - t0).count(), f.db->size());
 
         // Find in previous generation — keys 0..5M are in the first .dat file
         std::mt19937 rng(123);
         std::uniform_int_distribution<uint32_t> dist(0, 5'000'000);
         bench.run("find in previous generation", [&] {
             auto key = bench::make_test_key(dist(rng), 0);
-            ankerl::nanobench::doNotOptimizeAway(f.db.find(key, 500));
+            ankerl::nanobench::doNotOptimizeAway(f.db->find(key, 500));
         });
 
         // Close + reopen — measures the O(1) mmap advantage at 2GB+ scale
         auto path = f.path;
         bench.minEpochIterations(1).run("close+reopen 2GB+ map", [&] {
-            f.db.close();
-            f.db.configure(path, false);
+            f.db.reset();
+            auto r = utxoz::db::open(path, false);
+            if (!r) throw std::runtime_error("Failed to reopen database");
+            f.db.emplace(std::move(*r));
         });
     }
 
