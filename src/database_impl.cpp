@@ -372,8 +372,23 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
         size_t latest_version = find_latest_version_from_files(I);
         open_or_create_container<I>(latest_version);
 
-        // Count existing entries in reopened containers
+        // Count existing entries in active container
         entries_count_ += container<I>().size();
+
+        // Count entries in previous versions (still searchable/deletable)
+        for (size_t v = 0; v < latest_version; ++v) {
+            auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+            if (!fs::exists(file_name)) continue;
+            try {
+                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
+                if (map_ptr) {
+                    entries_count_ += map_ptr->size();
+                }
+            } catch (std::exception const& e) {
+                log::error("configure: error counting entries in container {} v{}: {}", I.value, v, e.what());
+            }
+        }
 
         // Load metadata for all versions
         for (size_t v = 0; v <= latest_version; ++v) {
