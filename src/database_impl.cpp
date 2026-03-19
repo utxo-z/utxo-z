@@ -336,17 +336,17 @@ void database_impl::load_metadata_from_disk(size_t index, size_t version) {
 // database_impl - Public interface: configure, close, size
 // =============================================================================
 
-void database_impl::configure(std::string_view path, bool remove_existing, storage_mode mode) {
+result<> database_impl::configure(std::string_view path, bool remove_existing, storage_mode mode) {
     active_file_sizes_ = file_sizes;
-    configure_internal(path, remove_existing, mode);
+    return configure_internal(path, remove_existing, mode);
 }
 
-void database_impl::configure_for_testing(std::string_view path, bool remove_existing, storage_mode mode) {
+result<> database_impl::configure_for_testing(std::string_view path, bool remove_existing, storage_mode mode) {
     active_file_sizes_ = test_file_sizes;
-    configure_internal(path, remove_existing, mode);
+    return configure_internal(path, remove_existing, mode);
 }
 
-void database_impl::configure_internal(std::string_view path, bool remove_existing, storage_mode mode) {
+result<> database_impl::configure_internal(std::string_view path, bool remove_existing, storage_mode mode) {
     db_path_ = path;
 
     if (remove_existing && fs::exists(path)) {
@@ -357,11 +357,13 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
     // Check config persistence (detect mode mismatch on reopen)
     auto config_path = db_path_ / "utxoz_config.dat";
     if (fs::exists(config_path) && !remove_existing) {
-        load_config_from_disk();
+        if (auto r = load_config_from_disk(); !r) {
+            return std::unexpected(r.error());
+        }
         if (mode_ != mode) {
-            throw std::runtime_error(fmt::format(
-                "Storage mode mismatch: database was created with mode {}, but mode {} was requested",
-                static_cast<int>(mode_), static_cast<int>(mode)));
+            return std::unexpected(error{error_code::storage_mode_mismatch,
+                fmt::format("Storage mode mismatch: database was created with mode {}, but mode {} was requested",
+                    static_cast<int>(mode_), static_cast<int>(mode))});
         }
     } else {
         // No config file — check for pre-existing data files from the other mode
@@ -369,16 +371,16 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
             if (mode == storage_mode::compact) {
                 auto full_mode_file = fmt::format(data_file_format, db_path_.string(), 0, 0);
                 if (fs::exists(full_mode_file)) {
-                    throw std::runtime_error(
+                    return std::unexpected(error{error_code::storage_mode_mismatch,
                         "Storage mode mismatch: directory contains full-mode data files, "
-                        "but compact mode was requested");
+                        "but compact mode was requested"});
                 }
             } else {
                 auto compact_mode_file = fmt::format(compact_data_file_format, db_path_.string(), 0);
                 if (fs::exists(compact_mode_file)) {
-                    throw std::runtime_error(
+                    return std::unexpected(error{error_code::storage_mode_mismatch,
                         "Storage mode mismatch: directory contains compact-mode data files, "
-                        "but full mode was requested");
+                        "but full mode was requested"});
                 }
             }
         }
@@ -459,6 +461,7 @@ void database_impl::configure_internal(std::string_view path, bool remove_existi
     }
 
     save_config_to_disk();
+    return {};
 }
 
 void database_impl::close() {
@@ -479,7 +482,7 @@ size_t database_impl::size() const {
 // database_impl - Insert
 // =============================================================================
 
-bool database_impl::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
+result<bool> database_impl::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     if (mode_ == storage_mode::compact) {
         return compact_insert(key, value, height);
     }
@@ -488,10 +491,11 @@ bool database_impl::insert(raw_outpoint const& key, output_data_span value, uint
     if (index >= container_count) {
         log::error("insert: value too large ({} bytes) for any container (max capacity {}). height={}, outpoint={}",
             value.size(), container_capacities[container_count - 1], height, outpoint_to_string(key));
-        throw std::out_of_range("Value size too large");
+        return std::unexpected(error{error_code::value_too_large,
+            fmt::format("Value size {} exceeds maximum capacity {}", value.size(), container_capacities[container_count - 1])});
     }
 
-    return std::visit([&](auto ic) {
+    return std::visit([&](auto ic) -> result<bool> {
         return insert_in_index<ic>(key, value, height);
     }, make_index_variant(index));
 }
@@ -1769,11 +1773,11 @@ bool database_impl::compact_can_insert_safely() const {
     return true;
 }
 
-bool database_impl::compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
+result<bool> database_impl::compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     if (value.size() != sizeof(uint32_t) * 2) {
-        throw std::invalid_argument(fmt::format(
-            "Compact mode requires exactly {} bytes (file_number + offset), got {}",
-            sizeof(uint32_t) * 2, value.size()));
+        return std::unexpected(error{error_code::value_too_large,
+            fmt::format("Compact mode requires exactly {} bytes (file_number + offset), got {}",
+                sizeof(uint32_t) * 2, value.size())});
     }
 
     uint32_t file_number;
@@ -2175,40 +2179,41 @@ void database_impl::save_config_to_disk() {
     ofs.write(reinterpret_cast<char const*>(&mode_byte), sizeof(mode_byte));
 }
 
-void database_impl::load_config_from_disk() {
+result<> database_impl::load_config_from_disk() {
     auto config_path = db_path_ / "utxoz_config.dat";
     std::ifstream ifs(config_path, std::ios::binary);
     if (!ifs) {
-        // No config file = legacy full mode
-        mode_ = storage_mode::full;
-        return;
+        return std::unexpected(error{error_code::config_file_corrupt, "Unable to open config file"});
     }
 
     char magic[4];
     ifs.read(magic, 4);
     if (!ifs || magic[0] != 'U' || magic[1] != 'T' || magic[2] != 'X' || magic[3] != 'O') {
-        throw std::runtime_error("Invalid config file: bad magic or truncated");
+        return std::unexpected(error{error_code::config_file_corrupt, "Invalid config file: bad magic or truncated"});
     }
 
     uint32_t version;
     ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (!ifs) {
-        throw std::runtime_error("Invalid config file: truncated at version");
+        return std::unexpected(error{error_code::config_file_corrupt, "Invalid config file: truncated at version"});
     }
     if (version != 1) {
-        throw std::runtime_error(fmt::format("Unsupported config version: {}", version));
+        return std::unexpected(error{error_code::config_file_corrupt,
+            fmt::format("Unsupported config version: {}", version)});
     }
 
     uint8_t mode_byte;
     ifs.read(reinterpret_cast<char*>(&mode_byte), sizeof(mode_byte));
     if (!ifs) {
-        throw std::runtime_error("Invalid config file: truncated at mode");
+        return std::unexpected(error{error_code::config_file_corrupt, "Invalid config file: truncated at mode"});
     }
     if (mode_byte != static_cast<uint8_t>(storage_mode::full) &&
         mode_byte != static_cast<uint8_t>(storage_mode::compact)) {
-        throw std::runtime_error(fmt::format("Invalid config file: unknown storage mode {}", mode_byte));
+        return std::unexpected(error{error_code::config_file_corrupt,
+            fmt::format("Invalid config file: unknown storage mode {}", mode_byte)});
     }
     mode_ = static_cast<storage_mode>(mode_byte);
+    return {};
 }
 
 // =============================================================================
@@ -2351,8 +2356,8 @@ database_impl::full_process_pending_lookups() {
 // database_impl - Typed compact-mode methods
 // =============================================================================
 
-bool database_impl::compact_insert_typed(raw_outpoint const& key, uint32_t height,
-                                          uint32_t file_number, uint32_t offset) {
+result<bool> database_impl::compact_insert_typed(raw_outpoint const& key, uint32_t height,
+                                                 uint32_t file_number, uint32_t offset) {
     if (!compact_can_insert_safely()) {
         log::debug("Rotating compact container due to safety constraints");
         compact_new_version();

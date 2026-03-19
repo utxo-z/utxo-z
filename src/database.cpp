@@ -132,25 +132,29 @@ full_db::~full_db() = default;
 full_db::full_db(full_db&&) noexcept = default;
 full_db& full_db::operator=(full_db&&) noexcept = default;
 
-void full_db::configure(std::string_view path, bool remove_existing) {
+result<> full_db::configure(std::string_view path, bool remove_existing) {
     if (impl_) {
         impl_->close();
     }
     impl_ = std::make_unique<detail::database_impl>();
-    impl_->configure(path, remove_existing, storage_mode::full);
+    auto r = impl_->configure(path, remove_existing, storage_mode::full);
+    if (!r) impl_.reset();
+    return r;
 }
 
-void full_db::configure_for_testing(std::string_view path, bool remove_existing) {
+result<> full_db::configure_for_testing(std::string_view path, bool remove_existing) {
     if (impl_) {
         impl_->close();
     }
     impl_ = std::make_unique<detail::database_impl>();
-    impl_->configure_for_testing(path, remove_existing, storage_mode::full);
+    auto r = impl_->configure_for_testing(path, remove_existing, storage_mode::full);
+    if (!r) impl_.reset();
+    return r;
 }
 
-bool full_db::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
+result<bool> full_db::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     if (!impl_) {
-        throw std::runtime_error("Database not configured");
+        return std::unexpected(error{error_code::not_configured, "Database not configured"});
     }
     return impl_->insert(key, value, height);
 }
@@ -185,25 +189,29 @@ compact_db::~compact_db() = default;
 compact_db::compact_db(compact_db&&) noexcept = default;
 compact_db& compact_db::operator=(compact_db&&) noexcept = default;
 
-void compact_db::configure(std::string_view path, bool remove_existing) {
+result<> compact_db::configure(std::string_view path, bool remove_existing) {
     if (impl_) {
         impl_->close();
     }
     impl_ = std::make_unique<detail::database_impl>();
-    impl_->configure(path, remove_existing, storage_mode::compact);
+    auto r = impl_->configure(path, remove_existing, storage_mode::compact);
+    if (!r) impl_.reset();
+    return r;
 }
 
-void compact_db::configure_for_testing(std::string_view path, bool remove_existing) {
+result<> compact_db::configure_for_testing(std::string_view path, bool remove_existing) {
     if (impl_) {
         impl_->close();
     }
     impl_ = std::make_unique<detail::database_impl>();
-    impl_->configure_for_testing(path, remove_existing, storage_mode::compact);
+    auto r = impl_->configure_for_testing(path, remove_existing, storage_mode::compact);
+    if (!r) impl_.reset();
+    return r;
 }
 
-bool compact_db::insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height) {
+result<bool> compact_db::insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height) {
     if (!impl_) {
-        throw std::runtime_error("Database not configured");
+        return std::unexpected(error{error_code::not_configured, "Database not configured"});
     }
     return impl_->compact_insert_typed(key, height, file_number, offset);
 }

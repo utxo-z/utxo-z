@@ -91,14 +91,14 @@ TEST_CASE("Reopen: data persists after close and reopen", "[storage][persistence
     // Phase 1: insert data and close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
             keys.push_back(key);
             values.push_back(val);
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)).value());
         }
 
         CHECK(db.size() == N);
@@ -108,7 +108,7 @@ TEST_CASE("Reopen: data persists after close and reopen", "[storage][persistence
     // Phase 2: reopen and verify all data
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);  // do NOT remove existing
+        db.configure_for_testing(dir.path, false).value();  // do NOT remove existing
 
         for (size_t i = 0; i < N; ++i) {
             auto result = db.find(keys[i], 1000);
@@ -131,9 +131,9 @@ TEST_CASE("Reopen: multiple close/reopen cycles accumulate data", "[storage][per
     for (size_t c = 0; c < cycles; ++c) {
         utxoz::db db;
         if (c == 0) {
-            db.configure_for_testing(dir.path, true);
+            db.configure_for_testing(dir.path, true).value();
         } else {
-            db.configure_for_testing(dir.path, false);
+            db.configure_for_testing(dir.path, false).value();
         }
 
         // Insert new batch
@@ -143,7 +143,7 @@ TEST_CASE("Reopen: multiple close/reopen cycles accumulate data", "[storage][per
             auto val = make_test_value(30, static_cast<uint8_t>(id & 0xFF));
             all_keys.push_back(key);
             all_values.push_back(val);
-            REQUIRE(db.insert(key, val, id + 100));
+            REQUIRE(db.insert(key, val, id + 100).value());
         }
 
         // Verify ALL data from all cycles so far
@@ -175,13 +175,13 @@ TEST_CASE("Reopen: all container sizes persist correctly", "[storage][persistenc
 
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < value_sizes.size(); ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i + 1), 0);
             auto val = make_test_value(value_sizes[i], static_cast<uint8_t>(i * 42));
             entries.push_back({key, val});
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)).value());
         }
 
         db.close();
@@ -190,7 +190,7 @@ TEST_CASE("Reopen: all container sizes persist correctly", "[storage][persistenc
     // Reopen and verify
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         for (auto const& [key, val] : entries) {
             auto result = db.find(key, 9999);
@@ -210,7 +210,7 @@ TEST_CASE("Rotation: data accessible after file rotation", "[storage][rotation]"
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert enough entries to trigger at least one rotation.
     // With 10 MiB test files and container 0 (44B values), rotation happens
@@ -224,7 +224,7 @@ TEST_CASE("Rotation: data accessible after file rotation", "[storage][rotation]"
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         keys.push_back(key);
         auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
     }
 
     // Verify at least one rotation happened
@@ -276,7 +276,7 @@ TEST_CASE("Deferred erase: delete entries from previous versions", "[storage][ro
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert enough to trigger rotation
     constexpr size_t N = 200'000;
@@ -287,7 +287,7 @@ TEST_CASE("Deferred erase: delete entries from previous versions", "[storage][ro
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         keys.push_back(key);
         auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
     }
 
     // Confirm rotation
@@ -330,7 +330,7 @@ TEST_CASE("Deferred lookups: find entries in previous versions", "[storage][rota
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert enough to trigger rotation
     constexpr size_t N = 200'000;
@@ -344,7 +344,7 @@ TEST_CASE("Deferred lookups: find entries in previous versions", "[storage][rota
         auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
         keys.push_back(key);
         values.push_back(val);
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
     }
 
     // Lookup entries that are definitely in old versions (first inserted)
@@ -384,7 +384,7 @@ TEST_CASE("Compaction: data integrity preserved after compact_all", "[storage][c
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert enough to get multiple versions
     constexpr size_t N = 200'000;
@@ -395,7 +395,7 @@ TEST_CASE("Compaction: data integrity preserved after compact_all", "[storage][c
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         keys.push_back(key);
         auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
     }
 
     // Erase some entries before compaction
@@ -453,13 +453,13 @@ TEST_CASE("Reopen after rotation: all versions survive close/reopen", "[storage]
     // Phase 1: insert enough to rotate, then close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
             keys.push_back(key);
             auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         }
 
         auto stats = db.get_statistics();
@@ -475,7 +475,7 @@ TEST_CASE("Reopen after rotation: all versions survive close/reopen", "[storage]
     // Phase 2: reopen and verify data from latest version
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         // Recent entries (in latest version) should be found directly
         size_t found = 0;
@@ -499,7 +499,7 @@ TEST_CASE("Value integrity: exact byte content preserved for all container sizes
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Test with values that fit within each container's data capacity.
     // utxo_value<Size> overhead: sizeof(uint32_t) + sizeof(size_type<Size>)
@@ -530,7 +530,7 @@ TEST_CASE("Value integrity: exact byte content preserved for all container sizes
         }
 
         entries.push_back({key, val});
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)).value());
     }
 
     // Verify all values byte-for-byte
@@ -544,7 +544,7 @@ TEST_CASE("Value integrity: exact byte content preserved for all container sizes
     db.close();
 
     // Reopen and verify again
-    db.configure_for_testing(dir.path, false);
+    db.configure_for_testing(dir.path, false).value();
 
     for (auto const& [key, expected] : entries) {
         auto result = db.find(key, 9999);
@@ -570,13 +570,13 @@ TEST_CASE("Erase persistence: erased entries stay gone after reopen", "[storage]
     // Phase 1: insert, erase half, close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             keys.push_back(key);
             auto val = make_test_value(30);
-            REQUIRE(db.insert(key, val, 100));
+            REQUIRE(db.insert(key, val, 100).value());
         }
 
         // Erase first half
@@ -590,7 +590,7 @@ TEST_CASE("Erase persistence: erased entries stay gone after reopen", "[storage]
     // Phase 2: reopen, erased entries should be gone, rest should be present
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         for (size_t i = 0; i < N / 2; ++i) {
             auto result = db.find(keys[i], 300);
@@ -616,7 +616,7 @@ TEST_CASE("Empty DB: close and reopen preserves empty state", "[storage][persist
     // Phase 1: create empty DB and close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
         CHECK(db.size() == 0);
         db.close();
     }
@@ -624,13 +624,13 @@ TEST_CASE("Empty DB: close and reopen preserves empty state", "[storage][persist
     // Phase 2: reopen, should still be empty and functional
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
         CHECK(db.size() == 0);
 
         // Should be able to insert after reopening empty DB
         auto key = make_test_key(1, 0);
         auto val = make_test_value(30);
-        REQUIRE(db.insert(key, val, 100));
+        REQUIRE(db.insert(key, val, 100).value());
         CHECK(db.size() == 1);
 
         auto result = db.find(key, 200);
@@ -651,15 +651,15 @@ TEST_CASE("Single entry: close and reopen per container size", "[storage][persis
 
         {
             utxoz::db db;
-            db.configure_for_testing(dir.path, true);
-            REQUIRE(db.insert(key, val, 100));
+            db.configure_for_testing(dir.path, true).value();
+            REQUIRE(db.insert(key, val, 100).value());
             CHECK(db.size() == 1);
             db.close();
         }
 
         {
             utxoz::db db;
-            db.configure_for_testing(dir.path, false);
+            db.configure_for_testing(dir.path, false).value();
             CHECK(db.size() == 1);
 
             auto result = db.find(key, 200);
@@ -683,13 +683,13 @@ TEST_CASE("Erase all: empty state persists after reopen", "[storage][persistence
     // Phase 1: insert N entries, erase all, close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             keys.push_back(key);
             auto val = make_test_value(30, static_cast<uint8_t>(i));
-            REQUIRE(db.insert(key, val, 100));
+            REQUIRE(db.insert(key, val, 100).value());
         }
         CHECK(db.size() == N);
 
@@ -704,7 +704,7 @@ TEST_CASE("Erase all: empty state persists after reopen", "[storage][persistence
     // Phase 2: reopen, should be empty
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
         CHECK(db.size() == 0);
 
         // None of the erased entries should be found
@@ -715,7 +715,7 @@ TEST_CASE("Erase all: empty state persists after reopen", "[storage][persistence
 
         // Should be able to re-insert after erase all + reopen
         auto val = make_test_value(30, 0xFF);
-        REQUIRE(db.insert(keys[0], val, 300));
+        REQUIRE(db.insert(keys[0], val, 300).value());
         auto result = db.find(keys[0], 400);
         REQUIRE(result.has_value());
         CHECK(result->data == val);
@@ -737,14 +737,14 @@ TEST_CASE("Multi-cycle: insert, delete, close, insert, close, verify", "[storage
     // Cycle 1: insert 200 entries
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < 200; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             auto val = make_test_value(30, static_cast<uint8_t>(i));
             keys.push_back(key);
             values.push_back(val);
-            REQUIRE(db.insert(key, val, 100));
+            REQUIRE(db.insert(key, val, 100).value());
         }
 
         // Delete entries 50..99
@@ -758,14 +758,14 @@ TEST_CASE("Multi-cycle: insert, delete, close, insert, close, verify", "[storage
     // Cycle 2: reopen, insert 100 more, delete entries 150..174
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         for (size_t i = 200; i < 300; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             auto val = make_test_value(30, static_cast<uint8_t>(i));
             keys.push_back(key);
             values.push_back(val);
-            REQUIRE(db.insert(key, val, 300));
+            REQUIRE(db.insert(key, val, 300).value());
         }
 
         for (size_t i = 150; i < 175; ++i) {
@@ -778,7 +778,7 @@ TEST_CASE("Multi-cycle: insert, delete, close, insert, close, verify", "[storage
     // Cycle 3: reopen and verify final state
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         // Entries 0..49: should exist
         for (size_t i = 0; i < 50; ++i) {
@@ -831,13 +831,13 @@ TEST_CASE("Compaction persistence: data survives compact + close + reopen", "[st
     // Phase 1: insert, erase some, compact, close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
             keys.push_back(key);
             auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         }
 
         // Erase first 500
@@ -853,7 +853,7 @@ TEST_CASE("Compaction persistence: data survives compact + close + reopen", "[st
     // Phase 2: reopen and verify
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         // Erased entries should be gone
         for (size_t i = 0; i < 100; ++i) {
@@ -916,12 +916,12 @@ TEST_CASE("High fill: close/reopen near rotation point per container", "[storage
         // Phase 1: insert and close
         {
             utxoz::db db;
-            db.configure_for_testing(dir.path, true);
+            db.configure_for_testing(dir.path, true).value();
 
             for (size_t i = 0; i < c.count; ++i) {
                 auto key = make_test_key(static_cast<uint32_t>(i), 0);
                 auto val = make_test_value(c.value_size, static_cast<uint8_t>(i & 0xFF));
-                REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+                REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
             }
 
             CHECK(db.size() == c.count);
@@ -931,7 +931,7 @@ TEST_CASE("High fill: close/reopen near rotation point per container", "[storage
         // Phase 2: reopen and verify all entries
         {
             utxoz::db db;
-            db.configure_for_testing(dir.path, false);
+            db.configure_for_testing(dir.path, false).value();
             CHECK(db.size() == c.count);
 
             for (size_t i = 0; i < c.count; ++i) {
@@ -963,14 +963,14 @@ TEST_CASE("Reopen after rotation: all entries verified across versions", "[stora
     // Phase 1: insert enough to rotate, close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
             auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
             keys.push_back(key);
             values.push_back(val);
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         }
 
         auto stats = db.get_statistics();
@@ -986,7 +986,7 @@ TEST_CASE("Reopen after rotation: all entries verified across versions", "[stora
     // Phase 2: reopen and verify entries from ALL versions (not just latest)
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         // Check latest entries (should be immediate)
         for (size_t i = N - 100; i < N; ++i) {
@@ -1038,18 +1038,18 @@ TEST_CASE("Reopen: duplicate insert fails for existing entries", "[storage][pers
     // Phase 1: insert and close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
-        REQUIRE(db.insert(key, val1, 100));
+        db.configure_for_testing(dir.path, true).value();
+        REQUIRE(db.insert(key, val1, 100).value());
         db.close();
     }
 
     // Phase 2: reopen and try to insert same key
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         // Duplicate insert should fail
-        CHECK_FALSE(db.insert(key, val2, 200));
+        CHECK_FALSE(db.insert(key, val2, 200).value());
 
         // Original value should be preserved
         auto result = db.find(key, 300);
@@ -1080,7 +1080,7 @@ TEST_CASE("Reopen: mixed container sizes with many entries each", "[storage][per
 
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         uint32_t id = 0;
         for (size_t vs : value_sizes) {
@@ -1088,7 +1088,7 @@ TEST_CASE("Reopen: mixed container sizes with many entries each", "[storage][per
                 auto key = make_test_key(id, 0);
                 auto val = make_test_value(vs, static_cast<uint8_t>(id & 0xFF));
                 all_entries.push_back({key, val});
-                REQUIRE(db.insert(key, val, id + 100));
+                REQUIRE(db.insert(key, val, id + 100).value());
                 ++id;
             }
         }
@@ -1100,7 +1100,7 @@ TEST_CASE("Reopen: mixed container sizes with many entries each", "[storage][per
     // Reopen and verify every single entry
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         CHECK(db.size() == all_entries.size());
 
@@ -1124,11 +1124,11 @@ TEST_CASE("Reopen: size() is consistent across close/reopen cycles", "[storage][
     // Cycle 1: insert 100
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
         for (size_t i = 0; i < 100; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             auto val = make_test_value(30);
-            REQUIRE(db.insert(key, val, 100));
+            REQUIRE(db.insert(key, val, 100).value());
         }
         CHECK(db.size() == 100);
         db.close();
@@ -1137,13 +1137,13 @@ TEST_CASE("Reopen: size() is consistent across close/reopen cycles", "[storage][
     // Cycle 2: reopen, verify size, insert 50 more, erase 25
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
         CHECK(db.size() == 100);
 
         for (size_t i = 100; i < 150; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             auto val = make_test_value(30);
-            REQUIRE(db.insert(key, val, 200));
+            REQUIRE(db.insert(key, val, 200).value());
         }
         CHECK(db.size() == 150);
 
@@ -1159,7 +1159,7 @@ TEST_CASE("Reopen: size() is consistent across close/reopen cycles", "[storage][
     // Cycle 3: reopen, verify final size
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
         CHECK(db.size() == 125);
         db.close();
     }
@@ -1174,7 +1174,7 @@ TEST_CASE("Compaction: survives 3+ rotations without crash", "[storage][compacti
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert enough 1000-byte values (-> container 4, 10KB) to cause 3+ rotations.
     // ~840 entries per rotation, so ~3400 entries gives us 4 files.
@@ -1186,7 +1186,7 @@ TEST_CASE("Compaction: survives 3+ rotations without crash", "[storage][compacti
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         keys.push_back(key);
         auto val = make_test_value(1000, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
     }
 
     // Verify we have multiple rotations (4+ files for container 4, the 10KB container)
@@ -1219,13 +1219,13 @@ TEST_CASE("Compaction: data integrity with many versions + close/reopen", "[stor
     // Phase 1: insert, compact, close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
             keys.push_back(key);
             auto val = make_test_value(1000, static_cast<uint8_t>(i & 0xFF));
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         }
 
         auto stats = db.get_statistics();
@@ -1238,7 +1238,7 @@ TEST_CASE("Compaction: data integrity with many versions + close/reopen", "[stor
     // Phase 2: reopen and verify all entries
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         // Check recent entries (should be in latest version)
         size_t found_immediate = 0;
@@ -1263,7 +1263,7 @@ TEST_CASE("Compaction: with deletions across multiple versions", "[storage][comp
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     constexpr size_t N = 3400;
     std::vector<utxoz::raw_outpoint> keys;
@@ -1273,7 +1273,7 @@ TEST_CASE("Compaction: with deletions across multiple versions", "[storage][comp
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         keys.push_back(key);
         auto val = make_test_value(1000, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
     }
 
     // Erase a large portion of entries to create sparse older files
@@ -1310,13 +1310,13 @@ TEST_CASE("Compaction: size() is correct after compaction", "[storage][compactio
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     constexpr size_t N = 3400;
     for (size_t i = 0; i < N; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         auto val = make_test_value(1000, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
     }
 
     size_t size_before = db.size();
@@ -1339,12 +1339,12 @@ TEST_CASE("Metadata: files are created on disk after close", "[storage][metadata
 
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < 100; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), 0);
             auto val = make_test_value(30, static_cast<uint8_t>(i));
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i + 100)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i + 100)).value());
         }
 
         db.close();
@@ -1361,14 +1361,14 @@ TEST_CASE("Metadata: files created for all versions on rotation", "[storage][met
 
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         // Insert enough to cause rotation in container 0
         constexpr size_t N = 200'000;
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
             auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         }
 
         auto stats = db.get_statistics();
@@ -1386,7 +1386,7 @@ TEST_CASE("Metadata: rebuilt correctly after compaction", "[storage][metadata][c
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert enough 1000-byte values (-> container 4, 10KB) to cause 3+ rotations.
     constexpr size_t N = 3400;
@@ -1396,7 +1396,7 @@ TEST_CASE("Metadata: rebuilt correctly after compaction", "[storage][metadata][c
     for (size_t i = 0; i < N; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         auto val = make_test_value(1000, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(min_height + i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(min_height + i)).value());
     }
 
     auto stats = db.get_statistics();
@@ -1440,7 +1440,7 @@ TEST_CASE("Metadata: rebuilt correctly after compaction", "[storage][metadata][c
     db.close();
 
     utxoz::db db2;
-    db2.configure_for_testing(dir.path, false);
+    db2.configure_for_testing(dir.path, false).value();
 
     // All entries should still be findable
     size_t found = 0;
@@ -1465,13 +1465,13 @@ TEST_CASE("No truncation: P2PKH-sized values (43 bytes) survive round-trip", "[s
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // 43 bytes is the most common UTXO value size on BCH (P2PKH outputs).
     // It should fit in container 0 (max 48 bytes, capacity 43) without any truncation.
     auto key = make_test_key(1, 0);
     auto val = make_test_value(43, 0xAB);
-    REQUIRE(db.insert(key, val, 100));
+    REQUIRE(db.insert(key, val, 100).value());
 
     auto result = db.find(key, 200);
     REQUIRE(result.has_value());
@@ -1485,12 +1485,12 @@ TEST_CASE("No truncation: P2SH-sized values (41 bytes) survive round-trip", "[st
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // 41 bytes is the second most common size (P2SH outputs, 13.3% of chain).
     auto key = make_test_key(1, 0);
     auto val = make_test_value(41, 0xCD);
-    REQUIRE(db.insert(key, val, 100));
+    REQUIRE(db.insert(key, val, 100).value());
 
     auto result = db.find(key, 200);
     REQUIRE(result.has_value());
@@ -1504,7 +1504,7 @@ TEST_CASE("No truncation: max value for each container survives round-trip", "[s
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // For each container, insert a value at exactly its data capacity.
     // This is the maximum value size that should fit without truncation.
@@ -1514,7 +1514,7 @@ TEST_CASE("No truncation: max value for each container survives round-trip", "[s
         auto val = make_test_value(val_size, static_cast<uint8_t>(i * 37));
 
         INFO("container " << i << ", capacity = " << val_size);
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)).value());
 
         auto result = db.find(key, 200);
         REQUIRE(result.has_value());
@@ -1529,7 +1529,7 @@ TEST_CASE("No truncation: boundary values at each container capacity", "[storage
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Test sizes around each container's data capacity boundary.
     // Values at capacity should fit exactly; values below should have room to spare.
@@ -1546,7 +1546,7 @@ TEST_CASE("No truncation: boundary values at each container capacity", "[storage
         auto val = make_test_value(val_size, static_cast<uint8_t>(i * 13));
 
         INFO("value size = " << val_size);
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(100 + i)).value());
 
         auto result = db.find(key, 200);
         REQUIRE(result.has_value());
@@ -1565,7 +1565,7 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert values of different sizes into different containers.
     // Routing uses container_capacities (43, 89, 123, 250, 10234), not container_sizes.
@@ -1578,21 +1578,21 @@ TEST_CASE("Sizing report: histogram and waste calculations are correct", "[stora
     for (size_t i = 0; i < 10; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(30, static_cast<uint8_t>(i));
-        REQUIRE(db.insert(key, val, 100));
+        REQUIRE(db.insert(key, val, 100).value());
     }
 
     // 5 entries of 50 bytes -> container 1 (50 > cap 43), waste = (94-50)*5 = 220
     for (size_t i = 10; i < 15; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(50, static_cast<uint8_t>(i));
-        REQUIRE(db.insert(key, val, 100));
+        REQUIRE(db.insert(key, val, 100).value());
     }
 
     // 3 entries of 100 bytes -> container 2 (100 > cap 89), waste = (128-100)*3 = 84
     for (size_t i = 15; i < 18; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(100, static_cast<uint8_t>(i));
-        REQUIRE(db.insert(key, val, 100));
+        REQUIRE(db.insert(key, val, 100).value());
     }
 
     auto report = db.get_sizing_report();
@@ -1653,7 +1653,7 @@ TEST_CASE("Sizing report: empty database returns zeroed report", "[storage][sizi
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     auto report = db.get_sizing_report();
 
@@ -1696,13 +1696,13 @@ TEST_CASE("Metadata: key ranges are correct after reopen", "[storage][metadata]"
     // Phase 1: insert enough to rotate, close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
             keys.push_back(key);
             auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         }
 
         auto stats = db.get_statistics();
@@ -1716,7 +1716,7 @@ TEST_CASE("Metadata: key ranges are correct after reopen", "[storage][metadata]"
     // We verify correctness: entries in old versions should still be found.
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         // Look up entries that are likely in version 0 (earliest inserts)
         size_t deferred = 0;
@@ -1742,7 +1742,7 @@ TEST_CASE("for_each_key: visits all keys exactly once", "[storage][iteration]") 
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     constexpr size_t N = 500;
     std::set<utxoz::raw_outpoint> inserted_keys;
@@ -1750,7 +1750,7 @@ TEST_CASE("for_each_key: visits all keys exactly once", "[storage][iteration]") 
     for (size_t i = 0; i < N; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i + 100)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i + 100)).value());
         inserted_keys.insert(key);
     }
 
@@ -1769,7 +1769,7 @@ TEST_CASE("for_each_key: visits keys across all container sizes", "[storage][ite
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Capacities: 43, 89, 123, 250, 10234
     std::array<size_t, 5> value_sizes = {30, 50, 100, 200, 8000};
@@ -1780,7 +1780,7 @@ TEST_CASE("for_each_key: visits keys across all container sizes", "[storage][ite
         for (size_t i = 0; i < 10; ++i) {
             auto key = make_test_key(id, 0);
             auto val = make_test_value(vs, static_cast<uint8_t>(id));
-            REQUIRE(db.insert(key, val, id + 100));
+            REQUIRE(db.insert(key, val, id + 100).value());
             inserted_keys.insert(key);
             ++id;
         }
@@ -1801,7 +1801,7 @@ TEST_CASE("for_each_key: visits keys in previous versions after rotation", "[sto
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // Insert enough to trigger rotation
     constexpr size_t N = 200'000;
@@ -1810,7 +1810,7 @@ TEST_CASE("for_each_key: visits keys in previous versions after rotation", "[sto
     for (size_t i = 0; i < N; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
         auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+        REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         inserted_keys.insert(key);
     }
 
@@ -1838,7 +1838,7 @@ TEST_CASE("for_each_key: empty database visits nothing", "[storage][iteration][e
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     size_t count = 0;
     db.for_each_key([&](utxoz::raw_outpoint const&) {
@@ -1854,7 +1854,7 @@ TEST_CASE("for_each_key: skips erased entries", "[storage][iteration]") {
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     constexpr size_t N = 200;
     std::vector<utxoz::raw_outpoint> keys;
@@ -1863,7 +1863,7 @@ TEST_CASE("for_each_key: skips erased entries", "[storage][iteration]") {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         keys.push_back(key);
         auto val = make_test_value(30, static_cast<uint8_t>(i));
-        REQUIRE(db.insert(key, val, 100));
+        REQUIRE(db.insert(key, val, 100).value());
     }
 
     // Erase first half
@@ -1889,7 +1889,7 @@ TEST_CASE("for_each_entry: visits all entries with correct key, height and data"
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     constexpr size_t N = 500;
     std::map<utxoz::raw_outpoint, std::pair<uint32_t, std::vector<uint8_t>>> expected;
@@ -1898,7 +1898,7 @@ TEST_CASE("for_each_entry: visits all entries with correct key, height and data"
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         auto val = make_test_value(30, static_cast<uint8_t>(i));
         uint32_t height = static_cast<uint32_t>(1000 + i);
-        REQUIRE(db.insert(key, val, height));
+        REQUIRE(db.insert(key, val, height).value());
         expected[key] = {height, {val.begin(), val.end()}};
     }
 
@@ -1920,7 +1920,7 @@ TEST_CASE("for_each_entry: visits entries across all container sizes", "[storage
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     // One entry per container size
     std::array<size_t, 5> value_sizes = {30, 50, 100, 200, 8000};
@@ -1931,7 +1931,7 @@ TEST_CASE("for_each_entry: visits entries across all container sizes", "[storage
             auto key = make_test_key(static_cast<uint32_t>(c * 100 + i), 0);
             auto val = make_test_value(value_sizes[c], static_cast<uint8_t>(c));
             uint32_t height = static_cast<uint32_t>(c * 1000 + i);
-            REQUIRE(db.insert(key, val, height));
+            REQUIRE(db.insert(key, val, height).value());
             expected[key] = {height, value_sizes[c]};
         }
     }
@@ -1954,7 +1954,7 @@ TEST_CASE("for_each_entry: empty database visits nothing", "[storage][iteration]
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     size_t count = 0;
     db.for_each_entry([&](utxoz::raw_outpoint const&, uint32_t, std::span<uint8_t const>) {
@@ -1979,12 +1979,12 @@ TEST_CASE("Reopen after rotation: size() counts entries from all versions", "[st
     // Phase 1: insert enough to trigger rotation, record size, close
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, true);
+        db.configure_for_testing(dir.path, true).value();
 
         for (size_t i = 0; i < N; ++i) {
             auto key = make_test_key(static_cast<uint32_t>(i), static_cast<uint32_t>(i >> 16));
             auto val = make_test_value(30, static_cast<uint8_t>(i & 0xFF));
-            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)));
+            REQUIRE(db.insert(key, val, static_cast<uint32_t>(i)).value());
         }
 
         auto stats = db.get_statistics();
@@ -2003,7 +2003,7 @@ TEST_CASE("Reopen after rotation: size() counts entries from all versions", "[st
     // Phase 2: reopen and verify size() matches
     {
         utxoz::db db;
-        db.configure_for_testing(dir.path, false);
+        db.configure_for_testing(dir.path, false).value();
 
         CHECK(db.size() == size_before_close);
 
@@ -2019,11 +2019,11 @@ TEST_CASE("Close: operations after close throw or return safely", "[database][cl
     ScopedTestDir dir;
 
     utxoz::db db;
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
 
     auto key = make_test_key(1, 0);
     auto val = make_test_value(30);
-    REQUIRE(db.insert(key, val, 100));
+    REQUIRE(db.insert(key, val, 100).value());
     CHECK(db.size() == 1);
 
     db.close();
@@ -2035,13 +2035,15 @@ TEST_CASE("Close: operations after close throw or return safely", "[database][cl
     auto result = db.find(key, 100);
     CHECK_FALSE(result.has_value());
 
-    // insert should throw (no impl_)
-    CHECK_THROWS(db.insert(key, val, 200));
+    // insert should return error (no impl_)
+    auto insert_result = db.insert(key, val, 200);
+    REQUIRE_FALSE(insert_result.has_value());
+    CHECK(insert_result.error().code == utxoz::error_code::not_configured);
 
     // Reconfigure should work (creates fresh impl_)
-    db.configure_for_testing(dir.path, true);
+    db.configure_for_testing(dir.path, true).value();
     CHECK(db.size() == 0);
-    REQUIRE(db.insert(key, val, 300));
+    REQUIRE(db.insert(key, val, 300).value());
     CHECK(db.size() == 1);
 
     db.close();
