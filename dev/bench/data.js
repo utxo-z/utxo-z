@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771419956970,
+  "lastUpdate": 1773926077978,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -4665,6 +4665,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 55.08,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a90440f89b573f5e9c021a961531c07019a9c009",
+          "message": "ci: use statistical comparison for benchmark alerts (#36)\n\nReplace single-commit comparison (alert-threshold: 120%) with median\nof the last 10 commits. This reduces false regression alerts caused\nby GHA runner performance variability.\n\n- Add scripts/benchmark_compare.py: compares current results against\n  historical median with configurable window and threshold (±15%)\n- Post benchmark report as sticky PR comment and step summary\n- Keep github-action-benchmark for data storage and charting only\n- Skip sticky comment on forked PRs (read-only token)\n- Validate inputs and handle malformed data.js gracefully",
+          "timestamp": "2026-03-19T14:12:16+01:00",
+          "tree_id": "d7827bb0ad1a657292195e67226957cb9907e5b0",
+          "url": "https://github.com/utxo-z/utxo-z/commit/a90440f89b573f5e9c021a961531c07019a9c009"
+        },
+        "date": 1773926077317,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 270253.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 242486.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 248026.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 309638.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 378.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 444.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11223958.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12591301.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11501114.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 11011.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 7515247.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 12450816,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 65504.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 4997.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2658.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3259.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2767.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 54.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 53.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 54.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.82,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 54.88,
             "unit": "ops/sec"
           }
         ]
