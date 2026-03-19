@@ -1,3 +1,14 @@
+# version 0.6.0
+
+## What's Changed
+* fix: suppress nodiscard warnings and fix release script by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/45
+* refactor: replace default ctor + configure() with named constructors by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/46
+* release: 0.6.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/48
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.5.0...v0.6.0
+
+
 # version 0.5.0
 
 ## What's Changed
