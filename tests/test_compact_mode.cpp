@@ -292,9 +292,10 @@ TEST_CASE_METHOD(CompactFixture, "Compact: compaction", "[compact]") {
 
     // Erase half
     for (int i = 0; i < 50; ++i) {
-        db_.erase(make_test_key(static_cast<uint32_t>(i), 0), 200);
+        CHECK(db_.erase(make_test_key(static_cast<uint32_t>(i), 0), 200) == 1);
     }
-    db_.process_pending_deletions();
+    auto [deleted, failed] = db_.process_pending_deletions();
+    CHECK(failed.empty());
 
     // Compact
     db_.compact_all();
