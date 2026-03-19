@@ -186,6 +186,29 @@ jobs:
         run: |
           python3 scripts/convert_nanobench_json.py benchmark_results.json benchmark_results_gh.json
 
+      - name: 📥 Fetch gh-pages history
+        run: |
+          if git ls-remote --exit-code origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages:gh-pages
+          else
+            echo "gh-pages branch does not exist yet — skipping history fetch"
+          fi
+
+      - name: 📈 Compare against historical median
+        run: |
+          python3 scripts/benchmark_compare.py benchmark_results_gh.json \
+            --window 10 --threshold 15 \
+            --output benchmark_report.md
+          cat benchmark_report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: 💬 Comment on PR
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: benchmark-report
+          path: benchmark_report.md
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: 🧹 Clean generated files
         run: |
           git checkout -- .
@@ -198,7 +221,4 @@ jobs:
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
           auto-push: ${{ github.event_name == 'push' }}
-          comment-on-alert: true
-          alert-threshold: '120%'
-          fail-on-alert: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
