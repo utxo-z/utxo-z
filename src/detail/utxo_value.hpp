@@ -74,4 +74,22 @@ using utxo_map = boost::unordered_flat_map<
     bip::allocator<std::pair<raw_outpoint const, utxo_value<Size>>, segment_manager_t>
 >;
 
+// =============================================================================
+// Compact mode value storage
+// =============================================================================
+
+struct compact_value {
+    uint32_t height;
+    uint32_t file_number;
+    uint32_t offset;
+};
+
+using compact_map_t = boost::unordered_flat_map<
+    raw_outpoint,
+    compact_value,
+    outpoint_hash,
+    outpoint_equal,
+    bip::allocator<std::pair<raw_outpoint const, compact_value>, segment_manager_t>
+>;
+
 } // namespace utxoz::detail

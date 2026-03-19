@@ -82,7 +82,7 @@ int main() {
             auto result = db.find(inserted_keys[i], 800000);
             if (result) {
                 ++found_count;
-                fmt::println("Found UTXO {}, size: {} bytes", i, result->size());
+                fmt::println("Found UTXO {}, size: {} bytes", i, result->data.size());
             } else {
                 fmt::println("UTXO {} not found", i);
             }
