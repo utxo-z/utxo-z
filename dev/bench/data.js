@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773937417782,
+  "lastUpdate": 1773939644105,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -5216,6 +5216,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 10K (123B)",
             "value": 53.66,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.98,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f4a0ed32ebbc9e776a56c20af9e89a1e1ae8b7ea",
+          "message": "refactor: replace exceptions with std::expected in public API (#42)\n\n- Add error_code enum (not_configured, storage_mode_mismatch,\n  config_file_corrupt, value_too_large) and error struct to types.hpp\n- Add result<T> = std::expected<T, error> alias\n- configure() returns result<> instead of throwing on mode mismatch\n  or corrupt config\n- insert() returns result<bool> instead of throwing on unconfigured\n  db or value too large\n- load_config_from_disk() returns result<> instead of throwing\n- Keep boost::interprocess::bad_alloc (OOM after retries) as exception\n  since it's irrecoverable\n- Update all tests and examples to use .value() or check error codes",
+          "timestamp": "2026-03-19T17:58:30+01:00",
+          "tree_id": "66e0f0a70b9cb38e6ad4c64ea9bd35f0c8de9b11",
+          "url": "https://github.com/utxo-z/utxo-z/commit/f4a0ed32ebbc9e776a56c20af9e89a1e1ae8b7ea"
+        },
+        "date": 1773939643837,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 290119.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 390012.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 298006.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 539801.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 496.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 507.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12672588.54,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 13436884.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 13332853.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13505.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 10792873.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14941456.28,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 130755.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 13819.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2648.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3090.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2920.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 53.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 54.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.45,
             "unit": "ops/sec"
           },
           {
