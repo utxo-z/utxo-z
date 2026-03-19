@@ -1,3 +1,17 @@
+# version 0.5.0
+
+## What's Changed
+* ci: use statistical comparison for benchmark alerts by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/36
+* fix: count all versions in entries_count_ on reopen and reset impl_ on close by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/37
+* ci: update actions/checkout v4 to v5 (Node.js 24) by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/40
+* feat: add compact storage mode with type-safe split API by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/35
+* refactor: replace exceptions with std::expected in public API by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/42
+* release: 0.5.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/44
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.4.0...v0.5.0
+
+
 # version 0.4.0
 
 ## What's Changed
