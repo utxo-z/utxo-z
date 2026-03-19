@@ -148,7 +148,7 @@ sleep 5
 MAX_WAIT_TIME=7200  # 2 hours
 ELAPSED=0
 while [ $ELAPSED -lt $MAX_WAIT_TIME ]; do
-    run_info=$(gh run list --branch "release/${VERSION}" --workflow "Build and Test" --limit 10 --json status,conclusion,url,number,event,createdAt)
+    run_info=$(gh run list --branch "release/${VERSION}" --workflow ci.yml --limit 10 --json status,conclusion,url,number,event,createdAt)
 
     if [ -z "$run_info" ] || [ "$run_info" == "[]" ]; then
         echo "No workflow runs found for branch release/${VERSION}. Waiting..."
