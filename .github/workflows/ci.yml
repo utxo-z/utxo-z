@@ -97,6 +97,54 @@ jobs:
         run: |
           ctest --preset ${{ matrix.build-preset }} --output-on-failure
 
+  publish:
+    needs: [setup, build]
+    if: >-
+      github.event_name == 'push' && (
+        startsWith(github.ref, 'refs/tags/v') ||
+        startsWith(github.ref, 'refs/heads/release/') ||
+        startsWith(github.ref, 'refs/heads/hotfix/')
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: 📦 Publish Linux x86_64
+          - os: macos-15
+            name: 📦 Publish macOS arm64
+          - os: windows-2025
+            name: 📦 Publish Windows x64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v5
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan
+          conan --version
+
+      - name: 🔧 Configure Conan
+        env:
+          CONAN_LOGIN_USERNAME: ${{ secrets.CONAN_LOGIN_USERNAME }}
+          CONAN_PASSWORD: ${{ secrets.CONAN_PASSWORD }}
+        run: |
+          conan profile detect --force
+          conan remote add kth https://packages.kth.cash/api/
+          conan remote login kth $CONAN_LOGIN_USERNAME -p $CONAN_PASSWORD
+
+      - name: 📦 Create package
+        run: |
+          conan create . --version=${{ needs.setup.outputs.build-version }} --build=missing -s build_type=Release -s compiler.cppstd=23 -o with_tests=False -o with_examples=False -o with_benchmarks=False
+
+      - name: 🚀 Upload to Conan remote
+        run: |
+          conan upload utxoz/${{ needs.setup.outputs.build-version }} -r kth -c
+
   build-wasm:
     needs: [setup]
     runs-on: ubuntu-latest
