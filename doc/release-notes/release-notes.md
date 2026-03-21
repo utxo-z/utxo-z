@@ -1,3 +1,13 @@
+# version 0.7.0
+
+## What's Changed
+* ci: add Conan package publishing on release branches by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/49
+* release: 0.7.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/50
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.6.0...v0.7.0
+
+
 # version 0.6.0
 
 ## What's Changed
