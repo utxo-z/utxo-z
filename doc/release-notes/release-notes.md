@@ -1,3 +1,13 @@
+# version 0.8.0
+
+## What's Changed
+* chore(deps): bump third-party libs to latest CCI by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/51
+* release: 0.8.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/52
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.7.0...v0.8.0
+
+
 # version 0.7.0
 
 ## What's Changed
