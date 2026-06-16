@@ -70,14 +70,14 @@ class UtxozConan(ConanFile):
         self.options["boost/*"].without_cobalt = True
 
     def requirements(self):
-        self.requires("boost/1.90.0", transitive_headers=True, transitive_libs=True)
-        self.requires("fmt/12.0.0", transitive_headers=True, transitive_libs=True)
+        self.requires("boost/1.91.0", transitive_headers=True, transitive_libs=True)
+        self.requires("fmt/12.1.0", transitive_headers=True, transitive_libs=True)
         if self.options.log == "spdlog":
-            self.requires("spdlog/1.16.0", transitive_headers=True, transitive_libs=True)
+            self.requires("spdlog/1.17.0", transitive_headers=True, transitive_libs=True)
 
     def build_requirements(self):
         if self.options.with_tests:
-            self.test_requires("catch2/3.11.0")
+            self.test_requires("catch2/3.15.0")
 
         if self.options.with_tests or self.options.with_benchmarks:
             self.test_requires("nanobench/4.3.11")
