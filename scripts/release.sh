@@ -99,9 +99,20 @@ fi
 git checkout -b "release/${VERSION}"
 
 # Update version.hpp with the release version
+# Note: `sed -i` is not portable — GNU sed takes the suffix attached to the
+# flag, BSD/macOS sed takes it as a separate argument. Write to a temp file and
+# move it into place instead, which behaves the same everywhere.
 VERSION_FILE="include/utxoz/version.hpp"
 echo "Updating ${VERSION_FILE} to version ${VERSION}..."
-sed -i "s/inline constexpr std::string_view version = \".*\"/inline constexpr std::string_view version = \"${VERSION}\"/" "${VERSION_FILE}"
+sed "s/inline constexpr std::string_view version = \".*\"/inline constexpr std::string_view version = \"${VERSION}\"/" \
+    "${VERSION_FILE}" > "${VERSION_FILE}.tmp"
+mv "${VERSION_FILE}.tmp" "${VERSION_FILE}"
+
+# Fail loudly if the substitution did not take effect
+if ! grep -q "version = \"${VERSION}\"" "${VERSION_FILE}"; then
+    echo "Failed to update ${VERSION_FILE} to ${VERSION}"
+    exit 1
+fi
 
 git add "${VERSION_FILE}"
 git commit -m "release: update version to ${VERSION}"
@@ -145,6 +156,14 @@ fi
 echo "Filtering workflow runs created after: ${RELEASE_START_TIME}"
 sleep 5
 
+# `base64 --decode` is a GNU long option; BSD/macOS base64 uses -D. Pick the
+# form this platform actually accepts instead of assuming GNU coreutils.
+if printf '' | base64 --decode >/dev/null 2>&1; then
+    BASE64_DECODE=(base64 --decode)
+else
+    BASE64_DECODE=(base64 -D)
+fi
+
 MAX_WAIT_TIME=7200  # 2 hours
 ELAPSED=0
 while [ $ELAPSED -lt $MAX_WAIT_TIME ]; do
@@ -182,7 +201,7 @@ while [ $ELAPSED -lt $MAX_WAIT_TIME ]; do
         continue
     fi
 
-    push_run_decoded=$(echo "$push_run" | base64 --decode)
+    push_run_decoded=$(echo "$push_run" | "${BASE64_DECODE[@]}")
 
     status=$(echo "$push_run_decoded" | jq -r '.status')
     conclusion=$(echo "$push_run_decoded" | jq -r '.conclusion')
