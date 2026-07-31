@@ -1,3 +1,13 @@
+# version 0.8.1
+
+## What's Changed
+* docs: document the deferred lookup/deletion contract, add rotation tests by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/53
+* release: 0.8.1 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/54
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.8.0...v0.8.1
+
+
 # version 0.8.0
 
 ## What's Changed
