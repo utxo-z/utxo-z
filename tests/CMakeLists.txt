@@ -14,6 +14,7 @@ add_executable(utxoz_tests
     test_database.cpp
     test_storage_correctness.cpp
     test_compact_mode.cpp
+    test_find_across_rotations.cpp
 )
 
 target_link_libraries(utxoz_tests

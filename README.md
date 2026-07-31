@@ -14,7 +14,7 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 - **Type-safe API**: `full_db` and `compact_db` with compile-time mode safety — no runtime dispatch
 - **Multi-container architecture**: 5 size-optimized containers (48B, 94B, 128B, 256B, 10KB) in full mode
 - **Memory-mapped files**: Automatic file rotation and OS-managed I/O
-- **Deferred deletions**: Batched deletes for optimal write performance
+- **Deferred lookups and deletions**: Reads and deletes that miss the mapped version are batched — see [Deferred lookups and deletions](#deferred-lookups-and-deletions)
 - **Generational storage**: Recent outputs are faster to access
 - **Cache-optimized**: Open addressing hash tables for CPU cache efficiency
 
@@ -123,6 +123,59 @@ int main() {
 }
 ```
 
+### Deferred lookups and deletions
+
+Containers are **generational**: each one keeps writing to its latest version file and rotates to a new one when that file fills up. Only the latest version is memory-mapped.
+
+`find()` and `erase()` work on that mapped version (`erase()` also checks the cached files). Anything left behind in a previous version is *queued* rather than answered, so their immediate result is **not authoritative**:
+
+- `find()` returning `not_found` means "not in the mapped version — queued as a pending lookup".
+- `erase()` returning `0` means "not in the mapped version — queued as a pending deletion".
+
+The definitive answer comes from the batch functions, which sweep the cached files and every previous version:
+
+```cpp
+// Phase 1: issue the reads for the block/batch
+for (auto const& outpoint : block_inputs) {
+    if (auto r = db.find(outpoint, height)) {
+        use(*r);                 // resolved inline
+    }
+    // not_found here means "queued" — do NOT conclude the UTXO is missing yet
+}
+
+// Phase 2: resolve the queue. `found` answers the deferred lookups;
+// only the keys in `missing` exist in no version of the database.
+auto [found, missing] = db.process_pending_lookups();
+
+// Same shape for deletions
+for (auto const& outpoint : block_inputs) {
+    db.erase(outpoint, height);  // 0 means "queued", not "absent"
+}
+auto [deleted, failed] = db.process_pending_deletions();
+```
+
+Rules to follow:
+
+- **Call `process_pending_lookups()` before `process_pending_deletions()`.** Deferred deletions remove entries from the very files the pending lookups still need to read, so the reverse order loses the values of UTXOs spent in that same batch.
+- **Both calls drain their queue.** They report everything once; whatever you do not read from the returned map is gone.
+- **Do not decide synchronously inside a block.** A validator that needs the value on the spot has to be restructured into the two phases above.
+- `deferred_lookups_size()` and `deferred_deletions_size()` let you assert nothing is left pending at the end of a batch.
+
+#### When the first rotation happens
+
+`find()` queues **every** miss of the mapped version — whether the key lives in an older version or does not exist at all. So `deferred_lookups_size()` starts growing at the first lookup of an unknown key, with no rotation involved, and `process_pending_lookups()` has to be called to drain it regardless of how many versions exist.
+
+What the first rotation changes is the *meaning* of a `not_found`. While a container still has a single version, everything stored is in the mapped version, so a deferred lookup can only ever resolve to "does not exist" — which is exactly why treating `not_found` as authoritative appears to work. Once a container rotates, `not_found` also covers "still stored, in a previous version", and code making that assumption starts failing abruptly, for many keys at once.
+
+Container 0 (48-byte entries in a 2 GiB file, ~7.86M buckets) rotates when the hash table reaches `max_load_factor * 0.95`. Measured on production sizing:
+
+| Workload | Live entries at first rotation of container 0 |
+|----------|-----------------------------------------------|
+| Inserts only | 6,550,001 |
+| Inserts + spends | 6,700,001 |
+
+For Bitcoin Cash mainnet that is around block 245,000. The other containers rotate much earlier, since their files are smaller.
+
 ### Iterating over entries
 
 ```cpp
@@ -195,8 +248,8 @@ db_base                    — shared methods (close, size, erase, statistics, .
 |--------|-------------|
 | `close()` | Close and flush all data. Idempotent; also called by destructor |
 | `size()` | Total UTXO count |
-| `erase(key, height)` | Erase UTXO (may be deferred) |
-| `process_pending_deletions()` | Process deferred deletes, returns (count, failed entries) |
+| `erase(key, height)` | Erase UTXO. `0` means deferred, not absent — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `process_pending_deletions()` | Definitive answer for deferred deletes, returns (count, failed entries) |
 | `deferred_deletions_size()` | Count of pending deferred deletions |
 | `deferred_lookups_size()` | Count of pending deferred lookups |
 | `for_each_key(callback)` | Iterate over all stored keys |
@@ -214,8 +267,8 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `open(path, remove_existing)` | Static: open database, returns `result<full_db>` |
 | `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, value, height)` | Insert UTXO with byte data |
-| `find(key, height)` | Returns `optional<full_find_result>` (`data`, `block_height`) |
-| `process_pending_lookups()` | Returns `(flat_map<key, full_find_result>, failed)` |
+| `find(key, height)` | Returns `result<full_find_result>` (`data`, `block_height`). `not_found` means deferred — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `process_pending_lookups()` | Definitive answer for deferred lookups: `(flat_map<key, full_find_result>, failed)` |
 | `for_each_entry(callback)` | Callback: `(key, height, span<uint8_t const>)` |
 
 ### `compact_db`
@@ -225,8 +278,8 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `open(path, remove_existing)` | Static: open database, returns `result<compact_db>` |
 | `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, file_number, offset, height)` | Insert UTXO with typed fields |
-| `find(key, height)` | Returns `optional<compact_find_result>` (`block_height`, `file_number`, `offset`) |
-| `process_pending_lookups()` | Returns `(flat_map<key, compact_find_result>, failed)` |
+| `find(key, height)` | Returns `result<compact_find_result>` (`block_height`, `file_number`, `offset`). `not_found` means deferred — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `process_pending_lookups()` | Definitive answer for deferred lookups: `(flat_map<key, compact_find_result>, failed)` |
 | `for_each_entry(callback)` | Callback: `(key, height, file_number, offset)` |
 
 ### `utxoz::raw_outpoint`
