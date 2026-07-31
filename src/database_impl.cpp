@@ -1310,6 +1310,10 @@ void database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, ui
 void database_impl::compact_all() {
     log::info("Starting full database compaction...");
 
+    // Compaction moves entries between files and renames/removes versions, so
+    // every cached (container_index, version) mapping becomes stale.
+    if (file_cache_) file_cache_->clear();
+
     if (mode_ == storage_mode::compact) {
         compact_compact_container();
     } else {
@@ -1317,6 +1321,8 @@ void database_impl::compact_all() {
             compact_container<I>();
         });
     }
+
+    if (file_cache_) file_cache_->clear();
 
     log::info("Full database compaction complete");
 }

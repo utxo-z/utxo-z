@@ -136,6 +136,18 @@ struct file_cache {
         max_cached_files_ = new_size;
     }
 
+    /**
+     * @brief Drop every cached mapping.
+     *
+     * Must be called whenever the on-disk file layout changes underneath the
+     * cache (compaction renames and removes version files), otherwise a cached
+     * (container_index, version) entry keeps pointing at the mapping of a file
+     * that no longer holds that version's data.
+     */
+    void clear() {
+        cache_.clear();
+    }
+
     std::vector<std::pair<size_t, size_t>> get_cached_files() const {
         std::vector<std::pair<size_t, size_t>> files;
         files.reserve(cache_.size());
