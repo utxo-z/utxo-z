@@ -30,14 +30,25 @@ if ! git ls-remote --heads origin "release/${VERSION}" | grep -q "release/${VERS
     exit 1
 fi
 
-# Squash merge the PR, do not delete the branch yet
+# Squash merge the PR, do not delete the branch yet.
+# Note: no --auto here. Auto-merge has to be enabled on the repository, and it
+# returns immediately after queueing the merge — the tag below would then be
+# created on a master that does not carry the version bump yet.
 echo "Merging release PR..."
-gh pr merge --squash --auto "release/${VERSION}"
+gh pr merge --squash "release/${VERSION}"
 
 # Switch to master and pull latest changes
 echo "Switching to master and pulling latest changes..."
 git checkout master
 git pull origin master
+
+# The tag must point at a master that actually contains the version bump.
+VERSION_FILE="include/utxoz/version.hpp"
+if ! grep -q "version = \"${VERSION}\"" "${VERSION_FILE}"; then
+    echo "master does not carry version ${VERSION} yet (${VERSION_FILE} still differs)."
+    echo "The release PR merge has not landed. Aborting before tagging."
+    exit 1
+fi
 
 # Step 1: Create temporary release to generate notes
 echo "Creating temporary release to generate notes..."
