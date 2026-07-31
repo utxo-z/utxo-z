@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785515036782,
+  "lastUpdate": 1785515523614,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -8279,6 +8279,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 108.06,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "distinct": true,
+          "id": "3cca53b2e74fdc6224aff6e9c8a90e0fbf45c9c9",
+          "message": "fix: make release.sh work with BSD userland (macOS)\n\nTwo GNU-only constructs made the release script fail on macOS:\n\n- `sed -i \"s/.../.../\" file`: GNU sed takes the backup suffix attached to the\n  flag, BSD sed takes it as a separate argument, so it consumed the expression\n  as the suffix and tried to run the file path as the script (\"command i\n  expects \\ followed by text\"). Replaced with a plain sed into a temp file plus\n  a mv, which behaves identically on both, and added a grep check so a failed\n  substitution aborts instead of committing an unchanged version.\n\n- `base64 --decode`: long option is GNU-only, BSD uses -D. This one sits in the\n  CI wait loop, so it would have aborted the release right after pushing the\n  branch and opening the PR. Now detects the accepted form once and reuses it.\n\nThe `date` invocation already had a darwin branch; these were the two left.",
+          "timestamp": "2026-07-31T18:29:58+02:00",
+          "tree_id": "b39b1e21f63da8c33abe7d833a3b73b761809034",
+          "url": "https://github.com/utxo-z/utxo-z/commit/3cca53b2e74fdc6224aff6e9c8a90e0fbf45c9c9"
+        },
+        "date": 1785515522976,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 284868.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 348591.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 298383.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 441184.82,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 337.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 385.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12304040.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 10752256.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11871648.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13063.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 11044271.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14869888.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 85416.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 11249.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2506.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2952.39,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3020.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 58.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 58.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 58.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 58.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 58.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 58.86,
             "unit": "ops/sec"
           }
         ]
