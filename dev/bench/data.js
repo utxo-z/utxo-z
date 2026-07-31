@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785516094954,
+  "lastUpdate": 1785516605323,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -8835,6 +8835,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 3.64,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3a5dfa2798d0f542363251980a5663a4282ccc86",
+          "message": "release: 0.8.1 (#54)\n\n* release: update version to 0.8.1\n\n* fix: merge the release PR synchronously and verify the bump before tagging\n\npost-release.sh used `gh pr merge --squash --auto`, which does not work here and\nhides a worse failure behind it.\n\n`--auto` requires auto-merge to be enabled on the repository, and it is not\n(allow_auto_merge is false), so gh rejects the call and the script stops at its\nfirst action. Enabling the flag would not be the right fix either: --auto\nreturns as soon as the merge is queued, while the next lines already check out\nmaster, pull, and tag it. If the merge has not landed by then, v<version> ends\nup pointing at a master without the version bump, and the release ships with the\nprevious version string.\n\nMerge synchronously instead, and assert that master really carries the bump\nbefore creating any tag, so a merge that did not land aborts the script rather\nthan producing a mislabelled release.",
+          "timestamp": "2026-07-31T18:47:49+02:00",
+          "tree_id": "cccef83b77f1c42577167f21ce1eab882954346d",
+          "url": "https://github.com/utxo-z/utxo-z/commit/3a5dfa2798d0f542363251980a5663a4282ccc86"
+        },
+        "date": 1785516604825,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 342959.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 699699.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 670474.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 897409.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 490.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 540.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12722536.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12888832.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 13475958.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13172.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 14319609.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 15229896.22,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 128780.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 13934.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2400.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3704.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2779.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 55.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 55.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.11,
             "unit": "ops/sec"
           }
         ]
