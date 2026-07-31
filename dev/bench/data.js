@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781622949529,
+  "lastUpdate": 1785515036782,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -8140,6 +8140,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 3.5,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6106dbddf7cdbce505bb10cd3c9e6159d7ab81fa",
+          "message": "docs: document the deferred lookup/deletion contract, add rotation tests (#53)\n\nfind() and erase() only see the currently mapped (latest) version of each\ncontainer, queueing anything else for process_pending_lookups() /\nprocess_pending_deletions(). Neither the not_found from find() nor the 0 from\nerase() is authoritative, but nothing said so: the headers documented find() as\n\"error with not_found on failure\" and erase() as \"0 if not found\", which reads\nas a definitive answer.\n\nThat gap bites only after the first rotation, and with production sizing\ncontainer 0 does not rotate until ~6.6M live UTXOs (BCH mainnet ~block\n245'000). Until then every lookup is served from the single mapped version and\nnever defers, so an integrator treating not_found as definitive works for\nthousands of blocks and then fails abruptly, for a large number of keys at\nonce.\n\n- document the two-phase contract in database.hpp (find, erase and both\n  process_pending_* on each mode) and in a README section, including the\n  ordering rule (lookups before deletions, which remove the entries the\n  pending lookups still need to read) and the measured rotation thresholds\n- add tests/test_find_across_rotations.cpp: inline before rotation, deferred\n  after, one sweep resolving deferrals from all five containers, truly absent\n  keys reported as failed, the erase counterpart, the lookups-before-deletions\n  order, compact mode, and a [.slow][scale] case at production sizing that\n  crosses the ~6.6M rotation. No test in the suite used to cross a rotation,\n  which is why the contract was never pinned.\n- drop the file cache on compact_all(): the cache is keyed by (container,\n  version) and compaction renumbers versions, so cached mappings must not\n  outlive it",
+          "timestamp": "2026-07-31T18:21:58+02:00",
+          "tree_id": "dd1c9217049a5284924f4ecf198174f2f1d55d86",
+          "url": "https://github.com/utxo-z/utxo-z/commit/6106dbddf7cdbce505bb10cd3c9e6159d7ab81fa"
+        },
+        "date": 1785515036176,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 1047364.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 1308555.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 1317709.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 1300482.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 418.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 488,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12734947.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 7661442.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12303934.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12615.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 11234189.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 9989388.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 102474.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 11444.28,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2106.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 4031.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3318.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 108.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 107.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 108.17,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 108.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 108.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 108.06,
             "unit": "ops/sec"
           }
         ]
