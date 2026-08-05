@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785938544816,
+  "lastUpdate": 1785949255900,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -9391,6 +9391,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 3.68,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "78c846b77c40d504d52a63511a1067ca85a58a62",
+          "message": "feat!: shard search statistics into atomic counters, making find() concurrent (#56)\n\nsearch_stats appended a search_record to a shared std::vector on every\nsuccessful find() and erase(). That had two consequences.\n\nIt raced. With statistics compiled in — the default, baked into the installed\nconfig.hpp by this project's own build — a concurrent find() was a data race on\nthe vector, and on reallocation a heap-use-after-free. ThreadSanitizer reports\nboth against the old code on the tests added here. Since find() otherwise only\nreads the active maps and queues into a concurrent set, the statistics were the\nsingle thing preventing concurrent readers.\n\nAnd it grew without bound. One ~16-byte record per operation, retained forever,\nfreed only by an explicit reset. Over a full sync that is gigabytes of records\nnobody reads: the raw vector is never exposed, get_summary() is the only\naccessor, and it computes nothing but sums and ratios of sums.\n\nSo keep the aggregates instead of the records. Seven counters, sharded across 64\nslots with each thread assigned a slot round-robin on first use, all updated\nwith relaxed fetch_add. Recording is O(1) in space, and concurrent recorders\nstay off each other's cache lines — the slots are padded to 128 bytes, the\nwidest line among the platforms we target, since 64 would still share a line on\nApple Silicon. Slots are reused once more threads have recorded than there are\nslots, so a distinct slot per thread is the common case rather than a guarantee;\ncorrectness does not rest on it.\n\nThe counters are read one at a time, so a summary taken while recording is in\nflight can show a numerator an increment ahead of its denominator. The ratios\nare clamped rather than allowed to exceed 1, and the header says plainly that\ncross-field consistency needs a quiescent moment.\n\nsearch_record and its get_utxo_age() go with the vector they existed for. They\nhad no other consumer, and leaving an orphaned record type in the public header\nis an invitation to reintroduce the per-record path.\n\nThe threading contract in the header and README is updated to match. find()\nbecomes the documented exception to the one-operation-at-a-time rule, and only a\npartial one: concurrent find() is permitted strictly while no insert, erase,\nrotation, sweep, compaction or cache operation can run, and providing that\nreader/writer barrier is the caller's responsibility — there is no lock here to\nlean on. Sharding removes an internal writer; it does not make the active map\nsafe against modification, and nothing here does: a rotation unmaps the whole\nactive segment and briefly leaves the container pointer null. The contract also\nnow covers the statistics calls themselves, since get_statistics() is not const\n— it recomputes the fragmentation counters as it goes.\n\nTests cover exact totals, totals under 8 concurrent readers, the miss path\nconcurrently queueing into the deferred set with exact deduplication, and that\nrecording stays bounded.\n\nBREAKING CHANGE: removes the unused public search_record type. Source-level\nonly — it was a standalone struct with no consumer — but it ships in an\ninstalled header, so this needs the 0.9.0 minor release rather than a patch.",
+          "timestamp": "2026-08-05T18:58:33+02:00",
+          "tree_id": "a47d3996d502afc52499b6b866b88a9327987f6b",
+          "url": "https://github.com/utxo-z/utxo-z/commit/78c846b77c40d504d52a63511a1067ca85a58a62"
+        },
+        "date": 1785949255397,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 277054.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 253168.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 239984.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 257429.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 319.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 346.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11746449.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 11941604.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11148945.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 11604.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 5776229.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 10933044.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 58468.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 6154.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 1740.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2649.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2569.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 58.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 58.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 57.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 57.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 57.16,
             "unit": "ops/sec"
           }
         ]
