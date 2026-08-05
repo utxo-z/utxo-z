@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785516620363,
+  "lastUpdate": 1785938544816,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -9252,6 +9252,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 58.44,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0156416baf2238411e6cc70cdb9d18186f7fb85c",
+          "message": "docs: write down the threading and ownership invariants of the API (#55)\n\nEverything here is already true of the code; none of it was stated anywhere, so\nintegrators had to infer it, and the inferences went wrong in the direction that\ncosts the most.\n\n- db_base and README: a database instance supports one operation at a time,\n  const methods included. Not a \"reads are safe\" guarantee — it covers the whole\n  object, find() included, since with statistics compiled in even a lookup\n  appends to a shared unsynchronised vector.\n\n- process_pending_lookups / process_pending_deletions: the queue is global, not\n  per caller. The sweep takes everything, including keys queued elsewhere, and\n  hands it to whoever called. Exactly one component may own it, and it has to\n  route results back. That is an ownership rule, stated separately from the\n  threading one so it cannot be read as a concurrency exception.\n\n- Both sweeps: a version file that cannot be read is logged and skipped, so its\n  keys come back in the failed list, indistinguishable from genuinely absent.\n  The erase() and find() docs and the README examples now say the same thing, so\n  no entry point still describes that list as proof of absence. Closing the hole\n  properly needs a separate bucket in the return value, which is a breaking\n  change and belongs in its own commit.\n\n- file_cache: any map reference the cache hands out — from get_or_open_file() or\n  get_or_open_compact_file() alike — is valid only until the next cache\n  operation, because eviction unmaps the segment it points into. That bites\n  single-threaded code as soon as anything interleaves two version files, and\n  the default of one cached file makes it easy to trip.\n\n- search_stats: unbounded. One ~16-byte record per successful find() and\n  erase(), freed only by reset_search_stats(); over a full sync that is\n  gigabytes. Also notes that statistics are ON by default and are baked into the\n  installed config.hpp by this project's build, so consumers inherit them rather\n  than opting in.",
+          "timestamp": "2026-08-05T15:59:31+02:00",
+          "tree_id": "00307a43ef278878d4e8dc752c9e1163a3db5b92",
+          "url": "https://github.com/utxo-z/utxo-z/commit/0156416baf2238411e6cc70cdb9d18186f7fb85c"
+        },
+        "date": 1785938544510,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 786594.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 803304.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 803128.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 1018714.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 596.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 438.24,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 15611024.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 16404491.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 16121834.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 17028.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 11656840.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 17486515.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 107677.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 14994.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2507.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3700.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3751.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 3.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 3.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 3.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 3.66,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 3.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 3.68,
             "unit": "ops/sec"
           }
         ]
