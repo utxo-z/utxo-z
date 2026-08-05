@@ -36,6 +36,22 @@ inline constexpr size_t compact_sentinel_index = SIZE_MAX;
  *
  * Provides efficient access to historical database files with automatic
  * eviction of least-recently-used entries.
+ *
+ * @warning No synchronisation, and the cache owns the mappings. Two rules
+ * follow, and both are load-bearing:
+ *
+ * 1. Any map reference returned by the cache — get_or_open_file() or
+ *    get_or_open_compact_file() alike — is valid only until the next cache
+ *    operation. Evicting an entry destroys its managed_mapped_file, which
+ *    unmaps the memory the map lives in, so holding a reference across a second
+ *    call is a use-after-unmap. This bites single-threaded code too, as soon as
+ *    anything interleaves two version files.
+ * 2. Only one thread may touch the cache. Concurrently, the eviction above
+ *    unmaps memory another thread is reading — a SIGSEGV/SIGBUS, not a data
+ *    race, so locking the *contents* would not help.
+ *
+ * The default of one cached file makes rule 1 easy to trip: nearly every miss
+ * evicts the previous entry.
  */
 struct file_cache {
     template<size_t Index>

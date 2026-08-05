@@ -32,6 +32,23 @@ struct search_summary {
     double hit_rate = 0.0;           ///< Overall hit rate (0.0-1.0)
 };
 
+/**
+ * @brief Per-operation search records, kept when statistics are compiled in.
+ *
+ * @warning Unbounded. add_record() appends one record (~16 bytes) for every
+ * successful find() and erase(), and nothing trims the vector — only reset()
+ * frees it. Over a full sync that is gigabytes. Call
+ * db_base::reset_search_stats() periodically — or db_base::reset_all_statistics(),
+ * which calls it — or build with UTXOZ_STATISTICS_ENABLED=OFF (Conan option
+ * `statistics=False`) if you do not consume the summary.
+ *
+ * @note Statistics are ON by default. The macro is baked into the installed
+ * config.hpp by this project's own build, so it is not something a consumer
+ * opts into; check config.hpp in the package to see what you got.
+ *
+ * @warning Not synchronised. With statistics compiled in, find() and erase()
+ * append here, which is why even const operations are single-threaded.
+ */
 struct search_stats {
     void add_record(uint32_t access_height, uint32_t insertion_height,
                     uint32_t depth, bool cache_hit, bool found, char operation);

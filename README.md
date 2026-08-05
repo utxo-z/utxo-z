@@ -143,23 +143,36 @@ for (auto const& outpoint : block_inputs) {
     // not_found here means "queued" — do NOT conclude the UTXO is missing yet
 }
 
-// Phase 2: resolve the queue. `found` answers the deferred lookups;
-// only the keys in `missing` exist in no version of the database.
-auto [found, missing] = db.process_pending_lookups();
+// Phase 2: resolve the queue. `found` answers the deferred lookups.
+// `unresolved` is NOT proof of absence — see the warning below.
+auto [found, unresolved] = db.process_pending_lookups();
 
 // Same shape for deletions
 for (auto const& outpoint : block_inputs) {
     db.erase(outpoint, height);  // 0 means "queued", not "absent"
 }
-auto [deleted, failed] = db.process_pending_deletions();
+auto [deleted, unresolved_deletions] = db.process_pending_deletions();
 ```
 
 Rules to follow:
 
+- **The second element is unresolved, not absent.** A version file that cannot be read is logged, skipped, and its keys land in that same list, indistinguishable from keys that exist nowhere. Absence is only established when the sweep managed to read every version — which today you can tell apart only from the log. Do not turn that list into "invalid block" without checking.
 - **Call `process_pending_lookups()` before `process_pending_deletions()`.** Deferred deletions remove entries from the very files the pending lookups still need to read, so the reverse order loses the values of UTXOs spent in that same batch.
-- **Both calls drain their queue.** They report everything once; whatever you do not read from the returned map is gone.
+- **Both calls drain their queue, and the queue is global.** They report everything once — including keys queued by a different caller — so exactly one component may own the sweep, and it has to route results back to whoever asked. Whatever you do not read from the returned map is gone.
 - **Do not decide synchronously inside a block.** A validator that needs the value on the spot has to be restructured into the two phases above.
 - `deferred_lookups_size()` and `deferred_deletions_size()` let you assert nothing is left pending at the end of a batch.
+
+#### Threading
+
+A database instance supports **one operation at a time**, const methods included. This is not a "reads are safe" guarantee — it covers the whole object.
+
+The reasons are structural rather than incidental:
+
+- The LRU file cache owns the memory mappings and has no synchronisation. Evicting an entry unmaps the segment, so a second thread reading a map it obtained earlier is a use-after-unmap: a crash, not a torn read. `erase()`, `process_pending_deletions()` and `process_pending_lookups()` all touch that cache.
+- The deferred-lookup queue is **global, not per caller**. `process_pending_lookups()` drains all of it, so two callers steal each other's keys. Exactly one component may own the sweep; it also has to route results back to whoever asked. That is an ownership rule, separate from the threading one above.
+- `find()` is not an exception to the rule, even though it only reads the active maps. With statistics compiled in — the default — it appends to a shared, unsynchronised record vector, so concurrent `find()` calls race there.
+- The deferred-deletion queue, the entry count, the per-container statistics and the file metadata are plain members mutated without atomics.
+- With statistics compiled in — the default — `find()` and `erase()` append to a shared record vector. That vector is also unbounded: one record per successful operation, freed only by `reset_search_stats()` or `reset_all_statistics()`, which calls it. Over a full sync it reaches gigabytes, so either reset it periodically or build with `statistics=False`.
 
 #### When the first rotation happens
 
