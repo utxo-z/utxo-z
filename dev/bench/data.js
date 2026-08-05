@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785962107073,
+  "lastUpdate": 1785962184608,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -9669,6 +9669,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 58.77,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b83b60027b368650689ad14d51af5b5aadbe7e05",
+          "message": "feat!: split the search counters into probes and historical resolution (#60)\n\nOne search_summary described two different phases at once, and the result was a\nset of numbers that could not mean what their names said.\n\nEvery one of the fourteen add_record() call sites passed found=true, because a\nlookup that resolved nothing recorded nothing at all. So found_operations\ntracked total_operations exactly and hit_rate was the constant 1.0 — a hit rate\nthat cannot express a miss. Two of those call sites, the deferred deletion\npaths, passed an insertion height of zero, so avg_utxo_age averaged real ages\ntogether with absolute block heights. And a lookup that missed the active map\nand was then resolved by a sweep landed in the same denominator twice, once per\nphase.\n\nThe phases are now counted apart, because they answer different questions:\n\n- probe_stats covers find() and nothing else: how many probes there were, how\n  many the active map held, how many had to be deferred, and the age of the ones\n  it answered. find() now records on every call, misses included, which is the\n  part that was missing rather than merely miscomputed.\n\n- resolution_stats covers the historical lookup sweeps: keys resolved, keys left\n  unresolved, the depth they were found at, and how many version files were\n  visited against how many came from the file cache.\n\nDeletions are folded into neither. They resolve through their own sweep and\ndeferred_stats already reports them; the age of a delete is not the age of a\nread. That is also what removes the insertion-height-of-zero contamination,\nsince those call sites were the deletion sweeps.\n\nThe ratio is named active_map_hit_rate rather than anything about avoiding\nresolution, because that is what it measures today: the height argument does not\naffect the result yet, so an entry created above the height being validated\nagainst is still found and counted, even though the caller discards it\nafterwards. When max_creation_height becomes a real bound those move to\ndeferred and the two meanings converge; until then the name and the\ndocumentation say the narrower thing.\n\nRecording is compiled out entirely when statistics are disabled — no counters\nand no call, guarded in the types rather than at each call site, so a call added\nlater cannot forget the guard and put a fetch_add back on the concurrent path.\nThe suite is green in both configurations, which also fixes a pre-existing test\nthat asserted counter values unconditionally.\n\nBREAKING CHANGE: the search statistics API is replaced. database_statistics\n::search becomes ::probes and ::resolution; search_summary and search_stats are\nremoved; get_search_stats() is removed, since the summaries are reachable\nthrough get_statistics() and the accessor returned a non-copyable object whose\nonly use was get_summary(). reset_search_stats() stays and now clears both sets\nof counters. Source-level only, and it needs the 0.9.0 minor release rather than\na patch.",
+          "timestamp": "2026-08-05T22:33:29+02:00",
+          "tree_id": "f694d3671a618edd14b95f6bf9f3a9055416d436",
+          "url": "https://github.com/utxo-z/utxo-z/commit/b83b60027b368650689ad14d51af5b5aadbe7e05"
+        },
+        "date": 1785962184204,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 14013666.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 12854430.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 6733694.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 7724075.72,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 557.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 841.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12544861.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 8864708,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12149991.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12891.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 14921032.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 11770669.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 156586.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 14976.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 3300.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 5790.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2729.22,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 4.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 4.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 4.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 4.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 4.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 4.66,
             "unit": "ops/sec"
           }
         ]
