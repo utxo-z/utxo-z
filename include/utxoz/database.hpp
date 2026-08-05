@@ -33,21 +33,43 @@ struct database_impl;
  * Not intended to be instantiated directly — use full_db::open() or compact_db::open().
  *
  * @par Threading
- * A database instance supports ONE operation at a time. This is not a
- * fine-grained "const methods are safe" guarantee: it covers the whole object,
- * const methods included. Concurrent use requires external serialisation.
+ * A database instance supports ONE mutating operation at a time, with no other
+ * operation of any kind in flight. Mutating means insert(), erase(),
+ * process_pending_deletions(), process_pending_lookups(), compact_all() and
+ * close(). Serialising them is the caller's job.
  *
- * The reasons are structural, not incidental:
+ * find() is the one exception, and only a partial one: concurrent find() calls
+ * are permitted strictly while no insert, erase, rotation, sweep, compaction or
+ * cache operation can run. Providing that reader/writer barrier is the caller's
+ * responsibility — this library has no lock to lean on.
+ *
+ * What makes find() eligible at all is that every piece of shared state it
+ * touches is itself thread-safe: it reads the active maps, records into sharded
+ * atomic counters, and queues into a concurrent set. That removes the internal
+ * writer; it does NOT make the active map safe against modification. Nothing
+ * here does.
+ *
+ * Statistics are operations too, not free reads. get_statistics() is not const
+ * — it recomputes the fragmentation counters as it goes — and
+ * reset_search_stats() / reset_all_statistics() write by definition; the const
+ * accessors read plain counters that insert() and erase() write. All of them
+ * may overlap with find(), which writes nothing they look at beyond its own
+ * sharded counters, but not with any mutation, and get_statistics() and the
+ * reset calls not with each other either. A summary taken while find() is
+ * recording is also not consistent across fields; see search_stats.
+ *
+ * The restriction on everything else is structural, not incidental:
  * - The LRU file cache has no synchronisation, and it owns the memory mappings.
  *   Evicting an entry unmaps the segment, so a second thread reading a
  *   previously returned map is a use-after-unmap — a crash, not a torn read.
  *   The cache is touched by erase(), process_pending_deletions() and
  *   process_pending_lookups().
- * - The deferred-deletion queue, the entry count, per-container statistics and
- *   the file metadata are plain members mutated without atomics.
- * - With statistics compiled in (the default), even find() appends to a shared,
- *   unsynchronised record vector; see search_stats. So find() is not an
- *   exception to the rule either, despite only reading the active maps.
+ * - The entry count, per-container statistics, deferred deletions and the file
+ *   metadata are plain members mutated without atomics.
+ * - A rotation (triggered from inside insert()) unmaps the whole active segment
+ *   and briefly leaves the container pointer null. A concurrent find() would be
+ *   reading unmapped memory — which is why "no mutation in flight" is a
+ *   condition of the exception above, not a nicety.
  *
  * Separately from threading, the deferred-lookup queue is drained wholesale
  * (see process_pending_lookups()), so two *callers* steal each other's keys

@@ -9,7 +9,10 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <vector>
 
 #include <boost/unordered/unordered_flat_map.hpp>
@@ -33,31 +36,69 @@ struct search_summary {
 };
 
 /**
- * @brief Per-operation search records, kept when statistics are compiled in.
+ * @brief Search counters, kept when statistics are compiled in.
  *
- * @warning Unbounded. add_record() appends one record (~16 bytes) for every
- * successful find() and erase(), and nothing trims the vector — only reset()
- * frees it. Over a full sync that is gigabytes. Call
- * db_base::reset_search_stats() periodically — or db_base::reset_all_statistics(),
- * which calls it — or build with UTXOZ_STATISTICS_ENABLED=OFF (Conan option
- * `statistics=False`) if you do not consume the summary.
+ * Only aggregates are retained — everything search_summary reports is a sum or
+ * a ratio of sums — so recording an operation costs a handful of relaxed
+ * fetch_add's and a fixed amount of memory, independent of how long the process
+ * runs.
+ *
+ * @par Thread safety
+ * add_record() is safe to call from any number of threads, and is written to
+ * stay off the contention path: the counters are sharded and writers spread
+ * across the shards, so concurrent recorders rarely touch the same cache line.
+ * Slots are handed out round-robin and reused once more threads have recorded
+ * than there are slots, so a distinct slot per thread is the common case rather
+ * than a guarantee — correctness never rests on it, the counters are atomic.
+ * This is what lets find() be called concurrently.
+ *
+ * get_summary() and reset() are safe to call while add_record() runs, but they
+ * are not atomic — neither across shards nor across fields. A summary taken
+ * while recording is in flight can show counters that disagree with each other,
+ * because each is read separately: found can sit one increment ahead of
+ * operations, cache_hits ahead of cache_accesses. The reported ratios are
+ * clamped so they never exceed 1, but if you need counts that are internally
+ * consistent, take the summary while nothing is recording.
  *
  * @note Statistics are ON by default. The macro is baked into the installed
  * config.hpp by this project's own build, so it is not something a consumer
- * opts into; check config.hpp in the package to see what you got.
- *
- * @warning Not synchronised. With statistics compiled in, find() and erase()
- * append here, which is why even const operations are single-threaded.
+ * opts into; check config.hpp in the package to see what you got. Build with
+ * UTXOZ_STATISTICS_ENABLED=OFF (Conan option `statistics=False`) to compile the
+ * recording out entirely.
  */
 struct search_stats {
+    search_stats() = default;
+
+    // Non-copyable, non-movable: holds atomics.
+    search_stats(search_stats const&) = delete;
+    search_stats& operator=(search_stats const&) = delete;
+
     void add_record(uint32_t access_height, uint32_t insertion_height,
                     uint32_t depth, bool cache_hit, bool found, char operation);
     void reset();
     [[nodiscard]]
     search_summary get_summary() const;
 
+    /// Number of counter shards. A power of two, and enough that collisions
+    /// stay negligible for any realistic thread count.
+    static constexpr size_t shard_count = 64;
+
 private:
-    std::vector<search_record> records_;
+    /// Padded to the widest cache line among the platforms we target — Apple
+    /// Silicon uses 128 bytes, x86-64 uses 64 — so two shards never share a
+    /// line on either. 64 slots is 8 KiB per database, which buys nothing back
+    /// by being tighter.
+    struct alignas(128) shard {
+        std::atomic<uint64_t> operations{0};
+        std::atomic<uint64_t> found{0};
+        std::atomic<uint64_t> current_version_hits{0};
+        std::atomic<uint64_t> total_depth{0};
+        std::atomic<uint64_t> total_age{0};
+        std::atomic<uint64_t> cache_accesses{0};
+        std::atomic<uint64_t> cache_hits{0};
+    };
+
+    std::array<shard, shard_count> shards_;
 };
 
 /**
