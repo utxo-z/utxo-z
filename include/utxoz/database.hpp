@@ -153,7 +153,25 @@ struct db_base {
     /**
      * @brief Compact all containers
      */
-    void compact_all();
+    /**
+     * @brief Compact all containers
+     *
+     * Merges entries out of older version files and removes the ones left
+     * empty, so the number of files a sweep has to open goes down.
+     *
+     * @warning Fails with error_code::duplicate_key if it finds two stored
+     * entries sharing a key. A stored key is unique across the whole database;
+     * two entries for one key mean the database is locally inconsistent, which
+     * compaction can see because it holds two version files open at once.
+     * It reports rather than repairs: nothing is chosen between the copies and
+     * neither is removed, because picking one would hide a corrupt database
+     * behind a plausible answer. Treat it as fatal — the entry counter is left
+     * untouched too, so it still describes what is on disk.
+     *
+     * @return empty on success, error otherwise
+     */
+    [[nodiscard]]
+    result<> compact_all();
 
     /**
      * @brief Iterate over all keys in the database

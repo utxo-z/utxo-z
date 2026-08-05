@@ -133,6 +133,7 @@ enum class error_code : uint8_t {
     storage_mode_mismatch,  ///< Existing database has a different storage mode
     config_file_corrupt,    ///< Config file is invalid, truncated, or has bad magic
     value_too_large,        ///< Value exceeds maximum container capacity
+    duplicate_key,          ///< Two stored entries share a key: the database is locally inconsistent
 };
 
 /**

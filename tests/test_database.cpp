@@ -241,7 +241,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Large data set", "[database][.slow]") {
     }
 
     // Compact and verify still works
-    db_->compact_all();
+    REQUIRE(db_->compact_all().has_value());
 
     // Verify after compaction
     for (int test = 0; test < 50; ++test) {
