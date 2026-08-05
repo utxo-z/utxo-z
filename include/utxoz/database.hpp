@@ -31,6 +31,27 @@ struct database_impl;
  * @brief Base class with methods common to both storage modes.
  *
  * Not intended to be instantiated directly — use full_db::open() or compact_db::open().
+ *
+ * @par Threading
+ * A database instance supports ONE operation at a time. This is not a
+ * fine-grained "const methods are safe" guarantee: it covers the whole object,
+ * const methods included. Concurrent use requires external serialisation.
+ *
+ * The reasons are structural, not incidental:
+ * - The LRU file cache has no synchronisation, and it owns the memory mappings.
+ *   Evicting an entry unmaps the segment, so a second thread reading a
+ *   previously returned map is a use-after-unmap — a crash, not a torn read.
+ *   The cache is touched by erase(), process_pending_deletions() and
+ *   process_pending_lookups().
+ * - The deferred-deletion queue, the entry count, per-container statistics and
+ *   the file metadata are plain members mutated without atomics.
+ * - With statistics compiled in (the default), even find() appends to a shared,
+ *   unsynchronised record vector; see search_stats. So find() is not an
+ *   exception to the rule either, despite only reading the active maps.
+ *
+ * Separately from threading, the deferred-lookup queue is drained wholesale
+ * (see process_pending_lookups()), so two *callers* steal each other's keys
+ * even when properly serialised. That one is an ownership rule.
  */
 struct db_base {
     // Non-copyable
@@ -58,9 +79,13 @@ struct db_base {
      *
      * @warning A return value of 0 is NOT authoritative. Like find(), erase()
      * only looks at the currently mapped (latest) version plus the cached
-     * files; anything else is queued as a deferred deletion. The definitive
-     * answer comes from process_pending_deletions() — only keys reported there
-     * as failed were really absent.
+     * files; anything else is queued as a deferred deletion, and
+     * process_pending_deletions() is what applies it.
+     *
+     * @warning The keys that call reports as failed are UNRESOLVED, not proven
+     * absent: a version file that could not be read is logged, skipped, and its
+     * keys land in the same list. Absence is only established when the sweep
+     * read every version, which today you can tell apart only from the log.
      *
      * @param key UTXO key to erase
      * @param height Current block height
@@ -78,8 +103,15 @@ struct db_base {
      * deletions queued by erase(). Drains the queue: after this call nothing is
      * pending, so the returned values are the only report you get.
      *
-     * @return Pair of (successful_deletions_count, failed_deletions). The failed
-     *         entries are the keys that exist in no version of the database.
+     * @warning Single owner. The sweep is not partitioned per caller: it takes
+     * the entire queue, including keys queued by other threads, and reports
+     * them to whoever called. Exactly one component may own this call.
+     *
+     * @warning A version file that cannot be read is logged and skipped, so its
+     * keys come back as failed — indistinguishable from genuinely absent. Do
+     * not treat "failed" as proof of absence if the log shows read errors.
+     *
+     * @return Pair of (successful_deletions_count, failed_deletions).
      */
     [[nodiscard]]
     std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
@@ -191,9 +223,9 @@ struct full_db : db_base {
      *     if (auto r = db.find(op, height)) { use(*r); }   // resolved right away
      *     // otherwise: queued, do NOT conclude "does not exist" yet
      * }
-     * auto [found, missing] = db.process_pending_lookups();
-     * // `found` resolves the queued lookups; only `missing` keys truly do not
-     * // exist in any version.
+     * auto [found, unresolved] = db.process_pending_lookups();
+     * // `found` resolves the queued lookups. `unresolved` is NOT proof of
+     * // absence: a version file that could not be read lands its keys here too.
      * @endcode
      *
      * Call process_pending_lookups() before process_pending_deletions(): the
@@ -213,15 +245,27 @@ struct full_db : db_base {
      * @brief Process all pending deferred lookups
      *
      * Sweeps the cached files and every previous version, resolving the lookups
-     * queued by find(). This is where a find() that returned not_found gets its
-     * definitive answer. Drains the queue: after this call nothing is pending,
-     * so whatever you do not read from the returned map is lost.
+     * queued by find(). This is where a find() that returned not_found gets
+     * resolved. Drains the queue: after this call nothing is pending, so
+     * whatever you do not read from the returned map is lost.
      *
      * Call this before process_pending_deletions(), which removes entries from
      * the very files the pending lookups still need to read.
      *
-     * @return Pair of (successful_lookups_map, failed_lookups). The failed
-     *         entries are the keys that exist in no version of the database.
+     * @warning Single owner. The queue is global, not per caller: this call
+     * takes every pending key — including any queued by a different caller —
+     * and reports them all to whoever called it. Exactly one component may own
+     * the sweep, and it is responsible for routing results back to whoever
+     * asked. (This is about ownership, not threads: per the class contract,
+     * operations are serialised anyway.)
+     *
+     * @warning The second element is UNRESOLVED, not absent. A version file that
+     * cannot be read is logged and skipped, and its keys come back in that same
+     * list, indistinguishable from keys that exist nowhere. Absence is only
+     * established if the sweep read every version — which today you can tell
+     * apart only from the log.
+     *
+     * @return Pair of (resolved_lookups_map, unresolved_lookups).
      */
     [[nodiscard]]
     std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>> process_pending_lookups();
@@ -308,12 +352,14 @@ struct compact_db : db_base {
     /**
      * @brief Process all pending deferred lookups
      *
-     * Definitive answer for the lookups queued by find() — see
-     * full_db::process_pending_lookups(). Drains the queue, and must run before
-     * process_pending_deletions().
+     * Resolves the lookups queued by find() — see
+     * full_db::process_pending_lookups() for the full contract: single owner,
+     * drains the queue, and must run before process_pending_deletions().
      *
-     * @return Pair of (successful_lookups_map, failed_lookups). The failed
-     *         entries are the keys that exist in no version of the database.
+     * @warning The second element is UNRESOLVED, not absent: a version file that
+     * could not be read lands its keys there too.
+     *
+     * @return Pair of (resolved_lookups_map, unresolved_lookups).
      */
     [[nodiscard]]
     std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>> process_pending_lookups();
