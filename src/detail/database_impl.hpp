@@ -25,6 +25,8 @@
 
 #include "file_cache.hpp"
 #include "file_metadata.hpp"
+#include "scope_exit.hpp"
+#include "version_catalog.hpp"
 #include "utxo_value.hpp"
 
 namespace utxoz::detail {
@@ -157,8 +159,7 @@ private:
 
     // Utilities
     size_t get_index_from_size(size_t size) const;
-    size_t find_latest_version_from_files(size_t index) const;
-    size_t count_versions_for_container(size_t index) const;
+
     size_t estimate_memory_usage(size_t index) const;
 
     // Internal configuration
@@ -189,8 +190,6 @@ private:
     void compact_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
     size_t find_optimal_buckets_compact(std::string const& file_path, size_t file_size, size_t initial_buckets);
-    size_t find_latest_version_compact() const;
-    size_t count_versions_compact() const;
 
     compact_map_t& compact_map();
     compact_map_t const& compact_map() const;
@@ -220,12 +219,13 @@ private:
     size_t compact_current_version_ = 0;
     size_t compact_min_buckets_ok_ = 0;
     size_t compact_active_file_size_ = 0;
-    std::vector<file_metadata> compact_file_metadata_;
+    version_catalog compact_catalog_;
 
     size_t entries_count_ = 0;
 
-    // Metadata and caching
-    std::array<std::vector<file_metadata>, container_count> file_metadata_;
+    // The versions each container has, and the metadata describing them.
+    // Sparse: version numbers are identities, never positions.
+    std::array<version_catalog, container_count> catalogs_;
     std::unique_ptr<file_cache> file_cache_;
 
     // Statistics (mutable to allow const find operations)

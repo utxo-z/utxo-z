@@ -16,6 +16,7 @@
 #include <fstream>
 #include <numeric>
 #include <ranges>
+#include <optional>
 #include <set>
 
 #include <fmt/format.h>
@@ -88,22 +89,6 @@ size_t database_impl::get_index_from_size(size_t size) const {
         if (size <= container_capacities[i]) return i;
     }
     return container_count;
-}
-
-size_t database_impl::find_latest_version_from_files(size_t index) const {
-    size_t version = 0;
-    while (fs::exists(fmt::format(data_file_format, db_path_.string(), index, version))) {
-        ++version;
-    }
-    return version > 0 ? version - 1 : 0;
-}
-
-size_t database_impl::count_versions_for_container(size_t index) const {
-    size_t version = 0;
-    while (fs::exists(fmt::format(data_file_format, db_path_.string(), index, version))) {
-        ++version;
-    }
-    return version;
 }
 
 // =============================================================================
@@ -186,15 +171,17 @@ void database_impl::close_container() {
 template<size_t Index>
 void database_impl::new_version() {
     close_container<Index>();
-    ++current_versions_[Index];
 
-    // Initialize metadata for new version
-    if (file_metadata_[Index].size() <= current_versions_[Index]) {
-        file_metadata_[Index].resize(current_versions_[Index] + 1);
-    }
-    file_metadata_[Index][current_versions_[Index]] = file_metadata{};
+    // The file first, the catalogue after. Publishing the identity before the
+    // file exists leaves a version in the catalogue that nothing on disk backs
+    // if the open throws — a phantom every later traversal would try to visit.
+    // This is not durable creation, which belongs with the barrier work; it only
+    // keeps the in-memory catalogue from describing something that is not there.
+    auto const next = catalogs_[Index].next_version();
+    open_or_create_container<Index>(next);   // sets current_versions_ once it maps
 
-    open_or_create_container<Index>(current_versions_[Index]);
+    catalogs_[Index].add(next);
+    catalogs_[Index].metadata(next) = file_metadata{};
     log::debug("Container {} rotated to version {}", Index, current_versions_[Index]);
 }
 
@@ -277,22 +264,21 @@ float database_impl::next_load_factor() const {
 
 void database_impl::update_metadata_on_insert(size_t index, size_t version,
                                                raw_outpoint const& key, uint32_t height) {
-    if (file_metadata_[index].size() <= version) {
-        file_metadata_[index].resize(version + 1);
-    }
-    file_metadata_[index][version].update_on_insert(key, height);
+    catalogs_[index].metadata(version).update_on_insert(key, height);
 }
 
 void database_impl::update_metadata_on_delete(size_t index, size_t version) {
-    if (file_metadata_[index].size() > version) {
-        file_metadata_[index][version].update_on_delete();
+    if (auto* meta = catalogs_[index].find_metadata(version)) {
+        meta->update_on_delete();
     }
 }
 
 void database_impl::save_metadata_to_disk(size_t index, size_t version) {
-    if (index >= file_metadata_.size() || version >= file_metadata_[index].size()) return;
+    if (index >= catalogs_.size()) return;
+    auto const* meta_ptr = catalogs_[index].find_metadata(version);
+    if ( ! meta_ptr) return;
 
-    auto const& meta = file_metadata_[index][version];
+    auto const& meta = *meta_ptr;
     auto metadata_file = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
 
     std::ofstream ofs(metadata_file, std::ios::binary);
@@ -315,11 +301,7 @@ void database_impl::load_metadata_from_disk(size_t index, size_t version) {
     std::ifstream ifs(metadata_file, std::ios::binary);
     if ( ! ifs) return;
 
-    if (file_metadata_[index].size() <= version) {
-        file_metadata_[index].resize(version + 1);
-    }
-
-    auto& meta = file_metadata_[index][version];
+    auto& meta = catalogs_[index].metadata(version);
     meta.container_index = index;
     meta.version = version;
 
@@ -349,14 +331,29 @@ result<> database_impl::configure_for_testing(std::string_view path, bool remove
 result<> database_impl::configure_internal(std::string_view path, bool remove_existing, storage_mode mode) {
     db_path_ = path;
 
-    if (remove_existing && fs::exists(path)) {
-        fs::remove_all(path);
+    // Every filesystem question here is asked so that "I could not tell" comes
+    // back as an error. Asked the throwing way, an unreadable directory raises
+    // out of a result-typed open(); asked the swallowing way, it answers "no"
+    // and the database gets recreated over data that is still there.
+    auto const exists = path_exists(db_path_);
+    if ( ! exists) return std::unexpected(exists.error());
+
+    if (remove_existing && *exists) {
+        std::error_code ec;
+        fs::remove_all(db_path_, ec);
+        if (ec) return std::unexpected(error_code::catalog_unreadable);
     }
-    fs::create_directories(path);
+
+    std::error_code ec;
+    fs::create_directories(db_path_, ec);
+    if (ec) return std::unexpected(error_code::catalog_unreadable);
 
     // Check config persistence (detect mode mismatch on reopen)
     auto config_path = db_path_ / "utxoz_config.dat";
-    if (fs::exists(config_path) && !remove_existing) {
+    auto const config_exists = path_exists(config_path);
+    if ( ! config_exists) return std::unexpected(config_exists.error());
+
+    if (*config_exists && !remove_existing) {
         if (auto r = load_config_from_disk(); !r) {
             return std::unexpected(r.error());
         }
@@ -366,16 +363,14 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
     } else {
         // No config file — check for pre-existing data files from the other mode
         if (!remove_existing) {
-            if (mode == storage_mode::compact) {
-                auto full_mode_file = fmt::format(data_file_format, db_path_.string(), 0, 0);
-                if (fs::exists(full_mode_file)) {
-                    return std::unexpected(error_code::storage_mode_mismatch);
-                }
-            } else {
-                auto compact_mode_file = fmt::format(compact_data_file_format, db_path_.string(), 0);
-                if (fs::exists(compact_mode_file)) {
-                    return std::unexpected(error_code::storage_mode_mismatch);
-                }
+            auto const other_mode_file = mode == storage_mode::compact
+                ? fmt::format(data_file_format, db_path_.string(), 0, 0)
+                : fmt::format(compact_data_file_format, db_path_.string(), 0);
+
+            auto const other_exists = path_exists(other_mode_file);
+            if ( ! other_exists) return std::unexpected(other_exists.error());
+            if (*other_exists) {
+                return std::unexpected(error_code::storage_mode_mismatch);
             }
         }
         mode_ = mode;
@@ -394,14 +389,23 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         auto path_str = db_path_.string();
         compact_min_buckets_ok_ = find_optimal_buckets_compact(path_str, compact_active_file_size_, 7864304);
 
-        size_t latest_version = find_latest_version_compact();
+        // Build the catalogue before anything is opened. A directory we cannot
+        // read is not an empty directory: opening on that assumption would
+        // create v0 over a database that already has versions in it.
+        auto listed = enumerate_versions(db_path_, "compact_v");
+        if ( ! listed) return std::unexpected(listed.error());
+
+        compact_catalog_.clear();
+        for (auto const v : *listed) compact_catalog_.add(v);
+
+        size_t const latest_version = compact_catalog_.active();
         compact_open_or_create(latest_version);
+        compact_catalog_.add(latest_version);   // a fresh database has just created it
         entries_count_ += compact_map().size();
 
         // Count entries in previous versions (still searchable/deletable)
-        for (size_t v = 0; v < latest_version; ++v) {
+        for (auto const v : compact_catalog_.below(latest_version)) {
             auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-            if (!fs::exists(file_name)) continue;
             try {
                 auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
                 auto* map_ptr = segment->template find<compact_map_t>("db_map").first;
@@ -413,7 +417,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
             }
         }
 
-        for (size_t v = 0; v <= latest_version; ++v) {
+        for (auto const v : compact_catalog_.versions()) {
             compact_load_metadata(v);
         }
     } else {
@@ -426,17 +430,33 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         min_buckets_ok_[3] = find_optimal_buckets<3>(path_str, active_file_sizes_[3], 7864304);
         min_buckets_ok_[4] = find_optimal_buckets<4>(path_str, active_file_sizes_[4], 7864304);
 
+        // As above: every container's catalogue is read before any of them is
+        // opened, and a failure to read one aborts the open rather than being
+        // taken for an empty container.
+        result<> catalog_error;
         for_each_index<container_count>([&](auto I) {
-            size_t latest_version = find_latest_version_from_files(I);
+            if ( ! catalog_error.has_value()) return;
+            auto listed = enumerate_versions(db_path_, fmt::format("cont_{}_v", I.value));
+            if ( ! listed) {
+                catalog_error = std::unexpected(listed.error());
+                return;
+            }
+            catalogs_[I].clear();
+            for (auto const v : *listed) catalogs_[I].add(v);
+        });
+        if ( ! catalog_error.has_value()) return catalog_error;
+
+        for_each_index<container_count>([&](auto I) {
+            size_t const latest_version = catalogs_[I].active();
             open_or_create_container<I>(latest_version);
+            catalogs_[I].add(latest_version);   // a fresh database has just created it
 
             // Count existing entries in active container
             entries_count_ += container<I>().size();
 
             // Count entries in previous versions (still searchable/deletable)
-            for (size_t v = 0; v < latest_version; ++v) {
+            for (auto const v : catalogs_[I].below(latest_version)) {
                 auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-                if (!fs::exists(file_name)) continue;
                 try {
                     auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
                     auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
@@ -448,7 +468,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
                 }
             }
 
-            for (size_t v = 0; v <= latest_version; ++v) {
+            for (auto const v : catalogs_[I].versions()) {
                 load_metadata_from_disk(I, v);
             }
         });
@@ -778,16 +798,14 @@ std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process
                 }
             }
 
-            if (compact_current_version_ > 0) {
-                for (size_t v = compact_current_version_ - 1; v != SIZE_MAX; --v) {
-                    if (deferred_deletions_.empty()) break;
-                    if (processed_versions_compact.contains(v)) continue;
+            // Nearest generation first, over the versions that exist. Walking
+            // a range down from the active one would visit every number ever
+            // rotated through, and those never come back.
+            for (auto const v : compact_catalog_.below(compact_current_version_)) {
+                if (deferred_deletions_.empty()) break;
+                if (processed_versions_compact.contains(v)) continue;
 
-                    auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-                    if (!fs::exists(file_name)) continue;
-
-                    successful_deletions += process_deferred_deletions_in_file(compact_sentinel_index, v, false);
-                }
+                successful_deletions += process_deferred_deletions_in_file(compact_sentinel_index, v, false);
             }
         } else {
             std::array<std::set<size_t>, container_count> processed_versions;
@@ -797,14 +815,10 @@ std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process
 
             for_each_index<container_count>([&](auto I) {
                 if (deferred_deletions_.empty()) return;
-                if (current_versions_[I.value] == 0) return;
 
-                for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
+                for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
                     if (deferred_deletions_.empty()) break;
                     if (processed_versions[I.value].contains(v)) continue;
-
-                    auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-                    if (!fs::exists(file_name)) continue;
 
                     successful_deletions += process_deferred_deletions_in_file(I.value, v, false);
                 }
@@ -888,8 +902,8 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
             while (it != deferred_deletions_.end()) {
                 auto erased_count = map.erase(it->key);
                 if (erased_count > 0) {
-                    if (compact_file_metadata_.size() > version) {
-                        compact_file_metadata_[version].update_on_delete();
+                    if (auto* meta = compact_catalog_.find_metadata(version)) {
+                        meta->update_on_delete();
                     }
 #ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(compact_current_version_ - version);
@@ -971,16 +985,11 @@ std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> dat
                 }
             }
 
-            if (compact_current_version_ > 0) {
-                for (size_t v = compact_current_version_ - 1; v != SIZE_MAX; --v) {
-                    if (deferred_lookups_.empty()) break;
-                    if (processed_versions_compact.contains(v)) continue;
+            for (auto const v : compact_catalog_.below(compact_current_version_)) {
+                if (deferred_lookups_.empty()) break;
+                if (processed_versions_compact.contains(v)) continue;
 
-                    auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-                    if (!fs::exists(file_name)) continue;
-
-                    process_deferred_lookups_in_file(compact_sentinel_index, v, false, successful_lookups);
-                }
+                process_deferred_lookups_in_file(compact_sentinel_index, v, false, successful_lookups);
             }
         } else {
             std::array<std::set<size_t>, container_count> processed_versions;
@@ -990,14 +999,10 @@ std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> dat
 
             for_each_index<container_count>([&](auto I) {
                 if (deferred_lookups_.empty()) return;
-                if (current_versions_[I.value] == 0) return;
 
-                for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
+                for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
                     if (deferred_lookups_.empty()) break;
                     if (processed_versions[I.value].contains(v)) continue;
-
-                    auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-                    if (!fs::exists(file_name)) continue;
 
                     process_deferred_lookups_in_file(I.value, v, false, successful_lookups);
                 }
@@ -1121,29 +1126,20 @@ result<> database_impl::compact_container() {
     // has to put one back. Leaving containers_[Index] null would turn the next
     // operation into a null dereference.
     auto reopen_active = [&] {
-        size_t const versions = count_versions_for_container(Index);
-        current_versions_[Index] = versions > 0 ? versions - 1 : 0;
-        open_or_create_container<Index>(current_versions_[Index]);
+        auto const active = catalogs_[Index].active();
+        open_or_create_container<Index>(active);
+        catalogs_[Index].add(active);   // only once the file is there: see new_version()
     };
 
     // Metadata describes a file layout, and compaction changes that layout as it
     // goes: it empties files, removes them and renumbers what is left. Every
     // exit past that point has to rebuild it, the failing one included, or the
     // persisted metadata goes on describing versions that no longer exist.
-    auto rebuild_metadata = [&](size_t versions) {
-        size_t old_meta_idx = 0;
-        while (true) {
-            auto meta_path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), Index, old_meta_idx);
-            if (!fs::exists(meta_path)) break;
-            fs::remove(meta_path);
-            ++old_meta_idx;
-        }
+    auto rebuild_metadata = [&] {
+        catalogs_[Index].clear_metadata();
 
-        file_metadata_[Index].clear();
-        file_metadata_[Index].resize(versions);
-
-        for (size_t v = 0; v < versions; ++v) {
-            auto& meta = file_metadata_[Index][v];
+        for (auto const v : catalogs_[Index].versions()) {
+            auto& meta = catalogs_[Index].metadata(v);
             meta.container_index = Index;
             meta.version = v;
 
@@ -1166,23 +1162,40 @@ result<> database_impl::compact_container() {
         }
     };
 
-    size_t total_versions = count_versions_for_container(Index);
-    if (total_versions <= 1) {
-        log::trace("Container {} has {} files, no compaction needed", Index, total_versions);
-        open_or_create_container<Index>(total_versions > 0 ? total_versions - 1 : 0);
+    // Work over the versions the catalogue holds, by position, rather than over
+    // a dense range. Files keep the numbers they have.
+    auto versions = catalogs_[Index].versions();
+    if (versions.size() <= 1) {
+        log::trace("Container {} has {} files, no compaction needed", Index, versions.size());
+        reopen_active();
         return {};
     }
 
-    size_t target_idx = 0;
-    size_t source_idx = 1;
+    std::unique_ptr<bip::managed_mapped_file> target_segment;
+    std::unique_ptr<bip::managed_mapped_file> source_segment;
 
-    auto target_segment = open_container_file<Index>(target_idx);
-    auto source_segment = open_container_file<Index>(source_idx);
+    // From here the layout is being changed, so every way out — the early
+    // returns below, and a throw from any of the file operations — has to
+    // release the mappings, put the metadata back in step with what is on disk,
+    // and leave an active container mapped.
+    scope_exit const restore([&] {
+        target_segment.reset();
+        source_segment.reset();
+        rebuild_metadata();
+        reopen_active();
+    });
+
+    size_t source_pos = 1;
+    size_t target_idx = versions[0];
+    size_t source_idx = versions[source_pos];
+
+    target_segment = open_container_file<Index>(target_idx);
+    source_segment = open_container_file<Index>(source_idx);
 
     auto* target_map = target_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
     auto* source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
 
-    while (source_idx < total_versions) {
+    while (source_pos < versions.size()) {
         auto it = source_map->begin();
 
         while (it != source_map->end()) {
@@ -1194,8 +1207,9 @@ result<> database_impl::compact_container() {
                 target_segment = std::move(source_segment);
                 target_map = source_map;
 
-                ++source_idx;
-                if (source_idx >= total_versions) break;
+                ++source_pos;
+                if (source_pos >= versions.size()) break;
+                source_idx = versions[source_pos];
 
                 source_segment = open_container_file<Index>(source_idx);
                 source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
@@ -1219,10 +1233,6 @@ result<> database_impl::compact_container() {
                     // would erase the evidence of a corrupt database.
                     log::error("compaction: duplicate key in container {} — present in both v{} and v{}: {}",
                                Index, source_idx, target_idx, outpoint_to_string(key));
-                    target_segment.reset();
-                    source_segment.reset();
-                    rebuild_metadata(count_versions_for_container(Index));
-                    reopen_active();
                     return std::unexpected(error_code::duplicate_key);
                 }
                 it = source_map->erase(it);
@@ -1233,8 +1243,9 @@ result<> database_impl::compact_container() {
                 target_segment = std::move(source_segment);
                 target_map = source_map;
 
-                ++source_idx;
-                if (source_idx >= total_versions) break;
+                ++source_pos;
+                if (source_pos >= versions.size()) break;
+                source_idx = versions[source_pos];
 
                 source_segment = open_container_file<Index>(source_idx);
                 source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
@@ -1244,32 +1255,55 @@ result<> database_impl::compact_container() {
 
         if (source_map && source_map->empty()) {
             source_segment.reset();
-            auto source_path = fmt::format(data_file_format, db_path_.string(), Index, source_idx);
-            fs::remove(source_path);
-            ++files_deleted;
 
-            for (size_t i = source_idx + 1; i < total_versions; ++i) {
-                auto old_path = fmt::format(data_file_format, db_path_.string(), Index, i);
-                auto new_path = fmt::format(data_file_format, db_path_.string(), Index, i - 1);
-                fs::rename(old_path, new_path);
+            // The catalogue follows what actually happened on disk, not what we
+            // meant to happen. Ordering the removals data-then-metadata is what
+            // makes each outcome describable: the data file is what the
+            // catalogue is a catalogue of.
+            //
+            // TODO(#59): the removals are still merely attempted, not ordered
+            // against a durability barrier. Making them survive a crash belongs
+            // with that work; reporting when they fail belongs here.
+            std::error_code ec;
+            fs::remove(fmt::format(data_file_format, db_path_.string(), Index, source_idx), ec);
+            if (ec) {
+                // The file is still there, and it is empty. Leaving it in the
+                // catalogue is the truthful state: a later traversal will visit
+                // an empty file, which costs a little and hides nothing.
+                log::error("compaction: could not remove container {} v{}: {}",
+                           Index, source_idx, ec.message());
+                return std::unexpected(error_code::removal_failed);
             }
 
-            --total_versions;
+            // The data is gone, so the version is gone whatever happens next.
+            // Nothing is renumbered to close the hole: renaming every version
+            // above it was a multi-step rewrite of the catalogue with no
+            // atomicity, and an interrupted one used to hide every version past
+            // the gap. Version numbers are identities, so a hole costs nothing.
+            catalogs_[Index].remove(source_idx);
+            versions.erase(versions.begin() + std::ptrdiff_t(source_pos));
+            ++files_deleted;
 
-            if (source_idx < total_versions) {
+            fs::remove(fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), Index, source_idx), ec);
+            if (ec) {
+                // The data file went and its metadata did not. That record now
+                // describes nothing, and identities are only unique for the life
+                // of the process — after a restart this number can be issued
+                // again, and a stale record would then be read as describing the
+                // new file. Metadata is used to skip files during a search, so
+                // believing it would turn a present key into a miss.
+                log::error("compaction: removed container {} v{} but not its metadata: {}",
+                           Index, source_idx, ec.message());
+                return std::unexpected(error_code::removal_failed);
+            }
+
+            if (source_pos < versions.size()) {
+                source_idx = versions[source_pos];
                 source_segment = open_container_file<Index>(source_idx);
                 source_map = source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
             }
         }
     }
-
-    target_segment.reset();
-    source_segment.reset();
-
-    rebuild_metadata(total_versions);
-
-    current_versions_[Index] = total_versions > 0 ? total_versions - 1 : 0;
-    open_or_create_container<Index>(current_versions_[Index]);
 
     log::debug("Compaction complete for container {}: {} files deleted, {} entries moved",
               Index, files_deleted, entries_moved);
@@ -1290,9 +1324,8 @@ void database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), voi
         }
 
         // Previous versions
-        for (size_t v = 0; v < current_versions_[I]; ++v) {
+        for (auto const v : catalogs_[I].below(current_versions_[I])) {
             auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-            if (!fs::exists(file_name)) continue;
 
             try {
                 auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
@@ -1323,9 +1356,8 @@ void database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, ui
         }
 
         // Previous versions
-        for (size_t v = 0; v < current_versions_[I]; ++v) {
+        for (auto const v : catalogs_[I].below(current_versions_[I])) {
             auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-            if (!fs::exists(file_name)) continue;
 
             try {
                 auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
@@ -1409,7 +1441,7 @@ size_t database_impl::estimate_memory_usage(size_t index) const {
         total += active_file_sizes_[index];
     }
 
-    for (size_t v = 0; v < current_versions_[index]; ++v) {
+    for (auto const v : catalogs_[index].below(current_versions_[index])) {
         auto file_name = fmt::format(data_file_format, db_path_.string(), index, v);
         if (fs::exists(file_name)) {
             total += fs::file_size(file_name);
@@ -1513,7 +1545,7 @@ sizing_report database_impl::get_sizing_report() const {
         auto& info = report.containers[0];
         info.container_size = sizeof(compact_value);
         info.file_size_setting = compact_active_file_size_;
-        info.file_count = compact_current_version_ + 1;
+        info.file_count = compact_catalog_.size();
         info.current_entries = container_stats_[0].current_size;
         info.historical_inserts = container_stats_[0].total_inserts;
         info.historical_deletes = container_stats_[0].total_deletes;
@@ -1534,7 +1566,7 @@ sizing_report database_impl::get_sizing_report() const {
             auto& info = report.containers[i];
             info.container_size = container_sizes[i];
             info.file_size_setting = active_file_sizes_[i];
-            info.file_count = current_versions_[i] + 1;
+            info.file_count = catalogs_[i].size();
             info.current_entries = container_stats_[i].current_size;
             info.historical_inserts = container_stats_[i].total_inserts;
             info.historical_deletes = container_stats_[i].total_deletes;
@@ -1711,22 +1743,6 @@ compact_map_t const& database_impl::compact_map() const {
     return *static_cast<compact_map_t const*>(compact_container_);
 }
 
-size_t database_impl::find_latest_version_compact() const {
-    size_t version = 0;
-    while (fs::exists(fmt::format(compact_data_file_format, db_path_.string(), version))) {
-        ++version;
-    }
-    return version > 0 ? version - 1 : 0;
-}
-
-size_t database_impl::count_versions_compact() const {
-    size_t version = 0;
-    while (fs::exists(fmt::format(compact_data_file_format, db_path_.string(), version))) {
-        ++version;
-    }
-    return version;
-}
-
 size_t database_impl::find_optimal_buckets_compact(std::string const& file_path,
                                                     size_t file_size,
                                                     size_t initial_buckets) {
@@ -1791,14 +1807,13 @@ void database_impl::compact_close_container() {
 
 void database_impl::compact_new_version() {
     compact_close_container();
-    ++compact_current_version_;
 
-    if (compact_file_metadata_.size() <= compact_current_version_) {
-        compact_file_metadata_.resize(compact_current_version_ + 1);
-    }
-    compact_file_metadata_[compact_current_version_] = file_metadata{};
+    // The file first, the catalogue after: see new_version().
+    auto const next = compact_catalog_.next_version();
+    compact_open_or_create(next);   // sets compact_current_version_ once it maps
 
-    compact_open_or_create(compact_current_version_);
+    compact_catalog_.add(next);
+    compact_catalog_.metadata(next) = file_metadata{};
     log::debug("Compact container rotated to version {}", compact_current_version_);
 }
 
@@ -1899,8 +1914,8 @@ size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
 #endif
                     map.erase(it);
 
-                    if (compact_file_metadata_.size() > version) {
-                        compact_file_metadata_[version].update_on_delete();
+                    if (auto* meta = compact_catalog_.find_metadata(version)) {
+                        meta->update_on_delete();
                     }
 
                     --entries_count_;
@@ -1953,9 +1968,8 @@ void database_impl::compact_for_each_key(void(*cb)(void*, raw_outpoint const&), 
     }
 
     // Previous versions
-    for (size_t v = 0; v < compact_current_version_; ++v) {
+    for (auto const v : compact_catalog_.below(compact_current_version_)) {
         auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-        if (!fs::exists(file_name)) continue;
 
         try {
             auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
@@ -1986,9 +2000,8 @@ void database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint const&,
     }
 
     // Previous versions
-    for (size_t v = 0; v < compact_current_version_; ++v) {
+    for (auto const v : compact_catalog_.below(compact_current_version_)) {
         auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-        if (!fs::exists(file_name)) continue;
 
         try {
             auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
@@ -2014,27 +2027,18 @@ result<> database_impl::compact_compact_container() {
 
     // Every exit has to leave an active container behind; see compact_container().
     auto reopen_active = [&] {
-        size_t const versions = count_versions_compact();
-        compact_current_version_ = versions > 0 ? versions - 1 : 0;
-        compact_open_or_create(compact_current_version_);
+        auto const active = compact_catalog_.active();
+        compact_open_or_create(active);
+        compact_catalog_.add(active);   // only once the file is there
     };
 
     // And every exit past the first move has to rebuild the metadata, for the
     // same reason as in full mode: it describes a layout this function changes.
-    auto rebuild_metadata = [&](size_t versions) {
-        size_t old_meta_idx = 0;
-        while (true) {
-            auto meta_path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), old_meta_idx);
-            if (!fs::exists(meta_path)) break;
-            fs::remove(meta_path);
-            ++old_meta_idx;
-        }
+    auto rebuild_metadata = [&] {
+        compact_catalog_.clear_metadata();
 
-        compact_file_metadata_.clear();
-        compact_file_metadata_.resize(versions);
-
-        for (size_t v = 0; v < versions; ++v) {
-            auto& meta = compact_file_metadata_[v];
+        for (auto const v : compact_catalog_.versions()) {
+            auto& meta = compact_catalog_.metadata(v);
             meta.container_index = compact_sentinel_index;
             meta.version = v;
 
@@ -2057,23 +2061,35 @@ result<> database_impl::compact_compact_container() {
         }
     };
 
-    size_t total_versions = count_versions_compact();
-    if (total_versions <= 1) {
-        log::trace("Compact container has {} files, no compaction needed", total_versions);
-        compact_open_or_create(total_versions > 0 ? total_versions - 1 : 0);
+    auto versions = compact_catalog_.versions();
+    if (versions.size() <= 1) {
+        log::trace("Compact container has {} files, no compaction needed", versions.size());
+        reopen_active();
         return {};
     }
-
-    size_t target_idx = 0;
-    size_t source_idx = 1;
 
     auto open_compact_file = [&](size_t version) {
         auto file_name = fmt::format(compact_data_file_format, db_path_.string(), version);
         return std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
     };
 
-    auto target_segment = open_compact_file(target_idx);
-    auto source_segment = open_compact_file(source_idx);
+    std::unique_ptr<bip::managed_mapped_file> target_segment;
+    std::unique_ptr<bip::managed_mapped_file> source_segment;
+
+    // Every exit past this point, throws included: see compact_container().
+    scope_exit const restore([&] {
+        target_segment.reset();
+        source_segment.reset();
+        rebuild_metadata();
+        reopen_active();
+    });
+
+    size_t source_pos = 1;
+    size_t target_idx = versions[0];
+    size_t source_idx = versions[source_pos];
+
+    target_segment = open_compact_file(target_idx);
+    source_segment = open_compact_file(source_idx);
 
     auto* target_map = target_segment->find<compact_map_t>("db_map").first;
     auto* source_map = source_segment->find<compact_map_t>("db_map").first;
@@ -2095,7 +2111,7 @@ result<> database_impl::compact_compact_container() {
         }
     };
 
-    while (source_idx < total_versions) {
+    while (source_pos < versions.size()) {
         auto it = source_map->begin();
 
         while (it != source_map->end()) {
@@ -2105,8 +2121,9 @@ result<> database_impl::compact_compact_container() {
                 target_segment = std::move(source_segment);
                 target_map = source_map;
 
-                ++source_idx;
-                if (source_idx >= total_versions) break;
+                ++source_pos;
+                if (source_pos >= versions.size()) break;
+                source_idx = versions[source_pos];
 
                 source_segment = open_compact_file(source_idx);
                 source_map = source_segment->find<compact_map_t>("db_map").first;
@@ -2123,10 +2140,6 @@ result<> database_impl::compact_compact_container() {
                     // version files held the same key. Report, do not repair.
                     log::error("compaction: duplicate key in compact container — present in both v{} and v{}: {}",
                                source_idx, target_idx, outpoint_to_string(key));
-                    target_segment.reset();
-                    source_segment.reset();
-                    rebuild_metadata(count_versions_compact());
-                    reopen_active();
                     return std::unexpected(error_code::duplicate_key);
                 }
                 it = source_map->erase(it);
@@ -2137,8 +2150,9 @@ result<> database_impl::compact_compact_container() {
                 target_segment = std::move(source_segment);
                 target_map = source_map;
 
-                ++source_idx;
-                if (source_idx >= total_versions) break;
+                ++source_pos;
+                if (source_pos >= versions.size()) break;
+                source_idx = versions[source_pos];
 
                 source_segment = open_compact_file(source_idx);
                 source_map = source_segment->find<compact_map_t>("db_map").first;
@@ -2148,32 +2162,35 @@ result<> database_impl::compact_compact_container() {
 
         if (source_map && source_map->empty()) {
             source_segment.reset();
-            auto source_path = fmt::format(compact_data_file_format, db_path_.string(), source_idx);
-            fs::remove(source_path);
-            ++files_deleted;
 
-            for (size_t i = source_idx + 1; i < total_versions; ++i) {
-                auto old_path = fmt::format(compact_data_file_format, db_path_.string(), i);
-                auto new_path = fmt::format(compact_data_file_format, db_path_.string(), i - 1);
-                fs::rename(old_path, new_path);
+            // Data first, then metadata, and the catalogue follows each result:
+            // see compact_container() for why each outcome is handled the way
+            // it is. TODO(#59) applies here too.
+            std::error_code ec;
+            fs::remove(fmt::format(compact_data_file_format, db_path_.string(), source_idx), ec);
+            if (ec) {
+                log::error("compaction: could not remove compact v{}: {}", source_idx, ec.message());
+                return std::unexpected(error_code::removal_failed);
             }
 
-            --total_versions;
+            compact_catalog_.remove(source_idx);
+            versions.erase(versions.begin() + std::ptrdiff_t(source_pos));
+            ++files_deleted;
 
-            if (source_idx < total_versions) {
+            fs::remove(fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), source_idx), ec);
+            if (ec) {
+                log::error("compaction: removed compact v{} but not its metadata: {}",
+                           source_idx, ec.message());
+                return std::unexpected(error_code::removal_failed);
+            }
+
+            if (source_pos < versions.size()) {
+                source_idx = versions[source_pos];
                 source_segment = open_compact_file(source_idx);
                 source_map = source_segment->find<compact_map_t>("db_map").first;
             }
         }
     }
-
-    target_segment.reset();
-    source_segment.reset();
-
-    rebuild_metadata(total_versions);
-
-    compact_current_version_ = total_versions > 0 ? total_versions - 1 : 0;
-    compact_open_or_create(compact_current_version_);
 
     log::debug("Compact compaction complete: {} files deleted, {} entries moved",
               files_deleted, entries_moved);
@@ -2185,9 +2202,10 @@ result<> database_impl::compact_compact_container() {
 // =============================================================================
 
 void database_impl::compact_save_metadata(size_t version) {
-    if (version >= compact_file_metadata_.size()) return;
+    auto const* meta_ptr = compact_catalog_.find_metadata(version);
+    if ( ! meta_ptr) return;
 
-    auto const& meta = compact_file_metadata_[version];
+    auto const& meta = *meta_ptr;
     auto metadata_file = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
 
     std::ofstream ofs(metadata_file, std::ios::binary);
@@ -2210,11 +2228,7 @@ void database_impl::compact_load_metadata(size_t version) {
     std::ifstream ifs(metadata_file, std::ios::binary);
     if (!ifs) return;
 
-    if (compact_file_metadata_.size() <= version) {
-        compact_file_metadata_.resize(version + 1);
-    }
-
-    auto& meta = compact_file_metadata_[version];
+    auto& meta = compact_catalog_.metadata(version);
     meta.container_index = compact_sentinel_index;
     meta.version = version;
 
@@ -2391,14 +2405,10 @@ database_impl::full_process_pending_lookups() {
 
         for_each_index<container_count>([&](auto I) {
             if (deferred_lookups_.empty()) return;
-            if (current_versions_[I.value] == 0) return;
 
-            for (size_t v = current_versions_[I.value] - 1; v != SIZE_MAX; --v) {
+            for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
                 if (deferred_lookups_.empty()) break;
                 if (processed_versions[I.value].contains(v)) continue;
-
-                auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
-                if (!fs::exists(file_name)) continue;
 
                 process_full_file(I, v);
             }
@@ -2471,10 +2481,7 @@ result<bool> database_impl::compact_insert_typed(raw_outpoint const& key, uint32
                 }
 #endif
 
-                if (compact_file_metadata_.size() <= compact_current_version_) {
-                    compact_file_metadata_.resize(compact_current_version_ + 1);
-                }
-                compact_file_metadata_[compact_current_version_].update_on_insert(key, height);
+                compact_catalog_.metadata(compact_current_version_).update_on_insert(key, height);
             }
             return inserted;
 
@@ -2562,7 +2569,7 @@ database_impl::compact_process_pending_lookups() {
     }
 
     // Phase 2: remaining files
-    if (!deferred_lookups_.empty() && compact_current_version_ > 0) {
+    if (!deferred_lookups_.empty()) {
         std::set<size_t> processed_versions;
         for (auto const& [ci, version] : cached_files) {
             if (ci == compact_sentinel_index) {
@@ -2570,12 +2577,9 @@ database_impl::compact_process_pending_lookups() {
             }
         }
 
-        for (size_t v = compact_current_version_ - 1; v != SIZE_MAX; --v) {
+        for (auto const v : compact_catalog_.below(compact_current_version_)) {
             if (deferred_lookups_.empty()) break;
             if (processed_versions.contains(v)) continue;
-
-            auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-            if (!fs::exists(file_name)) continue;
 
             process_compact_file(v, false);
         }
@@ -2616,9 +2620,8 @@ void database_impl::compact_for_each_entry_typed(
     }
 
     // Previous versions
-    for (size_t v = 0; v < compact_current_version_; ++v) {
+    for (auto const v : compact_catalog_.below(compact_current_version_)) {
         auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-        if (!fs::exists(file_name)) continue;
 
         try {
             auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
