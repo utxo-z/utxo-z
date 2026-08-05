@@ -79,7 +79,6 @@ struct database_impl {
     void print_height_range_stats() const;
     void reset_all_statistics();
 
-    search_stats const& get_search_stats() const;
     void reset_search_stats();
 
     float get_cache_hit_rate() const;
@@ -230,7 +229,8 @@ private:
     std::unique_ptr<file_cache> file_cache_;
 
     // Statistics (mutable to allow const find operations)
-    mutable search_stats search_stats_;
+    mutable probe_stats probe_stats_;
+    mutable resolution_stats resolution_stats_;
     boost::unordered_flat_set<deferred_deletion_entry> deferred_deletions_;
     mutable boost::concurrent_flat_set<deferred_lookup_entry> deferred_lookups_;
     std::array<container_stats, container_count> container_stats_;

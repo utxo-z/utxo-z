@@ -17,88 +17,152 @@
 
 #include <boost/unordered/unordered_flat_map.hpp>
 
+#include <utxoz/config.hpp>
 #include <utxoz/types.hpp>
 
 namespace utxoz {
 
 /**
- * @brief Search statistics summary
+ * @brief What probes saw.
+ *
+ * A probe is a find(): it either finds the key in the active map or it defers.
+ * This measures how often the requested key is present in an active map. It does
+ * not yet measure whether the caller can use that answer; see the warning below.
+ *
+ * @warning It measures **presence in the active map**, which is not yet the same
+ * as "the caller could use the answer". The height argument does not affect the
+ * result today, so an entry created above the height being validated against is
+ * still found here and counted in `answered_from_active`, even though the caller
+ * discards it afterwards. When `max_creation_height` becomes a real bound, those
+ * move to `deferred` and the two meanings converge — until then read this as a
+ * hit rate against the active map, not as the share that avoids resolution.
  */
-struct search_summary {
-    size_t total_operations = 0;      ///< Total search operations
-    size_t found_operations = 0;      ///< Operations that found the UTXO
-    size_t current_version_hits = 0;  ///< Hits in current version (depth 0)
-    size_t cache_hits = 0;           ///< Cache hits for previous versions
-    double avg_depth = 0.0;          ///< Average search depth
-    double avg_utxo_age = 0.0;       ///< Average UTXO age in blocks
-    double cache_hit_rate = 0.0;     ///< Cache hit rate (0.0-1.0)
-    double hit_rate = 0.0;           ///< Overall hit rate (0.0-1.0)
+struct probe_summary {
+    size_t probes = 0;                 ///< find() calls
+    size_t answered_from_active = 0;   ///< key present in an active map
+    size_t deferred = 0;               ///< queued for historical resolution
+    double active_map_hit_rate = 0.0;  ///< answered_from_active / probes
+    double avg_age_answered = 0.0;     ///< blocks between creation and probe, over the answered ones
 };
 
 /**
- * @brief Search counters, kept when statistics are compiled in.
+ * @brief What the historical lookup sweeps did.
  *
- * Only aggregates are retained — everything search_summary reports is a sum or
- * a ratio of sums — so recording an operation costs a handful of relaxed
- * fetch_add's and a fixed amount of memory, independent of how long the process
- * runs.
+ * Deliberately separate from probe_summary: one logical lookup shows up in both,
+ * once as a deferred probe and once as a resolution, and folding them into a
+ * single denominator would make every ratio meaningless.
  *
- * @par Thread safety
- * add_record() is safe to call from any number of threads, and is written to
- * stay off the contention path: the counters are sharded and writers spread
- * across the shards, so concurrent recorders rarely touch the same cache line.
- * Slots are handed out round-robin and reused once more threads have recorded
- * than there are slots, so a distinct slot per thread is the common case rather
- * than a guarantee — correctness never rests on it, the counters are atomic.
- * This is what lets find() be called concurrently.
- *
- * get_summary() and reset() are safe to call while add_record() runs, but they
- * are not atomic — neither across shards nor across fields. A summary taken
- * while recording is in flight can show counters that disagree with each other,
- * because each is read separately: found can sit one increment ahead of
- * operations, cache_hits ahead of cache_accesses. The reported ratios are
- * clamped so they never exceed 1, but if you need counts that are internally
- * consistent, take the summary while nothing is recording.
- *
- * @note Statistics are ON by default. The macro is baked into the installed
- * config.hpp by this project's own build, so it is not something a consumer
- * opts into; check config.hpp in the package to see what you got. Build with
- * UTXOZ_STATISTICS_ENABLED=OFF (Conan option `statistics=False`) to compile the
- * recording out entirely.
+ * Deletions are not counted here. They resolve through their own sweep and are
+ * reported by deferred_stats — mixing the age of a read with the age of a delete
+ * produces an average of two different things.
  */
-struct search_stats {
-    search_stats() = default;
+struct resolution_summary {
+    size_t resolved = 0;          ///< keys a sweep answered
+    size_t unresolved = 0;        ///< keys a sweep could not settle
+    size_t files_visited = 0;     ///< version files opened or reused across sweeps
+    size_t cache_hits = 0;        ///< of those, served by the file cache
+    double avg_depth = 0.0;       ///< versions back from the active one, over resolved
+    double cache_hit_rate = 0.0;  ///< cache_hits / files_visited
+};
 
-    // Non-copyable, non-movable: holds atomics.
-    search_stats(search_stats const&) = delete;
-    search_stats& operator=(search_stats const&) = delete;
+namespace detail {
 
-    void add_record(uint32_t access_height, uint32_t insertion_height,
-                    uint32_t depth, bool cache_hit, bool found, char operation);
-    void reset();
-    [[nodiscard]]
-    search_summary get_summary() const;
-
-    /// Number of counter shards. A power of two, and enough that collisions
-    /// stay negligible for any realistic thread count.
+/**
+ * @brief Cache-line padded atomic counters, spread across shards.
+ *
+ * The recording paths are concurrent and must not contend, so each thread keeps
+ * to its own shard; the summary sums them. Slots are handed out round-robin and
+ * reused once more threads have recorded than there are slots, so a distinct
+ * slot per thread is the common case rather than a guarantee — correctness does
+ * not rest on it, the counters are atomic either way.
+ */
+struct sharded_counters {
     static constexpr size_t shard_count = 64;
+    static constexpr size_t field_count = 8;
+
+    void add(size_t field, uint64_t amount) noexcept;
+    [[nodiscard]] uint64_t sum(size_t field) const noexcept;
+    void reset() noexcept;
 
 private:
     /// Padded to the widest cache line among the platforms we target — Apple
-    /// Silicon uses 128 bytes, x86-64 uses 64 — so two shards never share a
-    /// line on either. 64 slots is 8 KiB per database, which buys nothing back
-    /// by being tighter.
+    /// Silicon uses 128 bytes, x86-64 uses 64 — so two shards never share one.
     struct alignas(128) shard {
-        std::atomic<uint64_t> operations{0};
-        std::atomic<uint64_t> found{0};
-        std::atomic<uint64_t> current_version_hits{0};
-        std::atomic<uint64_t> total_depth{0};
-        std::atomic<uint64_t> total_age{0};
-        std::atomic<uint64_t> cache_accesses{0};
-        std::atomic<uint64_t> cache_hits{0};
+        std::atomic<uint64_t> fields[field_count]{};
     };
 
     std::array<shard, shard_count> shards_;
+};
+
+} // namespace detail
+
+/**
+ * @brief Probe counters. Safe to record from any number of threads.
+ */
+struct probe_stats {
+    probe_stats() = default;
+    probe_stats(probe_stats const&) = delete;
+    probe_stats& operator=(probe_stats const&) = delete;
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    /// A probe the active map answered, with the height it was created at.
+    void record_answered(uint32_t access_height, uint32_t creation_height) noexcept;
+    /// A probe that had to be deferred.
+    void record_deferred() noexcept;
+
+    void reset() noexcept;
+    [[nodiscard]] probe_summary get_summary() const noexcept;
+
+private:
+    enum field : size_t { f_probes, f_answered, f_age_total };
+    static_assert(f_age_total < detail::sharded_counters::field_count,
+                  "probe_stats has outgrown its counter slots");
+
+    detail::sharded_counters counters_;
+#else
+    // Compiled out entirely: no counters, and recording is a no-op the optimiser
+    // deletes at the call site. Guarding here rather than at each call site is
+    // deliberate — a call added later cannot forget the guard and put a
+    // fetch_add back on the concurrent path.
+    void record_answered(uint32_t, uint32_t) noexcept {}
+    void record_deferred() noexcept {}
+    void reset() noexcept {}
+    [[nodiscard]] probe_summary get_summary() const noexcept { return {}; }
+#endif
+};
+
+/**
+ * @brief Historical lookup resolution counters.
+ */
+struct resolution_stats {
+    resolution_stats() = default;
+    resolution_stats(resolution_stats const&) = delete;
+    resolution_stats& operator=(resolution_stats const&) = delete;
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    /// A key a sweep answered, at `depth` versions back from the active one.
+    void record_resolved(uint32_t depth) noexcept;
+    /// Keys a sweep finished without settling.
+    void record_unresolved(size_t count) noexcept;
+    /// A version file a sweep worked against.
+    void record_file_visited(bool cache_hit) noexcept;
+
+    void reset() noexcept;
+    [[nodiscard]] resolution_summary get_summary() const noexcept;
+
+private:
+    enum field : size_t { f_resolved, f_unresolved, f_depth_total, f_files, f_cache_hits };
+    static_assert(f_cache_hits < detail::sharded_counters::field_count,
+                  "resolution_stats has outgrown its counter slots");
+
+    detail::sharded_counters counters_;
+#else
+    void record_resolved(uint32_t) noexcept {}
+    void record_unresolved(size_t) noexcept {}
+    void record_file_visited(bool) noexcept {}
+    void reset() noexcept {}
+    [[nodiscard]] resolution_summary get_summary() const noexcept { return {}; }
+#endif
 };
 
 /**
@@ -180,7 +244,8 @@ struct database_statistics {
     // Detailed statistics
     deferred_stats deferred;         ///< Deferred deletion statistics
     not_found_stats not_found;       ///< Not found operation statistics
-    search_summary search;           ///< Search performance summary
+    probe_summary probes;            ///< What probes answered on their own
+    resolution_summary resolution;   ///< What the historical lookup sweeps did
     utxo_lifetime_stats lifetime;    ///< UTXO lifetime statistics
     fragmentation_stats fragmentation; ///< Storage fragmentation statistics
     

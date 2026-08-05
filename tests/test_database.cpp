@@ -25,6 +25,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include <utxoz/config.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/utils.hpp>
 
@@ -189,14 +190,16 @@ TEST_CASE_METHOD(DatabaseFixture, "Statistics", "[database]") {
 
     auto stats = db_->get_statistics();
     CHECK(stats.total_entries == 100);
-    CHECK(stats.total_inserts >= 100);
 
-    // Test search stats
     auto key = make_test_key(0, 0);
     CHECK(db_->find(key, 200).has_value());
 
-    auto search_stats = db_->get_search_stats().get_summary();
-    CHECK(search_stats.total_operations > 0);
+    // Counters only exist when recording is compiled in; the entry count above
+    // is kept by the database itself and holds either way.
+#ifdef UTXOZ_STATISTICS_ENABLED
+    CHECK(stats.total_inserts >= 100);
+    CHECK(db_->get_statistics().probes.probes > 0);
+#endif
 }
 
 TEST_CASE("Key utilities", "[utils]") {

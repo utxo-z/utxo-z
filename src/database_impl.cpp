@@ -562,6 +562,9 @@ std::optional<find_result> database_impl::find(raw_outpoint const& key, uint32_t
     }
 
     // Defer lookup to batch processing for efficiency
+    // A probe the active map could not answer. Recording it is what makes the
+    // hit rate mean something: without it every recorded probe was a hit.
+    probe_stats_.record_deferred();
     add_to_deferred_lookups(key, height);
     return std::nullopt;
 }
@@ -575,7 +578,7 @@ std::optional<find_result> database_impl::find_in_latest_version(raw_outpoint co
             auto& map = container<I>();
             if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                search_stats_.add_record(height, it->second.block_height, 0, false, true, 'f');
+                probe_stats_.record_answered(height, it->second.block_height);
 #endif
                 auto data = it->second.get_data();
                 result = find_result{bytes(data.begin(), data.end()), it->second.block_height};
@@ -641,7 +644,6 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
                     (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
                     / lifetime_stats_.total_spent;
 
-                search_stats_.add_record(height, it->second.block_height, 0, false, true, 'e');
 #endif
                 map.erase(it);
 
@@ -683,8 +685,6 @@ size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint
                             (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
                             / lifetime_stats_.total_spent;
 
-                        search_stats_.add_record(height, it->second.block_height,
-                            static_cast<uint32_t>(current_versions_[Index] - version), cache_hit, true, 'e');
 #endif
                         map.erase(it);
 
@@ -858,7 +858,6 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
                     auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
 
                     ++deferred_stats_.deletions_by_depth[depth];
-                    search_stats_.add_record(it->height, 0, depth, cache_hit, true, 'e');
                     --container_stats_[Index].deferred_deletes;
                     --container_stats_[Index].current_size;
                     ++container_stats_[Index].total_deletes;
@@ -895,7 +894,6 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
 #ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(compact_current_version_ - version);
                     ++deferred_stats_.deletions_by_depth[depth];
-                    search_stats_.add_record(it->height, 0, depth, cache_hit, true, 'e');
                     --container_stats_[0].deferred_deletes;
                     --container_stats_[0].current_size;
                     ++container_stats_[0].total_deletes;
@@ -1010,6 +1008,7 @@ std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> dat
     // Collect failed lookups (includes key and block height)
     std::vector<deferred_lookup_entry> failed_lookups;
     failed_lookups.reserve(deferred_lookups_.size());
+    resolution_stats_.record_unresolved(deferred_lookups_.size());
     deferred_lookups_.visit_all([&](auto const& entry) {
         failed_lookups.push_back(entry);
     });
@@ -1041,6 +1040,9 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
         try {
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(container_index, version);
 
+            resolution_stats_.record_file_visited(cache_hit);
+
+
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
@@ -1048,7 +1050,7 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
                     auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
 
                     ++deferred_stats_.lookups_by_depth[depth];
-                    search_stats_.add_record(entry.height, map_it->second.block_height, depth, cache_hit, true, 'f');
+                    resolution_stats_.record_resolved(depth);
 #endif
 
                     auto data = map_it->second.get_data();
@@ -1068,13 +1070,16 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
         try {
             auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
 
+            resolution_stats_.record_file_visited(cache_hit);
+
+
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(compact_current_version_ - version);
                     ++deferred_stats_.lookups_by_depth[depth];
-                    search_stats_.add_record(entry.height, map_it->second.height, depth, cache_hit, true, 'f');
+                    resolution_stats_.record_resolved(depth);
 #endif
                     bytes data(sizeof(uint32_t) * 2);
                     std::memcpy(data.data(), &map_it->second.file_number, sizeof(uint32_t));
@@ -1423,7 +1428,8 @@ database_statistics database_impl::get_statistics() {
     stats.cache_hit_rate = get_cache_hit_rate();
     stats.cached_files_count = file_cache_ ? file_cache_->get_cached_files().size() : 0;
     stats.cached_files_info = get_cached_file_info();
-    stats.search = search_stats_.get_summary();
+    stats.probes = probe_stats_.get_summary();
+    stats.resolution = resolution_stats_.get_summary();
 
     stats.total_inserts = 0;
     stats.total_deletes = 0;
@@ -1484,9 +1490,18 @@ void database_impl::print_statistics() {
     log::info("Cache hit rate: {:.2f}%", stats.cache_hit_rate * 100);
     log::info("Cached files: {}", stats.cached_files_count);
 
-    log::info("--- Search Performance ---");
-    log::info("Hit rate: {:.2f}%", stats.search.hit_rate * 100);
-    log::info("Avg depth: {:.2f}", stats.search.avg_depth);
+    log::info("--- Probes ---");
+    log::info("Probes: {}", stats.probes.probes);
+    log::info("Answered from the active map: {} ({:.2f}%)",
+        stats.probes.answered_from_active, stats.probes.active_map_hit_rate * 100);
+    log::info("Deferred to historical resolution: {}", stats.probes.deferred);
+    log::info("Avg age of answered probes: {:.1f} blocks", stats.probes.avg_age_answered);
+
+    log::info("--- Historical resolution ---");
+    log::info("Resolved: {}   unresolved: {}", stats.resolution.resolved, stats.resolution.unresolved);
+    log::info("Avg depth: {:.2f} versions", stats.resolution.avg_depth);
+    log::info("Files visited: {}  cache hit rate: {:.2f}%",
+        stats.resolution.files_visited, stats.resolution.cache_hit_rate * 100);
 
     log::info("================================");
 }
@@ -1671,12 +1686,9 @@ void database_impl::reset_all_statistics() {
     reset_search_stats();
 }
 
-search_stats const& database_impl::get_search_stats() const {
-    return search_stats_;
-}
-
 void database_impl::reset_search_stats() {
-    search_stats_.reset();
+    probe_stats_.reset();
+    resolution_stats_.reset();
 }
 
 float database_impl::get_cache_hit_rate() const {
@@ -1832,6 +1844,9 @@ std::optional<find_result> database_impl::compact_find(raw_outpoint const& key, 
         return res;
     }
 
+    // A probe the active map could not answer. Recording it is what makes the
+    // hit rate mean something: without it every recorded probe was a hit.
+    probe_stats_.record_deferred();
     add_to_deferred_lookups(key, height);
     return std::nullopt;
 }
@@ -1840,7 +1855,7 @@ std::optional<find_result> database_impl::compact_find_in_latest(raw_outpoint co
     auto const& map = compact_map();
     if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-        search_stats_.add_record(height, it->second.height, 0, false, true, 'f');
+        probe_stats_.record_answered(height, it->second.height);
 #endif
         bytes data(sizeof(uint32_t) * 2);
         std::memcpy(data.data(), &it->second.file_number, sizeof(uint32_t));
@@ -1878,8 +1893,6 @@ size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
                         (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
                         / lifetime_stats_.total_spent;
 
-                    search_stats_.add_record(height, it->second.height,
-                        static_cast<uint32_t>(compact_current_version_ - version), cache_hit, true, 'e');
                     --container_stats_[0].current_size;
                     ++container_stats_[0].total_deletes;
                     ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
@@ -1922,7 +1935,6 @@ size_t database_impl::compact_erase_in_latest(raw_outpoint const& key, uint32_t 
             (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
             / lifetime_stats_.total_spent;
 
-        search_stats_.add_record(height, it->second.height, 0, false, true, 'e');
         --container_stats_[0].current_size;
         ++container_stats_[0].total_deletes;
         ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
@@ -2288,7 +2300,7 @@ std::optional<full_find_result> database_impl::full_find(raw_outpoint const& key
             auto& map = container<I>();
             if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                search_stats_.add_record(height, it->second.block_height, 0, false, true, 'f');
+                probe_stats_.record_answered(height, it->second.block_height);
 #endif
                 auto data = it->second.get_data();
                 result = full_find_result{bytes(data.begin(), data.end()), it->second.block_height};
@@ -2299,6 +2311,9 @@ std::optional<full_find_result> database_impl::full_find(raw_outpoint const& key
     if (result) return result;
 
     // Defer lookup to batch processing for efficiency
+    // A probe the active map could not answer. Recording it is what makes the
+    // hit rate mean something: without it every recorded probe was a hit.
+    probe_stats_.record_deferred();
     add_to_deferred_lookups(key, height);
     return std::nullopt;
 }
@@ -2321,13 +2336,16 @@ database_impl::full_process_pending_lookups() {
         try {
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
 
+            resolution_stats_.record_file_visited(cache_hit);
+
+
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
                     ++deferred_stats_.lookups_by_depth[depth];
-                    search_stats_.add_record(entry.height, map_it->second.block_height, depth, cache_hit, true, 'f');
+                    resolution_stats_.record_resolved(depth);
 #endif
                     auto data = map_it->second.get_data();
                     successful_lookups.emplace(entry.key,
@@ -2390,6 +2408,7 @@ database_impl::full_process_pending_lookups() {
     // Collect failed lookups
     std::vector<deferred_lookup_entry> failed_lookups;
     failed_lookups.reserve(deferred_lookups_.size());
+    resolution_stats_.record_unresolved(deferred_lookups_.size());
     deferred_lookups_.visit_all([&](auto const& entry) {
         failed_lookups.push_back(entry);
     });
@@ -2474,11 +2493,14 @@ std::optional<compact_find_result> database_impl::compact_find_typed(raw_outpoin
     auto const& map = compact_map();
     if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-        search_stats_.add_record(height, it->second.height, 0, false, true, 'f');
+        probe_stats_.record_answered(height, it->second.height);
 #endif
         return compact_find_result{it->second.height, it->second.file_number, it->second.offset};
     }
 
+    // A probe the active map could not answer. Recording it is what makes the
+    // hit rate mean something: without it every recorded probe was a hit.
+    probe_stats_.record_deferred();
     add_to_deferred_lookups(key, height);
     return std::nullopt;
 }
@@ -2501,13 +2523,16 @@ database_impl::compact_process_pending_lookups() {
         try {
             auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
 
+            resolution_stats_.record_file_visited(cache_hit);
+
+
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(compact_current_version_ - version);
                     ++deferred_stats_.lookups_by_depth[depth];
-                    search_stats_.add_record(entry.height, map_it->second.height, depth, cache_hit, true, 'f');
+                    resolution_stats_.record_resolved(depth);
 #endif
                     successful_lookups.emplace(entry.key,
                         compact_find_result{map_it->second.height, map_it->second.file_number, map_it->second.offset});
@@ -2559,6 +2584,7 @@ database_impl::compact_process_pending_lookups() {
     // Collect failed lookups
     std::vector<deferred_lookup_entry> failed_lookups;
     failed_lookups.reserve(deferred_lookups_.size());
+    resolution_stats_.record_unresolved(deferred_lookups_.size());
     deferred_lookups_.visit_all([&](auto const& entry) {
         failed_lookups.push_back(entry);
     });
