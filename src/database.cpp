@@ -87,11 +87,6 @@ void db_base::reset_all_statistics() {
     if (impl_) impl_->reset_all_statistics();
 }
 
-search_stats const& db_base::get_search_stats() const {
-    static search_stats empty_stats;
-    return impl_ ? impl_->get_search_stats() : empty_stats;
-}
-
 void db_base::reset_search_stats() {
     if (impl_) impl_->reset_search_stats();
 }

@@ -56,7 +56,7 @@ struct database_impl;
  * may overlap with find(), which writes nothing they look at beyond its own
  * sharded counters, but not with any mutation, and get_statistics() and the
  * reset calls not with each other either. A summary taken while find() is
- * recording is also not consistent across fields; see search_stats.
+ * recording is also not consistent across fields; see probe_stats.
  *
  * The restriction on everything else is structural, not incidental:
  * - The LRU file cache has no synchronisation, and it owns the memory mappings.
@@ -174,8 +174,7 @@ struct db_base {
     void print_sizing_report() const;
     void print_height_range_stats() const;
     void reset_all_statistics();
-    [[nodiscard]] search_stats const& get_search_stats() const;
-    void reset_search_stats();
+    void reset_search_stats();  ///< Clears the probe and resolution counters
     [[nodiscard]] float get_cache_hit_rate() const;
     [[nodiscard]] std::vector<std::pair<size_t, size_t>> get_cached_file_info() const;
 

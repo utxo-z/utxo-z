@@ -10,8 +10,10 @@
 #include <utxoz/statistics.hpp>
 
 #include <algorithm>
-#include <numeric>
+#include <atomic>
 #include <thread>
+
+#ifdef UTXOZ_STATISTICS_ENABLED
 
 namespace utxoz {
 namespace {
@@ -21,107 +23,136 @@ namespace {
  *
  * Assigned round-robin on first use and then cached, so recording never hashes.
  * The counter is process-wide, which is what we want: it spreads writers across
- * slots regardless of how many database instances they touch. Slots are reused
- * once more threads have recorded than there are slots, so a distinct slot per
- * thread is the common case, not a guarantee — the counters are atomic either
- * way.
+ * slots regardless of how many database instances they touch.
  */
 size_t thread_shard_index() {
     static std::atomic<size_t> next_index{0};
     static thread_local size_t const index =
-        next_index.fetch_add(1, std::memory_order_relaxed) % search_stats::shard_count;
+        next_index.fetch_add(1, std::memory_order_relaxed) % detail::sharded_counters::shard_count;
     return index;
 }
 
 } // anonymous namespace
 
-void search_stats::add_record(uint32_t access_height, uint32_t insertion_height,
-                              uint32_t depth, bool cache_hit, bool found,
-                              [[maybe_unused]] char operation) {
-    // Relaxed throughout: these counters carry no ordering relationship with
-    // anything else, and a summary is allowed to be a slightly stale snapshot.
-    auto& s = shards_[thread_shard_index()];
+namespace detail {
 
-    s.operations.fetch_add(1, std::memory_order_relaxed);
-    s.total_depth.fetch_add(depth, std::memory_order_relaxed);
+// Relaxed throughout: these counters carry no ordering relationship with
+// anything else, and a summary is allowed to be a slightly stale snapshot.
 
-    if (found) {
-        s.found.fetch_add(1, std::memory_order_relaxed);
-
-        uint64_t const age = access_height >= insertion_height
-            ? uint64_t(access_height) - insertion_height
-            : 0;
-        s.total_age.fetch_add(age, std::memory_order_relaxed);
-
-        if (depth == 0) {
-            s.current_version_hits.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-
-    if (depth > 0) {
-        s.cache_accesses.fetch_add(1, std::memory_order_relaxed);
-        if (cache_hit) {
-            s.cache_hits.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
+void sharded_counters::add(size_t field, uint64_t amount) noexcept {
+    shards_[thread_shard_index()].fields[field].fetch_add(amount, std::memory_order_relaxed);
 }
 
-void search_stats::reset() {
-    for (auto& s : shards_) {
-        s.operations.store(0, std::memory_order_relaxed);
-        s.found.store(0, std::memory_order_relaxed);
-        s.current_version_hits.store(0, std::memory_order_relaxed);
-        s.total_depth.store(0, std::memory_order_relaxed);
-        s.total_age.store(0, std::memory_order_relaxed);
-        s.cache_accesses.store(0, std::memory_order_relaxed);
-        s.cache_hits.store(0, std::memory_order_relaxed);
-    }
-}
-
-search_summary search_stats::get_summary() const {
-    uint64_t operations = 0;
-    uint64_t found = 0;
-    uint64_t current_version_hits = 0;
-    uint64_t total_depth = 0;
-    uint64_t total_age = 0;
-    uint64_t cache_accesses = 0;
-    uint64_t cache_hits = 0;
-
+uint64_t sharded_counters::sum(size_t field) const noexcept {
+    uint64_t total = 0;
     for (auto const& s : shards_) {
-        operations += s.operations.load(std::memory_order_relaxed);
-        found += s.found.load(std::memory_order_relaxed);
-        current_version_hits += s.current_version_hits.load(std::memory_order_relaxed);
-        total_depth += s.total_depth.load(std::memory_order_relaxed);
-        total_age += s.total_age.load(std::memory_order_relaxed);
-        cache_accesses += s.cache_accesses.load(std::memory_order_relaxed);
-        cache_hits += s.cache_hits.load(std::memory_order_relaxed);
+        total += s.fields[field].load(std::memory_order_relaxed);
     }
+    return total;
+}
 
-    search_summary summary;
-    if (operations == 0) {
-        return summary;
+void sharded_counters::reset() noexcept {
+    for (auto& s : shards_) {
+        for (auto& f : s.fields) {
+            f.store(0, std::memory_order_relaxed);
+        }
     }
+}
 
-    summary.total_operations = size_t(operations);
-    summary.found_operations = size_t(found);
-    summary.current_version_hits = size_t(current_version_hits);
-    summary.cache_hits = size_t(cache_hits);
+} // namespace detail
 
-    // The counters are read one at a time while recorders may be running, so a
+// =============================================================================
+// probe_stats
+// =============================================================================
+
+void probe_stats::record_answered(uint32_t access_height, uint32_t creation_height) noexcept {
+    counters_.add(f_probes, 1);
+    counters_.add(f_answered, 1);
+
+    uint64_t const age = access_height >= creation_height
+        ? uint64_t(access_height) - creation_height
+        : 0;
+    counters_.add(f_age_total, age);
+}
+
+void probe_stats::record_deferred() noexcept {
+    counters_.add(f_probes, 1);
+}
+
+void probe_stats::reset() noexcept {
+    counters_.reset();
+}
+
+probe_summary probe_stats::get_summary() const noexcept {
+    uint64_t const probes = counters_.sum(f_probes);
+    uint64_t const answered = counters_.sum(f_answered);
+    uint64_t const age_total = counters_.sum(f_age_total);
+
+    probe_summary summary;
+    if (probes == 0) return summary;
+
+    summary.probes = size_t(probes);
+    // Fields are read one at a time while recorders may be running, so a
     // numerator can sit an increment ahead of its denominator. Clamp, so a
-    // summary taken mid-flight never reports a rate above 1.
-    summary.hit_rate = double(std::min(found, operations)) / double(operations);
-    summary.avg_depth = double(total_depth) / double(operations);
+    // summary taken mid-flight never reports a rate above 1 or a negative count.
+    uint64_t const answered_capped = std::min(answered, probes);
+    summary.answered_from_active = size_t(answered_capped);
+    summary.deferred = size_t(probes - answered_capped);
+    summary.active_map_hit_rate = double(answered_capped) / double(probes);
 
-    if (found > 0) {
-        summary.avg_utxo_age = double(total_age) / double(found);
+    if (answered_capped > 0) {
+        summary.avg_age_answered = double(age_total) / double(answered_capped);
     }
 
-    if (cache_accesses > 0) {
-        summary.cache_hit_rate = double(std::min(cache_hits, cache_accesses)) / double(cache_accesses);
+    return summary;
+}
+
+// =============================================================================
+// resolution_stats
+// =============================================================================
+
+void resolution_stats::record_resolved(uint32_t depth) noexcept {
+    counters_.add(f_resolved, 1);
+    counters_.add(f_depth_total, depth);
+}
+
+void resolution_stats::record_unresolved(size_t count) noexcept {
+    if (count == 0) return;
+    counters_.add(f_unresolved, uint64_t(count));
+}
+
+void resolution_stats::record_file_visited(bool cache_hit) noexcept {
+    counters_.add(f_files, 1);
+    if (cache_hit) counters_.add(f_cache_hits, 1);
+}
+
+void resolution_stats::reset() noexcept {
+    counters_.reset();
+}
+
+resolution_summary resolution_stats::get_summary() const noexcept {
+    uint64_t const resolved = counters_.sum(f_resolved);
+    uint64_t const unresolved = counters_.sum(f_unresolved);
+    uint64_t const depth_total = counters_.sum(f_depth_total);
+    uint64_t const files = counters_.sum(f_files);
+    uint64_t const cache_hits = counters_.sum(f_cache_hits);
+
+    resolution_summary summary;
+    summary.resolved = size_t(resolved);
+    summary.unresolved = size_t(unresolved);
+    summary.files_visited = size_t(files);
+    summary.cache_hits = size_t(std::min(cache_hits, files));
+
+    if (resolved > 0) {
+        summary.avg_depth = double(depth_total) / double(resolved);
+    }
+    if (files > 0) {
+        summary.cache_hit_rate = double(summary.cache_hits) / double(files);
     }
 
     return summary;
 }
 
 } // namespace utxoz
+
+#endif // UTXOZ_STATISTICS_ENABLED

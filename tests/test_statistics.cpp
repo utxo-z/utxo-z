@@ -31,6 +31,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include <utxoz/config.hpp>
 #include <utxoz/database.hpp>
 
 namespace {
@@ -56,6 +57,8 @@ std::vector<uint8_t> make_value(size_t size) {
 
 } // anonymous namespace
 
+// Counter values only exist when recording is compiled in.
+#ifdef UTXOZ_STATISTICS_ENABLED
 TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
     auto const path = make_unique_path("counts");
     std::filesystem::remove_all(path);
@@ -71,24 +74,19 @@ TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
         }
 
         // Inserts do not record searches.
-        REQUIRE(db.get_statistics().search.total_operations == 0);
+        REQUIRE(db.get_statistics().probes.probes == 0);
 
         // Every one of these hits the active map: depth 0, found.
         for (size_t i = 0; i < entries; ++i) {
             REQUIRE(db.find(make_key(i), 200).has_value());
         }
 
-        auto const hits = db.get_statistics().search;
-        CHECK(hits.total_operations == entries);
-        CHECK(hits.current_version_hits == entries);
-        // Note: every call site records found=true — a lookup that resolves
-        // nothing records nothing at all — so found_operations tracks
-        // total_operations and hit_rate is structurally 1.0. Pinned as the
-        // current behaviour, not as a meaningful hit rate.
-        CHECK(hits.found_operations == entries);
-        CHECK(hits.hit_rate == 1.0);
-        CHECK(hits.avg_depth == 0.0);
-        CHECK(hits.avg_utxo_age == 100.0);  // accessed at 200, inserted at 100
+        auto const hits = db.get_statistics().probes;
+        CHECK(hits.probes == entries);
+        CHECK(hits.answered_from_active == entries);
+        CHECK(hits.deferred == 0);
+        CHECK(hits.active_map_hit_rate == 1.0);
+        CHECK(hits.avg_age_answered == 100.0);  // probed at 200, created at 100
 
         // Misses in a single-version database record nothing: find() only
         // records when it resolves, and the sweep finds no file to search.
@@ -100,16 +98,17 @@ TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
         CHECK(unresolved.size() == 100);
 
         db.reset_search_stats();
-        auto const cleared = db.get_statistics().search;
-        CHECK(cleared.total_operations == 0);
-        CHECK(cleared.found_operations == 0);
-        CHECK(cleared.hit_rate == 0.0);
+        auto const cleared = db.get_statistics().probes;
+        CHECK(cleared.probes == 0);
+        CHECK(cleared.answered_from_active == 0);
+        CHECK(cleared.active_map_hit_rate == 0.0);
 
         db.close();
     }
 
     std::filesystem::remove_all(path);
 }
+#endif
 
 /**
  * Recording from several threads at once.
@@ -120,6 +119,8 @@ TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
  * This exercises the shape KTH relies on: one admission holding its lock, then
  * fanning the inputs out across N reader threads that all call find().
  */
+// Counter values only exist when recording is compiled in.
+#ifdef UTXOZ_STATISTICS_ENABLED
 TEST_CASE("search statistics survive concurrent recorders", "[statistics][concurrency]") {
     auto const path = make_unique_path("threads");
     std::filesystem::remove_all(path);
@@ -156,18 +157,18 @@ TEST_CASE("search statistics survive concurrent recorders", "[statistics][concur
         CHECK(std::accumulate(misses.begin(), misses.end(), size_t{0}) == 0);
 
         // Exact: no increments lost to a race, none double counted.
-        auto const summary = db.get_statistics().search;
-        CHECK(summary.total_operations == thread_count * per_thread);
-        CHECK(summary.found_operations == thread_count * per_thread);
-        CHECK(summary.current_version_hits == thread_count * per_thread);
-        CHECK(summary.hit_rate == 1.0);
-        CHECK(summary.avg_depth == 0.0);
+        auto const summary = db.get_statistics().probes;
+        CHECK(summary.probes == thread_count * per_thread);
+        CHECK(summary.answered_from_active == thread_count * per_thread);
+        CHECK(summary.deferred == 0);
+        CHECK(summary.active_map_hit_rate == 1.0);
 
         db.close();
     }
 
     std::filesystem::remove_all(path);
 }
+#endif
 
 /**
  * The other half of find(): the miss path.
@@ -254,6 +255,8 @@ TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurre
     std::filesystem::remove_all(path);
 }
 
+// Counter values only exist when recording is compiled in.
+#ifdef UTXOZ_STATISTICS_ENABLED
 TEST_CASE("search statistics stay bounded", "[statistics]") {
     auto const path = make_unique_path("bounded");
     std::filesystem::remove_all(path);
@@ -271,9 +274,178 @@ TEST_CASE("search statistics stay bounded", "[statistics]") {
             (void)db.find(make_key(1), 2);
         }
 
-        auto const summary = db.get_statistics().search;
-        CHECK(summary.total_operations == 250'000);
-        CHECK(summary.found_operations == 250'000);
+        auto const summary = db.get_statistics().probes;
+        CHECK(summary.probes == 250'000);
+        CHECK(summary.answered_from_active == 250'000);
+
+        db.close();
+    }
+
+    std::filesystem::remove_all(path);
+}
+#endif
+
+/**
+ * The point of splitting the counters.
+ *
+ * One logical lookup that misses the active map shows up twice: once as a
+ * deferred probe, once as a resolution. Folding them into one denominator is
+ * what made the old hit rate meaningless — every recorded operation was a hit,
+ * because a lookup that resolved nothing recorded nothing at all.
+ *
+ * So: the probe counters describe find() and only find(), the resolution
+ * counters describe the sweeps and only the sweeps, and neither moves when the
+ * other records.
+ */
+// Counter values only exist when recording is compiled in.
+#ifdef UTXOZ_STATISTICS_ENABLED
+TEST_CASE("probe and resolution counters describe different phases",
+          "[statistics][contract]") {
+    auto const path = make_unique_path("split");
+    std::filesystem::remove_all(path);
+
+    {
+        auto r = utxoz::full_db::open_for_testing(path, true);
+        REQUIRE(r.has_value());
+        auto db = std::move(*r);
+
+        auto const witness = make_key(0xA11CE);
+        REQUIRE(db.insert(witness, make_value(33), 100).value());
+
+        // Fill until container 0 rotates, so the witness leaves the active map.
+        uint64_t filler = 5'000'000;
+        for (size_t batch = 0; batch < 400; ++batch) {
+            for (size_t i = 0; i < 5'000; ++i) {
+                REQUIRE(db.insert(make_key(filler++), make_value(33), 200).has_value());
+            }
+            if (db.get_statistics().rotations_per_container[0] >= 1) break;
+        }
+        REQUIRE(db.get_statistics().rotations_per_container[0] >= 1);
+
+        db.reset_search_stats();
+
+        // A probe that the active map cannot answer.
+        CHECK_FALSE(db.find(witness, 300).has_value());
+
+        auto after_probe = db.get_statistics();
+        CHECK(after_probe.probes.probes == 1);
+        CHECK(after_probe.probes.answered_from_active == 0);
+        CHECK(after_probe.probes.deferred == 1);
+        CHECK(after_probe.probes.active_map_hit_rate == 0.0);
+        // The sweep has not run, so nothing is resolved yet.
+        CHECK(after_probe.resolution.resolved == 0);
+
+        // Resolving it counts on the resolution side, and leaves the probe
+        // counters exactly where they were — the same lookup is not counted
+        // twice inside one denominator.
+        auto const [found, unresolved] = db.process_pending_lookups();
+        CHECK(unresolved.empty());
+        CHECK(found.size() == 1);
+
+        auto after_sweep = db.get_statistics();
+        CHECK(after_sweep.probes.probes == 1);
+        CHECK(after_sweep.probes.answered_from_active == 0);
+        CHECK(after_sweep.probes.deferred == 1);
+
+        CHECK(after_sweep.resolution.resolved == 1);
+        CHECK(after_sweep.resolution.unresolved == 0);
+        CHECK(after_sweep.resolution.avg_depth >= 1.0);   // at least one version back
+        CHECK(after_sweep.resolution.files_visited >= 1);
+
+        // A key that exists nowhere: deferred, then reported unresolved.
+        db.reset_search_stats();
+        CHECK_FALSE(db.find(make_key(0xDEAD'BEEF), 300).has_value());
+        {
+            auto const [f2, u2] = db.process_pending_lookups();
+            CHECK(f2.empty());
+            CHECK(u2.size() == 1);
+        }
+        auto const missing = db.get_statistics();
+        CHECK(missing.probes.probes == 1);
+        CHECK(missing.probes.deferred == 1);
+        CHECK(missing.resolution.resolved == 0);
+        CHECK(missing.resolution.unresolved == 1);
+
+        db.close();
+    }
+
+    std::filesystem::remove_all(path);
+}
+#endif
+
+/**
+ * Erases do not feed the probe counters at all. They used to, which is how the
+ * average age mixed the age of a read with the age of a delete — and the
+ * deferred deletion paths recorded an insertion height of zero, so that average
+ * also mixed real ages with absolute heights.
+ */
+// Counter values only exist when recording is compiled in.
+#ifdef UTXOZ_STATISTICS_ENABLED
+TEST_CASE("erases do not contaminate the probe age", "[statistics][contract]") {
+    auto const path = make_unique_path("age");
+    std::filesystem::remove_all(path);
+
+    {
+        auto r = utxoz::full_db::open_for_testing(path, true);
+        REQUIRE(r.has_value());
+        auto db = std::move(*r);
+
+        for (size_t i = 0; i < 100; ++i) {
+            REQUIRE(db.insert(make_key(i), make_value(33), 1'000).value());
+        }
+        db.reset_search_stats();
+
+        // Probes at a known distance from creation.
+        for (size_t i = 0; i < 100; ++i) {
+            REQUIRE(db.find(make_key(i), 1'500).has_value());
+        }
+        CHECK(db.get_statistics().probes.avg_age_answered == 500.0);
+
+        // Erasing at a very different height must not move it.
+        for (size_t i = 0; i < 50; ++i) {
+            CHECK(db.erase(make_key(i), 9'000) == 1);
+        }
+        auto const after = db.get_statistics();
+        CHECK(after.probes.probes == 100);
+        CHECK(after.probes.avg_age_answered == 500.0);
+
+        db.close();
+    }
+
+    std::filesystem::remove_all(path);
+}
+#endif
+
+/**
+ * With statistics compiled out, recording has to disappear entirely rather than
+ * merely go unread — the call sites sit on the concurrent path, and an atomic
+ * fetch_add that nobody will ever look at is pure cost. The guard lives in the
+ * types, so a call added later cannot forget it.
+ */
+TEST_CASE("statistics compile out cleanly", "[statistics]") {
+    auto const path = make_unique_path("off");
+    std::filesystem::remove_all(path);
+
+    {
+        auto r = utxoz::full_db::open_for_testing(path, true);
+        REQUIRE(r.has_value());
+        auto db = std::move(*r);
+
+        for (size_t i = 0; i < 100; ++i) {
+            REQUIRE(db.insert(make_key(i), make_value(33), 10).value());
+            REQUIRE(db.find(make_key(i), 20).has_value());
+        }
+
+        auto const stats = db.get_statistics();
+#ifdef UTXOZ_STATISTICS_ENABLED
+        CHECK(stats.probes.probes == 100);
+#else
+        CHECK(stats.probes.probes == 0);
+        CHECK(stats.probes.answered_from_active == 0);
+        CHECK(stats.resolution.resolved == 0);
+#endif
+        // Either way the database itself works.
+        CHECK(db.size() == 100);
 
         db.close();
     }
