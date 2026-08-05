@@ -168,27 +168,6 @@ inline constexpr size_t compact_file_size = 4_gib;
 inline constexpr size_t compact_test_file_size = 10_mib;
 
 /**
- * @brief Search operation record for performance tracking
- */
-struct search_record {
-    uint32_t access_height;     ///< Block height when accessed
-    uint32_t insertion_height;  ///< Block height when inserted
-    uint32_t depth;            ///< Search depth (0 = current version, >0 = previous versions)
-    bool is_cache_hit;         ///< Whether this was a cache hit
-    bool found;                ///< Whether the UTXO was found
-    char operation;            ///< Operation type ('f' = find, 'e' = erase)
-
-    /**
-     * @brief Calculate UTXO age in blocks
-     * @return Age in blocks, or 0 if not found or invalid
-     */
-    uint32_t get_utxo_age() const {
-        return found && access_height >= insertion_height ?
-               access_height - insertion_height : 0;
-    }
-};
-
-/**
  * @brief Deferred deletion entry
  */
 struct deferred_deletion_entry {
