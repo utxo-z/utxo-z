@@ -594,7 +594,7 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         REQUIRE(scan_count(db) == size_before);
         auto const files_before = count_data_files(path, 0);
 
-        db.compact_all();
+        REQUIRE(db.compact_all().has_value());
 
         // Compaction must have actually merged files, otherwise the test is not
         // exercising the renumbering it claims to.

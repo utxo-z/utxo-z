@@ -16,6 +16,7 @@ add_executable(utxoz_tests
     test_compact_mode.cpp
     test_find_across_rotations.cpp
     test_statistics.cpp
+    test_compaction_invariant.cpp
 )
 
 target_link_libraries(utxoz_tests

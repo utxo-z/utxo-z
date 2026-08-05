@@ -58,7 +58,7 @@ struct database_impl {
     std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
     size_t deferred_lookups_size() const;
 
-    void compact_all();
+    result<> compact_all();
     void for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
@@ -150,7 +150,7 @@ private:
 
     // Compaction
     template<size_t Index>
-    void compact_container();
+    result<> compact_container();
 
     // Optimal buckets finder
     template<size_t Index>
@@ -185,7 +185,7 @@ private:
     void compact_close_container();
     void compact_new_version();
     bool compact_can_insert_safely() const;
-    void compact_compact_container();
+    result<> compact_compact_container();
     void compact_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     void compact_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 

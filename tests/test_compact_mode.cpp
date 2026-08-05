@@ -302,7 +302,7 @@ TEST_CASE_METHOD(CompactFixture, "Compact: compaction", "[compact]") {
     CHECK(failed.empty());
 
     // Compact
-    db_->compact_all();
+    REQUIRE(db_->compact_all().has_value());
 
     // Verify remaining entries
     for (int i = 50; i < 100; ++i) {

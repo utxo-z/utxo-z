@@ -288,7 +288,10 @@ int main() {
             // Compact database periodically
             if (block_height % 10 == 0 && block_height > 0) {
                 log_print("Compacting database...\n");
-                db.compact_all();
+                if (auto compacted = db.compact_all(); !compacted) {
+                    fmt::println("Error: compaction failed, the database is inconsistent");
+                    return 1;
+                }
             }
 
             // Print progress
@@ -306,7 +309,10 @@ int main() {
 
         // Final compaction
         log_print("Final compaction...\n");
-        db.compact_all();
+        if (auto compacted = db.compact_all(); !compacted) {
+            fmt::println("Error: compaction failed, the database is inconsistent");
+            return 1;
+        }
 
         // Final statistics
         log_print("\n=== FINAL STATISTICS ===\n");

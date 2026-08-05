@@ -181,7 +181,10 @@ int run_adapted_benchmark() {
 
             // Compact periodically
             if (height % 20 == 0 && height > 0) {
-                db.compact_all();
+                if (auto compacted = db.compact_all(); !compacted) {
+                    fmt::println("Error: compaction failed, the database is inconsistent");
+                    return 1;
+                }
             }
 
             ++height;

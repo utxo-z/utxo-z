@@ -124,7 +124,10 @@ int main() {
 
         // Test compaction
         fmt::println("\nRunning database compaction...");
-        db.compact_all();
+        if (auto compacted = db.compact_all(); !compacted) {
+            fmt::println("Error: compaction failed, the database is inconsistent");
+            return 1;
+        }
         fmt::println("Compaction completed\n");
 
         // Final statistics

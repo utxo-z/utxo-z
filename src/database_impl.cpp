@@ -1104,7 +1104,7 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
 // =============================================================================
 
 template<size_t Index>
-void database_impl::compact_container() {
+result<> database_impl::compact_container() {
     log::debug("Starting compaction for container {}...", Index);
 
     size_t files_deleted = 0;
@@ -1112,11 +1112,60 @@ void database_impl::compact_container() {
 
     close_container<Index>();
 
+    // compact_container() begins by closing the active container, so every exit
+    // has to put one back. Leaving containers_[Index] null would turn the next
+    // operation into a null dereference.
+    auto reopen_active = [&] {
+        size_t const versions = count_versions_for_container(Index);
+        current_versions_[Index] = versions > 0 ? versions - 1 : 0;
+        open_or_create_container<Index>(current_versions_[Index]);
+    };
+
+    // Metadata describes a file layout, and compaction changes that layout as it
+    // goes: it empties files, removes them and renumbers what is left. Every
+    // exit past that point has to rebuild it, the failing one included, or the
+    // persisted metadata goes on describing versions that no longer exist.
+    auto rebuild_metadata = [&](size_t versions) {
+        size_t old_meta_idx = 0;
+        while (true) {
+            auto meta_path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), Index, old_meta_idx);
+            if (!fs::exists(meta_path)) break;
+            fs::remove(meta_path);
+            ++old_meta_idx;
+        }
+
+        file_metadata_[Index].clear();
+        file_metadata_[Index].resize(versions);
+
+        for (size_t v = 0; v < versions; ++v) {
+            auto& meta = file_metadata_[Index][v];
+            meta.container_index = Index;
+            meta.version = v;
+
+            auto file_name = fmt::format(data_file_format, db_path_.string(), Index, v);
+            if (!fs::exists(file_name)) continue;
+
+            try {
+                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto* map_ptr = segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
+                if (!map_ptr) continue;
+
+                for (auto const& [key, val] : *map_ptr) {
+                    meta.update_on_insert(key, val.block_height);
+                }
+            } catch (std::exception const& e) {
+                log::error("compact_container: error scanning container {} v{} for metadata: {}", Index, v, e.what());
+            }
+
+            save_metadata_to_disk(Index, v);
+        }
+    };
+
     size_t total_versions = count_versions_for_container(Index);
     if (total_versions <= 1) {
         log::trace("Container {} has {} files, no compaction needed", Index, total_versions);
         open_or_create_container<Index>(total_versions > 0 ? total_versions - 1 : 0);
-        return;
+        return {};
     }
 
     size_t target_idx = 0;
@@ -1152,7 +1201,25 @@ void database_impl::compact_container() {
             auto value = it->second;
 
             try {
-                target_map->emplace(key, value);
+                auto const [pos, inserted] = target_map->emplace(key, value);
+                if ( ! inserted) {
+                    // The target already held this key before we touched it —
+                    // either from the start, or moved there from a third file
+                    // earlier in this same run. Both mean two version files held
+                    // the key at once, which a published state must never do.
+                    //
+                    // Report, do not repair: the source copy stays where it is,
+                    // the target's is untouched, and the entry counter is left
+                    // alone so it still describes what is on disk. Choosing one
+                    // would erase the evidence of a corrupt database.
+                    log::error("compaction: duplicate key in container {} — present in both v{} and v{}: {}",
+                               Index, source_idx, target_idx, outpoint_to_string(key));
+                    target_segment.reset();
+                    source_segment.reset();
+                    rebuild_metadata(count_versions_for_container(Index));
+                    reopen_active();
+                    return std::unexpected(error_code::duplicate_key);
+                }
                 it = source_map->erase(it);
                 ++entries_moved;
             } catch (boost::interprocess::bad_alloc const&) {
@@ -1194,51 +1261,14 @@ void database_impl::compact_container() {
     target_segment.reset();
     source_segment.reset();
 
-    // Rebuild metadata: delete all old meta files, scan remaining data files
-    {
-        // Delete all existing metadata files for this container
-        size_t old_meta_idx = 0;
-        while (true) {
-            auto meta_path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), Index, old_meta_idx);
-            if (!fs::exists(meta_path)) break;
-            fs::remove(meta_path);
-            ++old_meta_idx;
-        }
-
-        // Reset in-memory metadata
-        file_metadata_[Index].clear();
-        file_metadata_[Index].resize(total_versions);
-
-        // Scan each remaining data file to rebuild metadata
-        for (size_t v = 0; v < total_versions; ++v) {
-            auto& meta = file_metadata_[Index][v];
-            meta.container_index = Index;
-            meta.version = v;
-
-            auto file_name = fmt::format(data_file_format, db_path_.string(), Index, v);
-            if (!fs::exists(file_name)) continue;
-
-            try {
-                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
-                auto* map_ptr = segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
-                if (!map_ptr) continue;
-
-                for (auto const& [key, val] : *map_ptr) {
-                    meta.update_on_insert(key, val.block_height);
-                }
-            } catch (std::exception const& e) {
-                log::error("compact_container: error scanning container {} v{} for metadata: {}", Index, v, e.what());
-            }
-
-            save_metadata_to_disk(Index, v);
-        }
-    }
+    rebuild_metadata(total_versions);
 
     current_versions_[Index] = total_versions > 0 ? total_versions - 1 : 0;
     open_or_create_container<Index>(current_versions_[Index]);
 
     log::debug("Compaction complete for container {}: {} files deleted, {} entries moved",
               Index, files_deleted, entries_moved);
+    return {};
 }
 
 void database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
@@ -1307,24 +1337,36 @@ void database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, ui
     });
 }
 
-void database_impl::compact_all() {
+result<> database_impl::compact_all() {
     log::info("Starting full database compaction...");
 
     // Compaction moves entries between files and renames/removes versions, so
     // every cached (container_index, version) mapping becomes stale.
     if (file_cache_) file_cache_->clear();
 
+    result<> outcome;
+
     if (mode_ == storage_mode::compact) {
-        compact_compact_container();
+        outcome = compact_compact_container();
     } else {
         for_each_index<container_count>([&](auto I) {
-            compact_container<I>();
+            // Stop at the first failure. Carrying on would mutate more of the
+            // database after a condition the owner is going to treat as fatal,
+            // and destroy more of the evidence of how it got that way.
+            if ( ! outcome) return;
+            outcome = compact_container<I>();
         });
     }
 
     if (file_cache_) file_cache_->clear();
 
+    if ( ! outcome) {
+        log::error("Full database compaction aborted: the database is locally inconsistent");
+        return outcome;
+    }
+
     log::info("Full database compaction complete");
+    return {};
 }
 
 // =============================================================================
@@ -1950,7 +1992,7 @@ void database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint const&,
     }
 }
 
-void database_impl::compact_compact_container() {
+result<> database_impl::compact_compact_container() {
     log::debug("Starting compaction for compact container...");
 
     size_t files_deleted = 0;
@@ -1958,11 +2000,56 @@ void database_impl::compact_compact_container() {
 
     compact_close_container();
 
+    // Every exit has to leave an active container behind; see compact_container().
+    auto reopen_active = [&] {
+        size_t const versions = count_versions_compact();
+        compact_current_version_ = versions > 0 ? versions - 1 : 0;
+        compact_open_or_create(compact_current_version_);
+    };
+
+    // And every exit past the first move has to rebuild the metadata, for the
+    // same reason as in full mode: it describes a layout this function changes.
+    auto rebuild_metadata = [&](size_t versions) {
+        size_t old_meta_idx = 0;
+        while (true) {
+            auto meta_path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), old_meta_idx);
+            if (!fs::exists(meta_path)) break;
+            fs::remove(meta_path);
+            ++old_meta_idx;
+        }
+
+        compact_file_metadata_.clear();
+        compact_file_metadata_.resize(versions);
+
+        for (size_t v = 0; v < versions; ++v) {
+            auto& meta = compact_file_metadata_[v];
+            meta.container_index = compact_sentinel_index;
+            meta.version = v;
+
+            auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+            if (!fs::exists(file_name)) continue;
+
+            try {
+                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+                if (!map_ptr) continue;
+
+                for (auto const& [key, val] : *map_ptr) {
+                    meta.update_on_insert(key, val.height);
+                }
+            } catch (std::exception const& e) {
+                log::error("compact_compact_container: error scanning compact v{} for metadata: {}", v, e.what());
+            }
+
+            compact_save_metadata(v);
+        }
+    };
+
     size_t total_versions = count_versions_compact();
     if (total_versions <= 1) {
         log::trace("Compact container has {} files, no compaction needed", total_versions);
         compact_open_or_create(total_versions > 0 ? total_versions - 1 : 0);
-        return;
+        return {};
     }
 
     size_t target_idx = 0;
@@ -2018,7 +2105,18 @@ void database_impl::compact_compact_container() {
             auto value = it->second;
 
             try {
-                target_map->emplace(key, value);
+                auto const [pos, inserted] = target_map->emplace(key, value);
+                if ( ! inserted) {
+                    // See compact_container(): a collision here proves two
+                    // version files held the same key. Report, do not repair.
+                    log::error("compaction: duplicate key in compact container — present in both v{} and v{}: {}",
+                               source_idx, target_idx, outpoint_to_string(key));
+                    target_segment.reset();
+                    source_segment.reset();
+                    rebuild_metadata(count_versions_compact());
+                    reopen_active();
+                    return std::unexpected(error_code::duplicate_key);
+                }
                 it = source_map->erase(it);
                 ++entries_moved;
             } catch (boost::interprocess::bad_alloc const&) {
@@ -2060,48 +2158,14 @@ void database_impl::compact_compact_container() {
     target_segment.reset();
     source_segment.reset();
 
-    // Rebuild metadata
-    {
-        size_t old_meta_idx = 0;
-        while (true) {
-            auto meta_path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), old_meta_idx);
-            if (!fs::exists(meta_path)) break;
-            fs::remove(meta_path);
-            ++old_meta_idx;
-        }
-
-        compact_file_metadata_.clear();
-        compact_file_metadata_.resize(total_versions);
-
-        for (size_t v = 0; v < total_versions; ++v) {
-            auto& meta = compact_file_metadata_[v];
-            meta.container_index = compact_sentinel_index;
-            meta.version = v;
-
-            auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
-            if (!fs::exists(file_name)) continue;
-
-            try {
-                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
-                auto* map_ptr = segment->find<compact_map_t>("db_map").first;
-                if (!map_ptr) continue;
-
-                for (auto const& [key, val] : *map_ptr) {
-                    meta.update_on_insert(key, val.height);
-                }
-            } catch (std::exception const& e) {
-                log::error("compact_compact_container: error scanning compact v{} for metadata: {}", v, e.what());
-            }
-
-            compact_save_metadata(v);
-        }
-    }
+    rebuild_metadata(total_versions);
 
     compact_current_version_ = total_versions > 0 ? total_versions - 1 : 0;
     compact_open_or_create(compact_current_version_);
 
     log::debug("Compact compaction complete: {} files deleted, {} entries moved",
               files_deleted, entries_moved);
+    return {};
 }
 
 // =============================================================================
@@ -2566,11 +2630,11 @@ template void database_impl::new_version<2>();
 template void database_impl::new_version<3>();
 template void database_impl::new_version<4>();
 
-template void database_impl::compact_container<0>();
-template void database_impl::compact_container<1>();
-template void database_impl::compact_container<2>();
-template void database_impl::compact_container<3>();
-template void database_impl::compact_container<4>();
+template result<> database_impl::compact_container<0>();
+template result<> database_impl::compact_container<1>();
+template result<> database_impl::compact_container<2>();
+template result<> database_impl::compact_container<3>();
+template result<> database_impl::compact_container<4>();
 
 template bool database_impl::insert_in_index<0>(raw_outpoint const&, output_data_span, uint32_t);
 template bool database_impl::insert_in_index<1>(raw_outpoint const&, output_data_span, uint32_t);

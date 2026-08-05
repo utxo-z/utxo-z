@@ -53,8 +53,9 @@ size_t db_base::deferred_lookups_size() const {
     return impl_ ? impl_->deferred_lookups_size() : 0;
 }
 
-void db_base::compact_all() {
-    if (impl_) impl_->compact_all();
+result<> db_base::compact_all() {
+    if (!impl_) return std::unexpected(error_code::closed);
+    return impl_->compact_all();
 }
 
 void db_base::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
