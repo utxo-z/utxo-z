@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785949255900,
+  "lastUpdate": 1785962107073,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -9530,6 +9530,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 57.16,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "074a61f564a720726d38a1d23130d784fb267ed6",
+          "message": "fix!: compaction reports a duplicate key instead of silently dropping one (#58)\n\nA stored key is unique across the whole database: two physical entries for one\nkey mean the database is locally inconsistent. Compaction is the one routine\noperation positioned to notice, since it holds two version files open at once\nand already reads every key it moves.\n\nIt did the opposite. The result of the insert into the target was ignored and\nthe source entry was erased regardless:\n\n    target_map->emplace(key, value);\n    it = source_map->erase(it);\n\nso a collision quietly dropped one of the two copies, choosing by nothing more\nthan which file happened to be the target that round. It also left\nentries_count_ untouched, so the database went on reporting a size that included\nan entry no longer on disk.\n\nNow the insert result is checked. A collision proves two version files held the\nkey — either from the start, or because an earlier round of this same run moved\nit there from a third file — and both mean a published state that should not\nexist. So it reports and does not repair: the source copy stays, the target's is\nuntouched, the entry counter is left alone, and compact_all() returns\nerror_code::duplicate_key for the owner to treat as fatal. Choosing a copy would\nerase the evidence of a corrupt database behind a plausible answer.\n\nThree things the failing path owes the caller, in both storage modes:\n\n- an active container. compaction closes one before it starts, so an early\n  return that skipped that would leave the next operation dereferencing null;\n- metadata that describes the files that are actually there. The run may already\n  have drained, removed and renumbered versions before reaching the duplicate,\n  and metadata describes exactly that layout, so the rebuild belongs on both\n  exits rather than only on the successful one;\n- no further mutation. compact_all() stops at the first container that reports\n  the database inconsistent instead of compacting the rest, which would change\n  more state after a condition the owner treats as fatal and destroy more of the\n  evidence of how it got that way.\n\ncompact_all() returns result<> rather than void, since an operation that can\nrefuse has to be able to say so, and the examples check it rather than\ndiscarding it — the point of the return value is that a collision reaches the\nowner.\n\nWhat this does not do: it does not roll back the moves completed before the\ncollision — each is individually consistent, so the database is left partially\ncompacted rather than damaged — and it does not turn ordinary lookups into\nduplicate detection, which would cost them their early exit.",
+          "timestamp": "2026-08-05T22:32:41+02:00",
+          "tree_id": "121260b8dba1c9d0b74819c12c9bcc2a95975273",
+          "url": "https://github.com/utxo-z/utxo-z/commit/074a61f564a720726d38a1d23130d784fb267ed6"
+        },
+        "date": 1785962106352,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 301616.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 357403.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 254151.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 426070.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 383.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 435.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11879553,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12998169.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11101642.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 11817.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 8955374.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 13449145.9,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 117766.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 5820.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2021.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2738.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2573.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 58.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 58.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 58.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 58.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 58.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 58.77,
             "unit": "ops/sec"
           }
         ]
