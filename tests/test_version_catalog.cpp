@@ -135,6 +135,17 @@ TEST_CASE("a directory that cannot be read is not an empty directory", "[catalog
         auto const dir = unique_dir("noperm");
         fs::create_directories(dir);
         touch(fs::path(dir) / "cont_0_v00000.dat");
+
+        // Armed before the permissions come off. Catch2 aborts a test case by
+        // throwing, so a restore written after the assertions is skipped on the
+        // one run that matters — the failing one — and leaves a directory
+        // nothing can read behind for every later run to trip over.
+        scope_exit const restore([&] {
+            std::error_code ec;
+            fs::permissions(dir, fs::perms::owner_all, ec);
+            fs::remove_all(dir, ec);
+        });
+
         fs::permissions(dir, fs::perms::none);
 
         // root ignores the permission bits, so there is nothing to observe.
@@ -145,9 +156,6 @@ TEST_CASE("a directory that cannot be read is not an empty directory", "[catalog
             REQUIRE_FALSE(listed);
             REQUIRE(listed.error() == utxoz::error_code::catalog_unreadable);
         }
-
-        fs::permissions(dir, fs::perms::owner_all);
-        fs::remove_all(dir);
     }
 #endif
 }
