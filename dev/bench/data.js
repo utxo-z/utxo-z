@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786015618205,
+  "lastUpdate": 1786023010541,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -10086,6 +10086,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 58.19,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4efbd7ce28c6eb44aa20310e6c4453c1f6f80862",
+          "message": "fix!: publish metadata atomically and refuse a record that cannot be trusted (#68)\n\nA metadata record summarises a version file so a search can decide the file\ncannot hold the key. Nothing consults the ranges yet, so a wrong summary is\ninert today; it stops being inert the moment historical resolution uses it,\nand then it turns a key that is present into a key that is missing, silently,\non the read path, far from the write that caused it.\n\nBoth sides made that possible. The writer used a plain ofstream: no check on\nany write or on the close, no sync, and written in place, so an interrupted\nwrite left a short file under the final name. The reader checked that the\nfile opened and then checked nothing at all — and created the catalogue entry\nbefore reading into it, so a short file produced a record that find_metadata\nreported as present, carrying whatever the reads had managed to fill in. A\ndamaged record did not degrade to unknown; it became an apparently valid\nsummary.\n\nRecords now carry a marker, a format version and a checksum, and are a fixed\nsize. Five completed reads only prove the file was long enough — not that it\nis ours, that the build agrees about the layout, or that the write finished.\nThe reader validates all of it plus internal coherence, and returns nothing\nat all on any failure, so unknown is the only thing a bad record can become.\nThe marker is checked before the length, so a database written by an earlier\nbuild reads as foreign rather than as damaged.\n\nWriting publishes rather than overwrites: a temp beside the target, every\nwrite and the close checked, then an atomic replace. A reader sees the old\nrecord or the new one. The replace is its own primitive because\nstd::filesystem::rename does not replace an existing destination on Windows;\nremoving the destination first is not an alternative, since that leaves a\nwindow with nothing at the name.\n\nPublication is not durability and the two are reported apart. A failure\nbefore or during the replace leaves the previous record untouched and is\nmetadata_write_failed. A barrier that fails after the replace cannot un-\npublish it, so it is sync_failed: the new record is visible and only its\npersistence is unconfirmed.\n\nOrdinary publication asks for no barrier. Metadata is derived, and every\noutcome a crash can leave — the old record, the new one, nothing, or\nsomething that fails validation — is safe, because anything invalid becomes\nunknown. Barriers are not free: every rotation publishes a record, so\nsyncing there put an fsync on the insert path, measured at 15.1M inserts/s\nwithout and 5.7M with, on a workload with 29 rotations.\n\nThe sync primitives arrive with it for the compaction protocol to use, and\nreport what each platform actually does instead of succeeding silently:\nPOSIX has both barriers, Windows has no directory barrier and says so, and\nunder Emscripten fsync exists and does nothing, which is reported as\nunsupported rather than passed off as success. Where a barrier is asked for\nand the platform has none, that is absorbed rather than propagated — a\ncaller that needs to know asks platform_sync_support().\n\nAbsence stays what it was: an ordinary state meaning unknown. Nothing is\nrebuilt automatically at open, and no traversal consults the ranges yet.\n\nBREAKING CHANGE: the metadata record gains a marker, a format version and a\nchecksum, and its size changes from 88 to 100 bytes. Records written by an\nearlier build are reported as foreign and treated as unknown; they are\nrebuilt by the next operation that writes them. Metadata is derived, so no\ndata is lost. error_code gains sync_unsupported, sync_failed, rename_failed and\nmetadata_write_failed.",
+          "timestamp": "2026-08-06T15:27:45+02:00",
+          "tree_id": "0559cd272a5dd54ea4add2508046ea1f6529c06a",
+          "url": "https://github.com/utxo-z/utxo-z/commit/4efbd7ce28c6eb44aa20310e6c4453c1f6f80862"
+        },
+        "date": 1786023010323,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 378696.01,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 545432.28,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 471067.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 490175.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 427.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 491.54,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12980749.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 11715424.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12714332.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13154.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 9241566.66,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14299626.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 150307.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 15919.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2363.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3614.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2925.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 55.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 55.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 54.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 53.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 53.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.37,
             "unit": "ops/sec"
           }
         ]
