@@ -139,6 +139,10 @@ enum class error_code : uint8_t {
     /// states reach here: the data file is still present and still catalogued,
     /// or the data file went and a stale metadata record was left behind.
     removal_failed,
+    sync_unsupported,       ///< This platform has no such durability barrier; nothing was promised
+    sync_failed,            ///< A durability barrier was attempted and failed
+    rename_failed,          ///< A file could not be moved onto its final name
+    metadata_write_failed,  ///< A derived metadata record could not be published
 };
 
 /**
