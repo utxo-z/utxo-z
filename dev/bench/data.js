@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785962184608,
+  "lastUpdate": 1786012109364,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -9808,6 +9808,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 4.66,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "39d505edac68df41b6f90bb2bfa03c58910a4aed",
+          "message": "fix!: catalogue version files by identity, fail closed when it cannot be read (#61)\n\nVersion discovery probed cont_<i>_v00000, v00001, … and stopped at the\nfirst name that was not there. Compaction, having drained a file, removed\nit and then renamed every version above it down one slot to keep the\nnumbering dense.\n\nThat renumbering is a multi-step rewrite of the catalogue with no\natomicity. Interrupted, it leaves the rename applied to some prefix of the\nversions above the hole and not to the rest — a numbering with a gap in\nit. Discovery then stopped at the gap and reported every version past it\nas absent: entries on disk, intact, and unreachable, with no error\nanywhere. The active version was misidentified too, so the next insert\nwent into a file that already held live data.\n\nVersion numbers become identities rather than positions. A drained file is\nremoved and nothing is renumbered behind it, so the cascade and the window\nit opened are both gone. Identities are never reissued while the process\nlives: rotation takes one past the highest ever used, so a number a\ncompaction just retired cannot come back naming a different file while\nsomething is still keyed by the old pair.\n\nThe set of versions lives in a per-container catalogue, built once at open\nand kept current as versions are created and removed. Every traversal, the\nmetadata and compaction itself go through it, so nothing is sized or\niterated by the highest number — which only ever climbs, and would\notherwise cost more forever while the database itself does not. Metadata\nis keyed by version rather than indexed by it. No operation scans the\ndirectory.\n\nReading the catalogue is fail-closed. A directory that cannot be read is\nnot an empty directory, and reporting one as the other is how a database\nwith versions in it gets opened as if it had none and written over.\nEnumeration returns a result and open() propagates it; nothing is\npublished unless the whole directory was walked. The same applies to the\nexistence checks configure() makes on the way in — asked the throwing way\nthey raised out of a result-typed open(), asked the swallowing way they\nanswered \"no\" to a question they could not answer.\n\nOnly canonical names are catalogued: the parsed number must reformat to\nexactly the name on disk, and the entry must be a regular file. An alias\nwould otherwise be catalogued under one name and reopened under another.\n\nTests fabricate each interrupted state directly on the files — the removal\nplus the first j renames, one case for every j the interruption could have\nstopped at — reopen, and require every entry visible exactly once with the\ncorrect active version. Verified non-vacuous: they fail against the\nprevious discovery. The catalogue's own properties are pinned directly,\nsince neither is visible from the public API.\n\nRemoving a drained file is a controlled failure rather than a silent one.\nThe removals report through error_code instead of throwing, the catalogue\ndrops a version only once its data file is actually gone, and a metadata\nfile left behind after its data went is an error too — identities are only\nunique for the life of the process, so a stale record can later be read as\ndescribing a reissued version, and metadata is what a search consults to\nskip a file. Compaction closes the active container before it starts, so\nevery exit now puts one back, including an exit taken by a throw.\n\nThis narrows the exposure to ordered prefix states, where the renames that\nlanded are the first j. It is not a durability guarantee: nothing here\nforces the removal or the metadata to disk, and a directory entry that\nreaches disk out of order is still out of scope. That is separate work.\n\nBREAKING CHANGE: sizing_report::file_count now reports the number of\nversion files present rather than the highest version index plus one. The\ntwo differ once compaction has removed a file. error_code gains\ncatalog_unreadable, returned by open() when the set of version files\ncannot be determined, and removal_failed, returned by compact_all() when a\ndrained version file or its metadata could not be removed.",
+          "timestamp": "2026-08-06T12:26:07+02:00",
+          "tree_id": "8133990a2473dff072ad88d2b4698f613f718478",
+          "url": "https://github.com/utxo-z/utxo-z/commit/39d505edac68df41b6f90bb2bfa03c58910a4aed"
+        },
+        "date": 1786012108810,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 332452.01,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 458163.72,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 517198.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 795599.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 457.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 515.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 13385176.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 13406933.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 7936807.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13410.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 16058953.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14886071.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 104492.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 14701.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2707.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3573.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2829.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 54.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 54.45,
             "unit": "ops/sec"
           }
         ]
