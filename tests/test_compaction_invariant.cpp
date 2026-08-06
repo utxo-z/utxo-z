@@ -19,10 +19,12 @@
  * a copy would hide a corrupt database behind a plausible answer.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <numeric>
 #include <vector>
 
@@ -37,6 +39,8 @@
 #include <fmt/format.h>
 
 #include <utxoz/database.hpp>
+
+#include "detail/scope_exit.hpp"
 
 namespace {
 
@@ -429,4 +433,260 @@ TEST_CASE("compact_all stops at the first inconsistent container",
     }
 
     std::filesystem::remove_all(path);
+}
+
+// =============================================================================
+// Prefix states left by an interrupted renumbering
+// =============================================================================
+
+/**
+ * Compaction used to close the hole left by a drained file by renaming every
+ * version above it down one slot. That is a multi-step rewrite of the catalogue
+ * with no atomicity: a crash part way through leaves the rename of index k
+ * applied for some prefix of the versions above it and not for the rest. The
+ * result is a numbering with a hole in it, and discovery — which probed 0, 1, 2,
+ * … and stopped at the first miss — then reported every version past the hole
+ * as absent. The entries were on disk, intact, and unreachable.
+ *
+ * The cascade is gone, so this state is no longer produced. It can still be
+ * found on disk: any database compacted by an earlier build may already be in
+ * one. These cases fabricate every point the interruption could land on, by
+ * hand, directly on the files, and require that reopening sees each entry
+ * exactly once and picks the right active version.
+ *
+ * @note This covers ordered prefix states only — the ones where the renames
+ * that did land are the first j of them. It does not cover a rename whose
+ * directory entry reached disk out of order, and it is not a durability
+ * guarantee: nothing here forces any of it to disk. That is the separate
+ * barrier work.
+ */
+namespace {
+
+/// Every key stored, gathered by a full scan.
+template<typename Db>
+std::vector<utxoz::raw_outpoint> all_keys(Db const& db) {
+    std::vector<utxoz::raw_outpoint> keys;
+    db.for_each_key([&](utxoz::raw_outpoint const& k) { keys.push_back(k); });
+    return keys;
+}
+
+/// Builds a container-0 database with at least `want` versions and returns the
+/// keys it holds. Values are sized into container 0 so rotation is quick.
+std::vector<utxoz::raw_outpoint> build_versions(std::string const& path, size_t want, size_t& versions_out) {
+    auto opened = utxoz::full_db::open_for_testing(path, true);
+    REQUIRE(opened);
+    auto db = std::move(*opened);
+
+    uint64_t next = 0;
+    while (count_files(path, "cont_0_v") < want) {
+        REQUIRE(db.insert(make_key(next++), make_value(8, 1), 100).value());
+        REQUIRE(next < 2'000'000);   // must terminate on rotation, not on patience
+    }
+
+    auto const keys = all_keys(db);
+    versions_out = count_files(path, "cont_0_v");
+    db.close();
+    return keys;
+}
+
+std::string data_file(std::string const& path, size_t v) {
+    return fmt::format("{}/cont_0_v{:05}.dat", path, v);
+}
+
+} // anonymous namespace
+
+TEST_CASE("every version survives an interrupted renumbering",
+          "[database][compaction][recovery]") {
+    // The cascade removed version `removed` and then renamed the versions above
+    // it down one slot, in order. Interrupted, j of those renames have landed.
+    // j runs over every value it could have had, so this is the whole set of
+    // ordered prefix states for that removal point, not a sample of it.
+    size_t const total = 4;
+    size_t const removed = 1;
+    size_t const renames = total - removed - 1;   // versions above the removed one
+
+    for (size_t j = 0; j <= renames; ++j) {
+        auto const path = make_unique_path(fmt::format("prefix{}", j));
+        std::filesystem::remove_all(path);
+
+        size_t versions = 0;
+        auto const keys = build_versions(path, total, versions);
+        REQUIRE(versions == total);   // the state below is built for exactly this many
+        REQUIRE_FALSE(keys.empty());
+
+        INFO("versions=" << versions << " removed=" << removed << " renames_applied=" << j);
+
+        // Fabricate the interrupted state directly on the files.
+        std::filesystem::remove(data_file(path, removed));
+        for (size_t i = 0; i < j; ++i) {
+            size_t const from = removed + 1 + i;
+            std::filesystem::rename(data_file(path, from), data_file(path, from - 1));
+        }
+
+        // Reopen and scan. Every key that was not in the removed version must
+        // still be there, exactly once.
+        auto reopened = utxoz::full_db::open_for_testing(path);
+        REQUIRE(reopened);
+        auto db = std::move(*reopened);
+
+        auto seen = all_keys(db);
+        std::vector<utxoz::raw_outpoint> sorted = seen;
+        std::sort(sorted.begin(), sorted.end());
+        REQUIRE(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
+
+        // Non-vacuity: removing one of four versions must leave most of the
+        // keys, so a scan that returns almost nothing is a failure, not a pass.
+        INFO("keys before=" << keys.size() << " after=" << seen.size());
+        REQUIRE(seen.size() > keys.size() / 2);
+
+        // The active version is the highest index actually present, and it is
+        // writable: a fresh insert lands and is immediately visible.
+        //
+        // The key has to sit above everything build_versions() generated, or it
+        // could collide with a key already stored — insert() would then answer
+        // false, and a check that only asks whether the result holds a value
+        // would pass on an insert that never happened.
+        auto const fresh = make_key(9'000'000);
+        auto const inserted = db.insert(fresh, make_value(8, 9), 200);
+        REQUIRE(inserted);
+        REQUIRE(*inserted);
+        REQUIRE(db.find(fresh, 200));
+
+        db.close();
+        std::filesystem::remove_all(path);
+    }
+}
+
+TEST_CASE("compaction over a numbering with a hole in it",
+          "[database][compaction][recovery]") {
+    auto const path = make_unique_path("holecompact");
+    std::filesystem::remove_all(path);
+
+    size_t versions = 0;
+    auto const keys = build_versions(path, 4, versions);
+    REQUIRE(versions >= 4);
+
+    // Punch a hole: drop a middle version, renumber nothing.
+    std::filesystem::remove(data_file(path, 1));
+
+    auto reopened = utxoz::full_db::open_for_testing(path);
+    REQUIRE(reopened);
+    auto db = std::move(*reopened);
+
+    // Free room in the surviving versions, or compaction has nowhere to move
+    // anything to and the run below would pass without merging a single file.
+    auto const live = all_keys(db);
+    REQUIRE(live.size() > keys.size() / 2);
+    for (size_t i = 0; i < live.size(); i += 2) {
+        (void)db.erase(live[i], 400);
+    }
+    (void)db.process_pending_deletions();
+
+    auto before = all_keys(db);
+    REQUIRE_FALSE(before.empty());
+    std::sort(before.begin(), before.end());
+
+    auto const files_before = count_files(path, "cont_0_v");
+
+    // Compaction must work over the versions that are there, not over 0..n.
+    REQUIRE(db.compact_all());
+
+    auto after = all_keys(db);
+    std::sort(after.begin(), after.end());
+    REQUIRE(std::adjacent_find(after.begin(), after.end()) == after.end());
+    REQUIRE(after == before);
+
+    // Non-vacuity: it actually merged something.
+    INFO("files " << files_before << " -> " << count_files(path, "cont_0_v"));
+    REQUIRE(count_files(path, "cont_0_v") < files_before);
+
+    db.close();
+    std::filesystem::remove_all(path);
+}
+
+/**
+ * A removal that fails is a controlled failure, not a silent one. The catalogue
+ * describes what is on disk, so it may only drop a version once the file is
+ * actually gone — and compaction, which closes the active container before it
+ * starts, has to leave one mapped on the way out however it leaves.
+ */
+TEST_CASE("a removal that fails is reported and leaves the database usable",
+          "[database][compaction][recovery]") {
+#ifndef _WIN32
+    auto const path = make_unique_path("removefail");
+    std::filesystem::remove_all(path);
+
+    size_t versions = 0;
+    auto const keys = build_versions(path, 3, versions);
+    REQUIRE(versions == 3);
+
+    auto reopened = utxoz::full_db::open_for_testing(path);
+    REQUIRE(reopened);
+    auto db = std::move(*reopened);
+
+    // Room in the survivors, or compaction never drains a file and never
+    // reaches a removal at all.
+    auto const live = all_keys(db);
+    REQUIRE(live.size() > keys.size() / 2);
+    for (size_t i = 0; i < live.size(); i += 2) {
+        (void)db.erase(live[i], 400);
+    }
+    (void)db.process_pending_deletions();
+
+    auto before = all_keys(db);
+    std::sort(before.begin(), before.end());
+    auto const files_before = count_files(path, "cont_0_v");
+
+    // Armed before the permissions come off. A failing REQUIRE throws, and a
+    // restore written after the assertions would be skipped — leaving a
+    // directory nothing can write to behind.
+    utxoz::detail::scope_exit const restore([&] {
+        std::error_code ec;
+        std::filesystem::permissions(path, std::filesystem::perms::owner_all, ec);
+    });
+
+    // Unlinking needs write permission on the directory, not on the file. The
+    // mapped files stay writable, so compaction gets all the way to the removal
+    // and fails exactly there.
+    std::filesystem::permissions(path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+
+    // Probe without destroying anything: creating an entry needs the same
+    // directory write permission that unlinking does. root ignores the bits, and
+    // then there is nothing to observe.
+    bool blocked = false;
+    {
+        std::ofstream probe(path + "/removal_probe.tmp");
+        blocked = ! probe.is_open();
+    }
+    std::filesystem::remove(path + "/removal_probe.tmp");
+
+    if (blocked) {
+        auto const outcome = db.compact_all();
+        REQUIRE_FALSE(outcome);
+        REQUIRE(outcome.error() == utxoz::error_code::removal_failed);
+
+        // The file it could not remove is still there and still catalogued: no
+        // version was dropped on the strength of a removal that did not happen.
+        REQUIRE(count_files(path, "cont_0_v") == files_before);
+
+        // Writable again, so the rest can check the database still works.
+        std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+
+        // And the database is still usable rather than left with no active
+        // container — every key still readable, and it still takes writes.
+        auto after = all_keys(db);
+        std::sort(after.begin(), after.end());
+        REQUIRE(after == before);
+
+        auto const fresh = make_key(9'000'001);
+        auto const inserted = db.insert(fresh, make_value(8, 5), 500);
+        REQUIRE(inserted);
+        REQUIRE(*inserted);
+        REQUIRE(db.find(fresh, 500));
+    }
+
+    db.close();
+    std::filesystem::remove_all(path);
+#endif
 }

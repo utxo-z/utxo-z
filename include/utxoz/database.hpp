@@ -168,6 +168,11 @@ struct db_base {
      * behind a plausible answer. Treat it as fatal — the entry counter is left
      * untouched too, so it still describes what is on disk.
      *
+     * @note A drained version file is removed and nothing is renumbered to close
+     * the gap, so version numbers are not dense: they are identities, not
+     * positions. Do not assume the files run 0..n, and do not derive a file
+     * count from the highest version.
+     *
      * @return empty on success, error otherwise
      */
     [[nodiscard]]

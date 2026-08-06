@@ -17,6 +17,7 @@ add_executable(utxoz_tests
     test_find_across_rotations.cpp
     test_statistics.cpp
     test_compaction_invariant.cpp
+    test_version_catalog.cpp
 )
 
 target_link_libraries(utxoz_tests
@@ -24,6 +25,11 @@ target_link_libraries(utxoz_tests
         utxoz::utxoz
         Catch2::Catch2WithMain
 )
+
+# test_version_catalog.cpp exercises an internal header directly: the two
+# properties it pins — fail-closed enumeration and sparseness — are not visible
+# from the public API.
+target_include_directories(utxoz_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
 # Discover tests
 include(Catch)

@@ -134,6 +134,11 @@ enum class error_code : uint8_t {
     config_file_corrupt,    ///< Config file is invalid, truncated, or has bad magic
     value_too_large,        ///< Value exceeds maximum container capacity
     duplicate_key,          ///< Two stored entries share a key: the database is locally inconsistent
+    catalog_unreadable,     ///< The set of version files could not be read; absence cannot be assumed
+    /// A drained version file, or its metadata, could not be removed. Two
+    /// states reach here: the data file is still present and still catalogued,
+    /// or the data file went and a stale metadata record was left behind.
+    removal_failed,
 };
 
 /**
