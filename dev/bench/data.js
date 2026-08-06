@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786012109364,
+  "lastUpdate": 1786015618205,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -9947,6 +9947,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 54.45,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e4d90dc5c741ed147770d85c7fe2253d266fcd81",
+          "message": "test: restore directory permissions from a guard in the catalogue test (#67)\n\nThe unreadable-directory case took the permissions off the directory and put\nthem back after its assertions. Catch2 aborts a test case by throwing, so on\nthe one run where that restore matters — the failing one — it is skipped, and\nthe directory is left with no permissions at all. Nothing can then read it,\ndelete it, or reuse the path, and every later run of the suite trips over it.\n\nThe two other cases that do this were already guarded; this one was missed.\nSame treatment: arm the restore before the permissions come off.",
+          "timestamp": "2026-08-06T13:24:46+02:00",
+          "tree_id": "efcdc45a51acf0800053d57ee36f36f003c4ddc1",
+          "url": "https://github.com/utxo-z/utxo-z/commit/e4d90dc5c741ed147770d85c7fe2253d266fcd81"
+        },
+        "date": 1786015617595,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 437135.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 343174.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 423869.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 587588,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 419.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 505.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12630574.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12921763.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12141497.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12454.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 12039115.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14507969.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 138276.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 12147.66,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2602.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2997.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2161.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 62.28,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 62.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 62.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 62.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 62.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 58.19,
             "unit": "ops/sec"
           }
         ]
