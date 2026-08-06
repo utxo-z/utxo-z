@@ -273,45 +273,70 @@ void database_impl::update_metadata_on_delete(size_t index, size_t version) {
     }
 }
 
-void database_impl::save_metadata_to_disk(size_t index, size_t version) {
+namespace {
+
+/// Says how a version came to have no metadata. Absent is the ordinary state
+/// and says nothing; the rest are worth a line, because they mean a file is
+/// there and cannot be believed.
+void report_metadata_read_error(metadata_read_error err, std::string_view where, size_t version) {
+    switch (err) {
+        case metadata_read_error::absent:
+            break;
+        case metadata_read_error::unreadable:
+            log::warn("Metadata for {} v{} could not be read; treating it as unknown", where, version);
+            break;
+        case metadata_read_error::foreign:
+            log::info("Metadata for {} v{} is not in a format this build reads; treating it as unknown",
+                      where, version);
+            break;
+        case metadata_read_error::malformed:
+            log::warn("Metadata for {} v{} is damaged; treating it as unknown. The version file "
+                      "itself is unaffected and remains fully searchable.", where, version);
+            break;
+    }
+}
+
+} // anonymous namespace
+
+void database_impl::save_metadata_to_disk(size_t index, size_t version) noexcept {
     if (index >= catalogs_.size()) return;
     auto const* meta_ptr = catalogs_[index].find_metadata(version);
     if ( ! meta_ptr) return;
 
-    auto const& meta = *meta_ptr;
-    auto metadata_file = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
-
-    std::ofstream ofs(metadata_file, std::ios::binary);
-    if ( ! ofs) {
-        log::warn("Failed to save metadata: {}", metadata_file);
-        return;
+    // Reachable from close(), which runs from destructors and from the scope
+    // guard that compaction unwinds through, so nothing may escape — including
+    // from the reporting itself, and including whatever a formatting or
+    // allocation failure would raise.
+    try {
+        auto const path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
+        if (auto const written = write_metadata_file(path, *meta_ptr); ! written) {
+            // Derived data: failing to persist it costs a rescan later and
+            // nothing else. What must not happen — a half-written record read
+            // back as a valid one — is prevented by publishing through an
+            // atomic replace, not by this branch.
+            log::warn("Could not publish metadata for container {} v{}", index, version);
+        }
+    } catch (...) {
     }
-
-    uint64_t entry_count = meta.entry_count;
-    ofs.write(reinterpret_cast<char const*>(&meta.min_block_height), sizeof(meta.min_block_height));
-    ofs.write(reinterpret_cast<char const*>(&meta.max_block_height), sizeof(meta.max_block_height));
-    ofs.write(reinterpret_cast<char const*>(meta.min_key.data()), meta.min_key.size());
-    ofs.write(reinterpret_cast<char const*>(meta.max_key.data()), meta.max_key.size());
-    ofs.write(reinterpret_cast<char const*>(&entry_count), sizeof(entry_count));
 }
 
 void database_impl::load_metadata_from_disk(size_t index, size_t version) {
-    auto metadata_file = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
+    auto const path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
 
-    std::ifstream ifs(metadata_file, std::ios::binary);
-    if ( ! ifs) return;
+    auto record = read_metadata_file(path);
+    if ( ! record) {
+        // Nothing is created for this version: absent and damaged both leave the
+        // metadata *unknown*, which every consumer must already handle, and
+        // which is the only safe reading of a record we cannot trust. The
+        // version file itself is untouched and fully searchable either way.
+        report_metadata_read_error(record.error(), fmt::format("container {}", index), version);
+        return;
+    }
 
     auto& meta = catalogs_[index].metadata(version);
+    meta = *record;
     meta.container_index = index;
     meta.version = version;
-
-    uint64_t entry_count = 0;
-    ifs.read(reinterpret_cast<char*>(&meta.min_block_height), sizeof(meta.min_block_height));
-    ifs.read(reinterpret_cast<char*>(&meta.max_block_height), sizeof(meta.max_block_height));
-    ifs.read(reinterpret_cast<char*>(meta.min_key.data()), meta.min_key.size());
-    ifs.read(reinterpret_cast<char*>(meta.max_key.data()), meta.max_key.size());
-    ifs.read(reinterpret_cast<char*>(&entry_count), sizeof(entry_count));
-    meta.entry_count = static_cast<size_t>(entry_count);
 }
 
 // =============================================================================
@@ -2201,44 +2226,33 @@ result<> database_impl::compact_compact_container() {
 // database_impl - Compact metadata helpers
 // =============================================================================
 
-void database_impl::compact_save_metadata(size_t version) {
+void database_impl::compact_save_metadata(size_t version) noexcept {
     auto const* meta_ptr = compact_catalog_.find_metadata(version);
     if ( ! meta_ptr) return;
 
-    auto const& meta = *meta_ptr;
-    auto metadata_file = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
-
-    std::ofstream ofs(metadata_file, std::ios::binary);
-    if (!ofs) {
-        log::warn("Failed to save compact metadata: {}", metadata_file);
-        return;
+    // Same boundary as save_metadata_to_disk().
+    try {
+        auto const path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
+        if (auto const written = write_metadata_file(path, *meta_ptr); ! written) {
+            log::warn("Could not publish compact metadata for v{}", version);
+        }
+    } catch (...) {
     }
-
-    uint64_t entry_count = meta.entry_count;
-    ofs.write(reinterpret_cast<char const*>(&meta.min_block_height), sizeof(meta.min_block_height));
-    ofs.write(reinterpret_cast<char const*>(&meta.max_block_height), sizeof(meta.max_block_height));
-    ofs.write(reinterpret_cast<char const*>(meta.min_key.data()), meta.min_key.size());
-    ofs.write(reinterpret_cast<char const*>(meta.max_key.data()), meta.max_key.size());
-    ofs.write(reinterpret_cast<char const*>(&entry_count), sizeof(entry_count));
 }
 
 void database_impl::compact_load_metadata(size_t version) {
-    auto metadata_file = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
+    auto const path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
 
-    std::ifstream ifs(metadata_file, std::ios::binary);
-    if (!ifs) return;
+    auto record = read_metadata_file(path);
+    if ( ! record) {
+        report_metadata_read_error(record.error(), "the compact container", version);
+        return;
+    }
 
     auto& meta = compact_catalog_.metadata(version);
+    meta = *record;
     meta.container_index = compact_sentinel_index;
     meta.version = version;
-
-    uint64_t entry_count = 0;
-    ifs.read(reinterpret_cast<char*>(&meta.min_block_height), sizeof(meta.min_block_height));
-    ifs.read(reinterpret_cast<char*>(&meta.max_block_height), sizeof(meta.max_block_height));
-    ifs.read(reinterpret_cast<char*>(meta.min_key.data()), meta.min_key.size());
-    ifs.read(reinterpret_cast<char*>(meta.max_key.data()), meta.max_key.size());
-    ifs.read(reinterpret_cast<char*>(&entry_count), sizeof(entry_count));
-    meta.entry_count = static_cast<size_t>(entry_count);
 }
 
 // =============================================================================

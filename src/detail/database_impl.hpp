@@ -25,6 +25,7 @@
 
 #include "file_cache.hpp"
 #include "file_metadata.hpp"
+#include "file_metadata_io.hpp"
 #include "scope_exit.hpp"
 #include "version_catalog.hpp"
 #include "utxo_value.hpp"
@@ -168,7 +169,7 @@ private:
     // Metadata management
     void update_metadata_on_insert(size_t index, size_t version, raw_outpoint const& key, uint32_t height);
     void update_metadata_on_delete(size_t index, size_t version);
-    void save_metadata_to_disk(size_t index, size_t version);
+    void save_metadata_to_disk(size_t index, size_t version) noexcept;
     void load_metadata_from_disk(size_t index, size_t version);
 
     // Statistics
@@ -199,7 +200,7 @@ private:
     result<> load_config_from_disk();
 
     // Compact metadata helpers
-    void compact_save_metadata(size_t version);
+    void compact_save_metadata(size_t version) noexcept;
     void compact_load_metadata(size_t version);
 
     // Member variables
