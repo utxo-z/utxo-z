@@ -22,6 +22,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 
 #include <utxoz/types.hpp>
@@ -35,7 +36,9 @@
 #endif
 #include <windows.h>
 #else
+#include <cerrno>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
@@ -78,15 +81,120 @@ inline constexpr sync_support platform_sync_support() noexcept {
  */
 struct failpoints {
     static inline std::atomic<bool> fail_sync_file{false};
+    /// Separate from fail_sync_file: the page barrier and the file barrier
+    /// cover different things and fail for different reasons, so a test that
+    /// cannot drive them apart cannot show that both are wired.
+    static inline std::atomic<bool> fail_sync_mapped_region{false};
     static inline std::atomic<bool> fail_sync_directory{false};
     static inline std::atomic<bool> fail_replace{false};
+    static inline std::atomic<bool> fail_unlink{false};
+    /// Fails only the removals that retire a merge's sources, which is the one
+    /// place where a failure leaves several canonical files holding the same
+    /// keys. A blanket unlink failure would stop the merge long before that.
+    static inline std::atomic<bool> fail_source_unlink{false};
+
+    /// Where to stop the process dead, for the tests that check what a crash at
+    /// each barrier leaves behind. Named after the step that has just finished.
+    enum class crash_point : uint8_t {
+        none,
+        after_build,             ///< target written, nothing synced
+        after_file_sync,         ///< contents durable, no sidecar yet
+        after_sidecar_sync,      ///< sidecar written and synced, not yet named
+        after_sidecar_publish,   ///< sidecar named; target still unpublished
+        after_target_publish,    ///< target named; directory not yet synced
+        before_source_unlink,    ///< everything published, nothing retired
+        mid_source_unlink,       ///< some sources retired, some not
+        after_sources_retired,   ///< sources gone, sidecar still there
+    };
+
+    static inline std::atomic<crash_point> crash_at{crash_point::none};
+
+    /// Which directory barrier to fail. A merge crosses four of them and they
+    /// guard different things, so a single switch that always fires on the
+    /// first call can never reach the later ones — and the barrier after the
+    /// target is published is the one whose failure loses data.
+    enum class dir_barrier : uint8_t {
+        none,
+        after_sidecar,          ///< the record is named; nothing else has happened
+        after_target,           ///< the target is named; no source retired yet
+        after_source_retire,    ///< the sources are gone
+        after_sidecar_removal,  ///< the record is gone
+    };
+
+    static inline std::atomic<dir_barrier> fail_directory_barrier_at{dir_barrier::none};
+
+    /// Fails reopening the active container after a compaction.
+    static inline std::atomic<bool> fail_container_open{false};
+
+    /// Fails the removal of the sidecar, and the barrier that confirms it.
+    static inline std::atomic<bool> fail_sidecar_removal{false};
+
+    /// Runs after the merge record is durable and before the target takes its
+    /// canonical name — the one window a test cannot reach from outside, and
+    /// the one where another process could take the identity.
+    static inline std::atomic<void (*)()> before_target_publish{nullptr};
+
+    /// Makes a merge use a known identifier, so a test does not have to reason
+    /// about real randomness to know what it should find. Zero means "draw one".
+    static inline std::atomic<uint64_t> forced_merge_id{0};
+
+    static void run_before_target_publish() {
+        if (auto* hook = before_target_publish.load(std::memory_order_relaxed)) hook();
+    }
+
+    /// Dies the way a power cut does: no unwinding, no flushing, no destructors.
+    static void maybe_crash(crash_point point) {
+        if (crash_at.load(std::memory_order_relaxed) == point) {
+            ::_exit(99);
+        }
+    }
 
     static void clear() noexcept {
         fail_sync_file.store(false, std::memory_order_relaxed);
+        fail_sync_mapped_region.store(false, std::memory_order_relaxed);
         fail_sync_directory.store(false, std::memory_order_relaxed);
         fail_replace.store(false, std::memory_order_relaxed);
+        fail_unlink.store(false, std::memory_order_relaxed);
+        fail_source_unlink.store(false, std::memory_order_relaxed);
+        crash_at.store(crash_point::none, std::memory_order_relaxed);
+        fail_directory_barrier_at.store(dir_barrier::none, std::memory_order_relaxed);
+        fail_container_open.store(false, std::memory_order_relaxed);
+        fail_sidecar_removal.store(false, std::memory_order_relaxed);
+        before_target_publish.store(nullptr, std::memory_order_relaxed);
+        forced_merge_id.store(0, std::memory_order_relaxed);
     }
 };
+
+/**
+ * @brief Flushes a mapping's dirty pages, synchronously.
+ *
+ * Boost's `managed_mapped_file::flush()` takes no arguments and maps to
+ * `msync(MS_ASYNC)`, which schedules writeback and returns — useful for hinting,
+ * useless as a barrier. This is the barrier.
+ *
+ * It covers the pages and nothing else. POSIX requires it before `fsync` for a
+ * mapped region's stores to be guaranteed visible; on Linux the two share the
+ * page cache and it is redundant, which is not a reason to omit it elsewhere.
+ */
+[[nodiscard]]
+inline result<> sync_mapped_region(void* address, size_t length) {
+    if (failpoints::fail_sync_mapped_region.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::sync_failed);
+    }
+    if (address == nullptr || length == 0) return {};
+
+#if defined(__EMSCRIPTEN__)
+    return std::unexpected(error_code::sync_unsupported);
+#elif defined(_WIN32)
+    return ::FlushViewOfFile(address, length) != 0
+        ? result<>{}
+        : std::unexpected(error_code::sync_failed);
+#else
+    return ::msync(address, length, MS_SYNC) == 0
+        ? result<>{}
+        : std::unexpected(error_code::sync_failed);
+#endif
+}
 
 /**
  * @brief Flushes a file's contents and metadata to stable storage.
@@ -196,6 +304,76 @@ inline result<> replace_file_atomically(fs::path const& from, fs::path const& to
     fs::rename(from, to, ec);
     return ec ? result<>(std::unexpected(error_code::rename_failed)) : result<>{};
 #endif
+}
+
+/**
+ * @brief Moves `from` to `to`, failing if `to` already exists.
+ *
+ * For publishing a file under an identity that has never been used. The
+ * distinction from `replace_file_atomically` is the whole point.
+ *
+ * A merge checks that the name is free before it starts. That check would be
+ * conclusive if one instance were guaranteed to be the only one touching the
+ * database — but nothing enforces that today; it is a documented precondition
+ * and no more, and giving it teeth is #71. So the check is treated as what it
+ * is, a cheap early answer, and the publication itself refuses rather than
+ * replaces. A name taken in between is then caught with the file that took it
+ * intact, instead of destroyed.
+ *
+ * POSIX has no portable rename-if-absent (`RENAME_NOREPLACE` is Linux-only), so
+ * this uses `link` — which fails with EEXIST and is atomic — followed by
+ * unlinking the source. A crash between the two leaves the destination
+ * published, which is the intended outcome, and the source as a stray in the
+ * reserved namespace, which recovery removes.
+ *
+ * @warning `link` needs both names on one filesystem and a filesystem that
+ * supports hard links at all. Both hold for the caller here, which puts its
+ * temporary beside the target in the same directory. Where they do not — a
+ * filesystem that answers `EPERM`, or a database directory that is somehow a
+ * mount boundary away from itself — this returns `rename_failed` and that
+ * compaction simply does not happen. The database is untouched, which is the
+ * right outcome for a merge that cannot be published safely.
+ */
+[[nodiscard]]
+inline result<> publish_new_file(fs::path const& from, fs::path const& to) {
+    if (failpoints::fail_replace.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::rename_failed);
+    }
+
+#if defined(_WIN32)
+    // Without MOVEFILE_REPLACE_EXISTING this fails when the destination is there.
+    if (::MoveFileExW(from.wstring().c_str(), to.wstring().c_str(), 0) != 0) return {};
+
+    // Captured once: any call in between, including one the runtime makes,
+    // would overwrite it.
+    DWORD const last_error = ::GetLastError();
+    return std::unexpected(last_error == ERROR_ALREADY_EXISTS || last_error == ERROR_FILE_EXISTS
+                           ? error_code::identity_collision
+                           : error_code::rename_failed);
+#else
+    if (::link(from.c_str(), to.c_str()) != 0) {
+        int const err = errno;
+        return std::unexpected(err == EEXIST ? error_code::identity_collision
+                                             : error_code::rename_failed);
+    }
+    if (::unlink(from.c_str()) != 0) {
+        // Published, and a stray left behind. Recovery removes it; reporting a
+        // failure here would say the publication did not happen.
+        return {};
+    }
+    return {};
+#endif
+}
+
+/// Removes a path, with a seam for the tests that need it to fail.
+[[nodiscard]]
+inline result<> remove_file(fs::path const& path) {
+    if (failpoints::fail_unlink.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::removal_failed);
+    }
+    std::error_code ec;
+    fs::remove(path, ec);
+    return ec ? result<>(std::unexpected(error_code::removal_failed)) : result<>{};
 }
 
 } // namespace utxoz::detail

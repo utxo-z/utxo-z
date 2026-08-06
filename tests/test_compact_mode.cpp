@@ -229,7 +229,7 @@ TEST_CASE_METHOD(CompactFixture, "Compact: deferred deletions", "[compact]") {
         CHECK(db_->erase(keys[i], 200) == 1);
     }
 
-    auto [deleted, failed] = db_->process_pending_deletions();
+    auto [deleted, failed] = db_->process_pending_deletions().value();
     CHECK(failed.size() == 0);
 
     for (int i = 0; i < 5; ++i) {
@@ -250,9 +250,9 @@ TEST_CASE_METHOD(CompactFixture, "Compact: for_each_key", "[compact]") {
     }
 
     size_t count = 0;
-    db_->for_each_key([&](utxoz::raw_outpoint const&) {
+    REQUIRE(db_->for_each_key([&](utxoz::raw_outpoint const&) {
         ++count;
-    });
+    }));
 
     CHECK(count == 20);
 }
@@ -265,12 +265,12 @@ TEST_CASE_METHOD(CompactFixture, "Compact: for_each_entry", "[compact]") {
     }
 
     size_t count = 0;
-    db_->for_each_entry([&](utxoz::raw_outpoint const&, uint32_t height,
+    REQUIRE(db_->for_each_entry([&](utxoz::raw_outpoint const&, uint32_t height,
                            uint32_t file_number, uint32_t offset) {
         CHECK(height >= 100);
         CHECK(file_number >= 1);
         ++count;
-    });
+    }));
 
     CHECK(count == 20);
 }
@@ -298,7 +298,7 @@ TEST_CASE_METHOD(CompactFixture, "Compact: compaction", "[compact]") {
     for (int i = 0; i < 50; ++i) {
         CHECK(db_->erase(make_test_key(static_cast<uint32_t>(i), 0), 200) == 1);
     }
-    auto [deleted, failed] = db_->process_pending_deletions();
+    auto [deleted, failed] = db_->process_pending_deletions().value();
     CHECK(failed.empty());
 
     // Compact

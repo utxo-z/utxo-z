@@ -276,7 +276,7 @@ int main() {
             // Process pending deletions periodically
             if (block_height % 5 == 0) {
                 log_print("Processing pending deletions...\n");
-                auto [deleted, failed] = db.process_pending_deletions();
+                auto [deleted, failed] = db.process_pending_deletions().value();
                 log_print("  Deleted: {}\n", deleted);
                 log_print("  Failed: {}\n", failed.size());
 
@@ -303,7 +303,7 @@ int main() {
 
         // Final processing
         log_print("Processing final pending deletions...\n");
-        auto [final_deleted, final_failed] = db.process_pending_deletions();
+        auto [final_deleted, final_failed] = db.process_pending_deletions().value();
         log_print("Final deleted: {}\n", final_deleted);
         log_print("Final failed: {}\n", final_failed.size());
 

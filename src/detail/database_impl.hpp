@@ -26,6 +26,7 @@
 #include "file_cache.hpp"
 #include "file_metadata.hpp"
 #include "file_metadata_io.hpp"
+#include "merge_sidecar.hpp"
 #include "scope_exit.hpp"
 #include "version_catalog.hpp"
 #include "utxo_value.hpp"
@@ -62,8 +63,8 @@ struct database_impl {
     size_t deferred_lookups_size() const;
 
     result<> compact_all();
-    void for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
-    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
+    result<> for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
+    result<> for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
     // Typed full-mode methods (no runtime dispatch)
     std::optional<full_find_result> full_find(raw_outpoint const& key, uint32_t height) const;
@@ -73,7 +74,7 @@ struct database_impl {
     result<bool> compact_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
     std::optional<compact_find_result> compact_find_typed(raw_outpoint const& key, uint32_t height) const;
     std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>> compact_process_pending_lookups();
-    void compact_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
+    result<> compact_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 
     database_statistics get_statistics();
     void print_statistics();
@@ -154,6 +155,68 @@ private:
     template<size_t Index>
     result<> compact_container();
 
+    // -- Crash-atomic compaction (see merge_sidecar.hpp) ----------------------
+
+    /// Paths in the store's reserved namespace. Only `.dat` is canonical; the
+    /// rest are invisible to discovery, which is what lets a merge be built
+    /// without ever being half-visible.
+    std::string data_path(size_t index, size_t version) const;
+    std::string building_path(size_t index, size_t version) const;
+    std::string sidecar_path(size_t index, size_t version) const;
+    std::string metadata_path(size_t index, size_t version) const;
+
+    /// Mandatory phase of open(): finishes or abandons whatever a previous
+    /// process left in flight, before any container is opened and therefore
+    /// before an intermediate state could be observed.
+    /// The directory barrier, tagged with which of a merge's four crossings it
+    /// is, so a test can reach any one of them.
+    [[nodiscard]]
+    result<> directory_barrier(failpoints::dir_barrier stage) const;
+
+    /// Reads the marker a merge wrote into its target. Absent, duplicated or
+    /// unreadable are all distinct from "does not match", and none of them let
+    /// a source be retired.
+    [[nodiscard]]
+    result<merge_marker> read_target_marker(size_t index, size_t version) const;
+
+    result<> recover_pending_merges();
+    result<> recover_one(merge_plan const& plan, std::string const& sidecar);
+
+    /// Builds one new version file holding everything in `sources`, publishes
+    /// it, and retires them.
+    template<size_t Index>
+    result<> merge_sources(std::vector<size_t> const& sources);
+    result<> merge_compact_sources(std::vector<size_t> const& sources);
+
+    /// The merging itself, bracketed by compact_container() so that reopening
+    /// the active container is part of the typed result rather than something a
+    /// destructor does and cannot report.
+    template<size_t Index>
+    result<> compact_merge_groups();
+    result<> compact_merge_compact_groups();
+
+    template<size_t Index>
+    result<> reopen_active_container();
+    result<> reopen_active_compact_container();
+
+    /// True once a merge published its target and could not retire everything
+    /// it superseded. Latches: the instance serves nothing further until it is
+    /// closed and reopened, which runs recovery.
+    bool cleanup_pending_ = false;
+
+public:
+    /// Refuses every operation once a merge has published its target and could
+    /// not retire everything it superseded. Until this instance is closed and
+    /// reopened, several canonical files hold the same keys, and serving from
+    /// that state would hand out duplicates.
+    [[nodiscard]]
+    result<> refuse_if_recovery_pending() const {
+        if (cleanup_pending_) return std::unexpected(error_code::recovery_required);
+        return {};
+    }
+
+private:
+
     // Optimal buckets finder
     template<size_t Index>
     size_t find_optimal_buckets(std::string const& file_path, size_t file_size, size_t initial_buckets);
@@ -187,8 +250,8 @@ private:
     void compact_new_version();
     bool compact_can_insert_safely() const;
     result<> compact_compact_container();
-    void compact_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
-    void compact_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
+    result<> compact_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
+    result<> compact_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
     size_t find_optimal_buckets_compact(std::string const& file_path, size_t file_size, size_t initial_buckets);
 

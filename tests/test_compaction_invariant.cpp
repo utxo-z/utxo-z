@@ -66,7 +66,7 @@ std::vector<uint8_t> make_value(size_t size, uint8_t seed) {
 template<typename Db>
 size_t count_occurrences(Db const& db, utxoz::raw_outpoint const& needle) {
     size_t n = 0;
-    db.for_each_key([&](utxoz::raw_outpoint const& k) {
+    (void)db.for_each_key([&](utxoz::raw_outpoint const& k) {
         if (k == needle) ++n;
     });
     return n;
@@ -130,7 +130,7 @@ TEST_CASE("compaction reports a duplicate key instead of dropping one",
             (void)db.erase(k, 300);
         }
         {
-            auto const [deleted, failed] = db.process_pending_deletions();
+            auto const [deleted, failed] = db.process_pending_deletions().value();
             CHECK(failed.empty());
             CHECK(deleted > 0);
         }
@@ -203,7 +203,7 @@ TEST_CASE("compact-mode compaction reports a duplicate key too",
             (void)db.erase(k, 300);
         }
         {
-            auto const [deleted, failed] = db.process_pending_deletions();
+            auto const [deleted, failed] = db.process_pending_deletions().value();
             CHECK(failed.empty());
             CHECK(deleted > 0);
         }
@@ -283,15 +283,13 @@ size_t count_files(std::string const& path, std::string const& prefix) {
 
 /**
  * Compaction rewrites the file layout as it goes — it empties files, removes
- * them and renumbers what is left — and the metadata describes that layout. The
- * failing path has to leave the two agreeing, exactly like the successful one:
- * a metadata file for a version that no longer exists is a description of a
- * database that is not there.
- *
- * The duplicate is placed deep enough that at least one earlier version is
- * drained, removed and renumbered before the collision is reached.
+ * them, and the metadata describes that layout. Under the crash-atomic
+ * protocol a merge that fails changes nothing at all: the new file is built
+ * under a name discovery does not accept and is discarded, and the sources are
+ * only ever read. So the requirement is stronger than it used to be — not
+ * "metadata still matches", but "nothing moved".
  */
-TEST_CASE("a failed compaction leaves metadata describing the files that remain",
+TEST_CASE("a failed compaction leaves the database exactly as it was",
           "[database][compaction][invariant]") {
     auto const path = make_unique_path("meta");
     std::filesystem::remove_all(path);
@@ -337,7 +335,7 @@ TEST_CASE("a failed compaction leaves metadata describing the files that remain"
         for (auto const& k : v0_keys) (void)db.erase(k, 300);
         for (auto const& k : v1_keys) (void)db.erase(k, 300);
         {
-            auto const [deleted, failed] = db.process_pending_deletions();
+            auto const [deleted, failed] = db.process_pending_deletions().value();
             CHECK(failed.empty());
         }
         REQUIRE(count_occurrences(db, dup) == 2);
@@ -348,10 +346,17 @@ TEST_CASE("a failed compaction leaves metadata describing the files that remain"
         REQUIRE_FALSE(compacted.has_value());
         CHECK(compacted.error() == utxoz::error_code::duplicate_key);
 
-        // The run has to have removed and renumbered a version before reaching
-        // the duplicate, or this case would be testing nothing.
+        // Nothing moved. The merge is built beside the database, not inside it.
         INFO("container 0 files: " << files_before << " -> " << count_files(path, "cont_0_v"));
-        REQUIRE(count_files(path, "cont_0_v") < files_before);
+        REQUIRE(count_files(path, "cont_0_v") == files_before);
+
+        // And nothing was left in the reserved namespace to be cleaned up later.
+        for (auto const& entry : std::filesystem::directory_iterator(path)) {
+            auto const name = entry.path().filename().string();
+            INFO("stray file: " << name);
+            CHECK(name.find(".building") == std::string::npos);
+            CHECK(name.find(".merge") == std::string::npos);
+        }
 
         // Both copies still there, and the metadata files match the data files
         // that actually remain — no description of a version that was removed.
@@ -413,7 +418,7 @@ TEST_CASE("compact_all stops at the first inconsistent container",
         }
         for (size_t i = 0; i < c3_keys.size() / 2; ++i) (void)db.erase(c3_keys[i], 300);
         {
-            auto const [deleted, failed] = db.process_pending_deletions();
+            auto const [deleted, failed] = db.process_pending_deletions().value();
             CHECK(failed.empty());
         }
 
@@ -466,7 +471,7 @@ namespace {
 template<typename Db>
 std::vector<utxoz::raw_outpoint> all_keys(Db const& db) {
     std::vector<utxoz::raw_outpoint> keys;
-    db.for_each_key([&](utxoz::raw_outpoint const& k) { keys.push_back(k); });
+    (void)db.for_each_key([&](utxoz::raw_outpoint const& k) { keys.push_back(k); });
     return keys;
 }
 
@@ -605,12 +610,16 @@ TEST_CASE("compaction over a numbering with a hole in it",
 }
 
 /**
- * A removal that fails is a controlled failure, not a silent one. The catalogue
- * describes what is on disk, so it may only drop a version once the file is
- * actually gone — and compaction, which closes the active container before it
- * starts, has to leave one mapped on the way out however it leaves.
+ * A filesystem that refuses is a controlled failure, not a silent one.
+ *
+ * Under the crash-atomic protocol the first thing a merge needs is somewhere to
+ * build, so a directory it cannot write to stops it before anything canonical
+ * is touched. Boost reports that by throwing; this is a result-typed API, so the
+ * failure has to arrive as a value. Compaction also closes the active container
+ * before it starts, and has to put one back however it leaves — including when
+ * it leaves through a throw, which is the path this exercises.
  */
-TEST_CASE("a removal that fails is reported and leaves the database usable",
+TEST_CASE("a directory that cannot be written stops compaction before it changes anything",
           "[database][compaction][recovery]") {
 #ifndef _WIN32
     auto const path = make_unique_path("removefail");
@@ -645,15 +654,13 @@ TEST_CASE("a removal that fails is reported and leaves the database usable",
         std::filesystem::permissions(path, std::filesystem::perms::owner_all, ec);
     });
 
-    // Unlinking needs write permission on the directory, not on the file. The
-    // mapped files stay writable, so compaction gets all the way to the removal
-    // and fails exactly there.
+    // Read and traverse but not write: the merge cannot create its build file.
+    // The existing mapped files stay writable, so nothing else is impeded.
     std::filesystem::permissions(path,
         std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
 
-    // Probe without destroying anything: creating an entry needs the same
-    // directory write permission that unlinking does. root ignores the bits, and
-    // then there is nothing to observe.
+    // Probe without destroying anything. root ignores the bits, and then there
+    // is nothing to observe.
     bool blocked = false;
     {
         std::ofstream probe(path + "/removal_probe.tmp");
@@ -664,10 +671,11 @@ TEST_CASE("a removal that fails is reported and leaves the database usable",
     if (blocked) {
         auto const outcome = db.compact_all();
         REQUIRE_FALSE(outcome);
-        REQUIRE(outcome.error() == utxoz::error_code::removal_failed);
+        // A value, not an exception escaping a result-typed call.
+        REQUIRE(outcome.error() == utxoz::error_code::file_open_failed);
 
-        // The file it could not remove is still there and still catalogued: no
-        // version was dropped on the strength of a removal that did not happen.
+        // Every file exactly where it was: the sources are only ever read, and
+        // the target never got far enough to exist.
         REQUIRE(count_files(path, "cont_0_v") == files_before);
 
         // Writable again, so the rest can check the database still works.

@@ -104,8 +104,12 @@ int main() {
         size_t erased_count = 0;
 
         for (size_t i = 0; i < std::min(size_t(100), inserted_keys.size()); i += 2) {
-            size_t erased = db.erase(inserted_keys[i], 800000);
-            erased_count += erased;
+            auto const erased = db.erase(inserted_keys[i], 800000);
+            if ( ! erased) {
+                fmt::println("erase refused: the database is not serving");
+                return 1;
+            }
+            erased_count += *erased;
         }
 
         fmt::println("Erased {} UTXOs", erased_count);
@@ -113,7 +117,7 @@ int main() {
 
         // Process pending deletions
         fmt::println("Processing pending deletions...");
-        auto [deleted, failed] = db.process_pending_deletions();
+        auto [deleted, failed] = db.process_pending_deletions().value();
         fmt::println("Successfully deleted: {}", deleted);
         fmt::println("Failed deletions: {}\n", failed.size());
 

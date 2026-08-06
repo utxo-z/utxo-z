@@ -19,6 +19,7 @@ add_executable(utxoz_tests
     test_compaction_invariant.cpp
     test_version_catalog.cpp
     test_file_metadata_io.cpp
+    test_compaction_recovery.cpp
 )
 
 target_link_libraries(utxoz_tests

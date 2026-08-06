@@ -102,6 +102,13 @@ target_link_libraries(utxoz
         fmt::fmt-header-only
 )
 
+# The merge identifier comes from the system CSPRNG, which on Windows lives in
+# bcrypt. std::random_device is deliberately not used: the standard allows it to
+# be deterministic.
+if(WIN32)
+    target_link_libraries(utxoz PRIVATE bcrypt)
+endif()
+
 # Log backend configuration (defines are in config.hpp)
 if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
     target_link_libraries(utxoz PRIVATE spdlog::spdlog_header_only)

@@ -142,6 +142,17 @@ enum class error_code : uint8_t {
     sync_unsupported,       ///< This platform has no such durability barrier; nothing was promised
     sync_failed,            ///< A durability barrier was attempted and failed
     rename_failed,          ///< A file could not be moved onto its final name
+    entropy_unavailable,    ///< The system's cryptographic generator would not produce bytes
+    file_open_failed,       ///< A version file could not be created or opened
+    identity_collision,     ///< A version identity about to be published is already taken
+    insufficient_space,     ///< Not enough room for the file an operation must build
+    /// The instance published a merge and could not finish retiring what it
+    /// superseded. Several canonical files hold the same keys, so it refuses
+    /// every further operation: close it and reopen, which runs recovery.
+    recovery_required,
+    /// Recovery found evidence of an interrupted operation that it cannot act
+    /// on. The database does not open; nothing is guessed at or repaired.
+    recovery_failed,
     metadata_write_failed,  ///< A derived metadata record could not be published
 };
 

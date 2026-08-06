@@ -98,7 +98,7 @@ std::vector<uint8_t> make_value(size_t size, uint8_t seed) {
 template<typename Db>
 bool scan_contains(Db const& db, utxoz::raw_outpoint const& needle) {
     bool found = false;
-    db.for_each_key([&](utxoz::raw_outpoint const& k) {
+    (void)db.for_each_key([&](utxoz::raw_outpoint const& k) {
         if (k == needle) found = true;
     });
     return found;
@@ -107,7 +107,7 @@ bool scan_contains(Db const& db, utxoz::raw_outpoint const& needle) {
 template<typename Db>
 size_t scan_count(Db const& db) {
     size_t n = 0;
-    db.for_each_key([&](utxoz::raw_outpoint const&) { ++n; });
+    (void)db.for_each_key([&](utxoz::raw_outpoint const&) { ++n; });
     return n;
 }
 
@@ -160,7 +160,7 @@ size_t fill_until_container0_rotates(utxoz::full_db& db,
             for (size_t i = 0; i < to_spend; ++i) {
                 (void)db.erase(spendable[i], height);
             }
-            auto const [deleted, failed] = db.process_pending_deletions();
+            auto const [deleted, failed] = db.process_pending_deletions().value();
             (void)deleted;
             (void)failed;
             spendable = created;
@@ -227,7 +227,7 @@ TEST_CASE("find(): before rotation resolves inline, after rotation it defers",
         CHECK(db.deferred_lookups_size() == 1);
 
         // process_pending_lookups() is the definitive answer.
-        auto const [found, missing] = db.process_pending_lookups();
+        auto const [found, missing] = db.process_pending_lookups().value();
         CHECK(missing.empty());
         REQUIRE(found.contains(witness));
         CHECK(found.at(witness).data == witness_value);
@@ -298,7 +298,7 @@ TEST_CASE("find(): one process_pending_lookups() resolves deferrals from every c
         }
         CHECK(db.deferred_lookups_size() == utxoz::container_count);
 
-        auto const [found, missing] = db.process_pending_lookups();
+        auto const [found, missing] = db.process_pending_lookups().value();
         CHECK(missing.empty());
         for (size_t i = 0; i < utxoz::container_count; ++i) {
             INFO("container " << i);
@@ -332,7 +332,7 @@ TEST_CASE("find(): a key that exists nowhere comes back in the failed list",
         auto const absent = random_outpoint(rng, 99);
         CHECK_FALSE(db.find(absent, 11).has_value());
 
-        auto const [found, missing] = db.process_pending_lookups();
+        auto const [found, missing] = db.process_pending_lookups().value();
         CHECK(found.empty());
         REQUIRE(missing.size() == 1);
         CHECK(missing[0].key == absent);
@@ -377,11 +377,13 @@ TEST_CASE("erase(): after rotation it defers, process_pending_deletions() is def
         // ...but erase() cannot see them, so it defers. A 0 here is not "absent".
         size_t erased_inline = 0;
         for (auto const& key : early) {
-            erased_inline += db.erase(key, height);
+            auto const erased = db.erase(key, height);
+            REQUIRE(erased);   // value_or would swallow closed and recovery_required
+            erased_inline += *erased;
         }
         CHECK(db.deferred_deletions_size() == early.size() - erased_inline);
 
-        auto const [deleted, failed] = db.process_pending_deletions();
+        auto const [deleted, failed] = db.process_pending_deletions().value();
         CHECK(failed.empty());
         CHECK(erased_inline + deleted == early.size());
         CHECK(db.deferred_deletions_size() == 0);
@@ -391,7 +393,7 @@ TEST_CASE("erase(): after rotation it defers, process_pending_deletions() is def
             CHECK_FALSE(db.find(key, height).has_value());
             CHECK_FALSE(scan_contains(db, key));
         }
-        auto const [found_after, missing_after] = db.process_pending_lookups();
+        auto const [found_after, missing_after] = db.process_pending_lookups().value();
         CHECK(found_after.empty());
         CHECK(missing_after.size() == early.size());
 
@@ -423,18 +425,18 @@ TEST_CASE("lookups must be processed before deletions within a batch",
 
         // Same batch: the key is read and spent. Both operations defer.
         CHECK_FALSE(db.find(key, height).has_value());
-        CHECK(db.erase(key, height) == 0);
+        CHECK(db.erase(key, height).value() == 0);
         CHECK(db.deferred_lookups_size() == 1);
         CHECK(db.deferred_deletions_size() == 1);
 
         // Lookups first: the value is still readable.
-        auto const [found, missing] = db.process_pending_lookups();
+        auto const [found, missing] = db.process_pending_lookups().value();
         CHECK(missing.empty());
         REQUIRE(found.contains(key));
         CHECK(found.at(key).data == value);
 
         // Deletions second: now it is removed.
-        auto const [deleted, failed] = db.process_pending_deletions();
+        auto const [deleted, failed] = db.process_pending_deletions().value();
         CHECK(failed.empty());
         CHECK(deleted == 1u);
         CHECK_FALSE(scan_contains(db, key));
@@ -484,7 +486,7 @@ TEST_CASE("compact find(): after rotation it defers, process_pending_lookups() i
         CHECK_FALSE(db.find(witness, height).has_value());
         CHECK(db.deferred_lookups_size() == 1);
 
-        auto const [found, missing] = db.process_pending_lookups();
+        auto const [found, missing] = db.process_pending_lookups().value();
         CHECK(missing.empty());
         REQUIRE(found.contains(witness));
         CHECK(found.at(witness).file_number == 42u);
@@ -564,7 +566,7 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
 
         auto const erase_all = [&](std::vector<utxoz::raw_outpoint> const& keys) {
             for (auto const& k : keys) (void)db.erase(k, height);
-            auto const [deleted, failed] = db.process_pending_deletions();
+            auto const [deleted, failed] = db.process_pending_deletions().value();
             (void)deleted;
             CHECK(failed.empty());
         };
@@ -584,7 +586,7 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         // under its (container_index, version) key.
         for (auto const& k : probes) (void)db.find(k, height);
         {
-            auto const [found, missing] = db.process_pending_lookups();
+            auto const [found, missing] = db.process_pending_lookups().value();
             CHECK(missing.empty());
             CHECK(found.size() == probes.size());
         }
@@ -611,16 +613,18 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         for (auto const& k : probes) {
             if (db.find(k, height).has_value()) ++found_inline;
         }
-        auto const [found, missing] = db.process_pending_lookups();
+        auto const [found, missing] = db.process_pending_lookups().value();
         CHECK(missing.empty());
         CHECK(found_inline + found.size() == probes.size());
 
         // Deletions applied after compaction must land on the real files.
         size_t erased_inline = 0;
         for (auto const& k : probes) {
-            erased_inline += db.erase(k, height);
+            auto const erased = db.erase(k, height);
+            REQUIRE(erased);   // value_or would swallow closed and recovery_required
+            erased_inline += *erased;
         }
-        auto const [deleted, failed] = db.process_pending_deletions();
+        auto const [deleted, failed] = db.process_pending_deletions().value();
         CHECK(failed.empty());
         CHECK(erased_inline + deleted == probes.size());
         for (auto const& k : probes) {
@@ -679,7 +683,7 @@ TEST_CASE("the deferred contract holds at production sizing (~6.6M live UTXOs)",
         CHECK_FALSE(db.find(witness, height).has_value());
         CHECK(db.deferred_lookups_size() == 1);
 
-        auto const [found, missing] = db.process_pending_lookups();
+        auto const [found, missing] = db.process_pending_lookups().value();
         CHECK(missing.empty());
         REQUIRE(found.contains(witness));
         CHECK(found.at(witness).data == witness_value);
