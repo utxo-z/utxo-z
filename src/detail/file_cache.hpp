@@ -23,6 +23,7 @@
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <fmt/format.h>
 
+#include "segment_open.hpp"
 #include "utxo_value.hpp"
 
 namespace utxoz::detail {
@@ -87,8 +88,7 @@ struct file_cache {
 
         // Open file
         auto file_path = make_file_path(container_index, version);
-        auto segment = std::make_unique<bip::managed_mapped_file>(
-            bip::open_only, file_path.c_str());
+        auto segment = open_existing_segment(file_path);
 
         auto* map = segment->find<utxo_map<container_sizes[Index]>>("db_map").first;
         if (!map) {
@@ -125,8 +125,7 @@ struct file_cache {
         }
 
         auto file_path = make_file_path(compact_sentinel_index, version);
-        auto segment = std::make_unique<bip::managed_mapped_file>(
-            bip::open_only, file_path.c_str());
+        auto segment = open_existing_segment(file_path);
 
         auto* map = segment->find<compact_map_t>("db_map").first;
         if (!map) {

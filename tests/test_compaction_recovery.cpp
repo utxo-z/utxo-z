@@ -46,6 +46,7 @@
 
 #include "detail/durability.hpp"
 #include "detail/merge_sidecar.hpp"
+#include "detail/segment_open.hpp"
 #include "detail/scope_exit.hpp"
 
 namespace fs = std::filesystem;
@@ -1473,3 +1474,277 @@ TEST_CASE("a compaction that cannot reopen its active container says so",
 }
 
 #endif // _WIN32
+
+/**
+ * A file at a canonical name that is not one of ours must be rejected at once.
+ *
+ * Boost, handed a mapped file whose header does not read as initialised,
+ * assumes another process is midway through creating it and spins waiting —
+ * `BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC`, five
+ * minutes by default — before reporting corruption. Nothing here waits on
+ * another process creating a segment, so that wait is pure delay: an open that
+ * meets a truncated version file would stall for five minutes, and for five
+ * minutes *per file* if several were damaged.
+ *
+ * Two things prevent it: the size check that refuses a file too small to be one
+ * of ours before Boost ever sees it, and the build's cap on that timeout. They
+ * are complementary — the first is instant and covers the common case, the
+ * second bounds anything the first cannot recognise.
+ *
+ * The bound below is what distinguishes them from their absence. With the size
+ * check the traversal takes milliseconds; with only the timeout cap it takes
+ * about twenty seconds; with neither, five minutes. Five seconds is therefore
+ * loose by three orders of magnitude against the real figure and still fails if
+ * either protection is removed. It is not measuring performance — the outcome
+ * is the same error either way, so elapsed time is the only observable that
+ * changes.
+ */
+TEST_CASE("a truncated version file is refused promptly, not after a long wait",
+          "[database][recovery]") {
+    auto const path = unique_path("truncated");
+    fs::remove_all(path);
+    scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
+
+    auto const expected = build_mergeable(path, 3);
+    REQUIRE_FALSE(expected.empty());
+
+    // Truncate a version that is not the active one, so a traversal reaches it.
+    std::vector<std::string> older;
+    for (auto const& entry : fs::directory_iterator(path)) {
+        auto const name = entry.path().filename().string();
+        if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+    }
+    std::ranges::sort(older);
+    REQUIRE(older.size() >= 3);
+
+    auto const victim = fs::path(path) / older.front();
+    REQUIRE(fs::file_size(victim) > 1024);
+    {
+        std::ofstream ofs(victim, std::ios::binary | std::ios::trunc);
+        ofs << "far too small to be a segment";
+    }
+
+    auto opened = utxoz::full_db::open_for_testing(path);
+    REQUIRE(opened);
+    auto db = std::move(*opened);
+
+    auto const start = std::chrono::steady_clock::now();
+    auto const scanned = db.for_each_key([](utxoz::raw_outpoint const&) {});
+    auto const elapsed = std::chrono::steady_clock::now() - start;
+
+    REQUIRE_FALSE(scanned);
+    CHECK(scanned.error() == utxoz::error_code::file_open_failed);
+
+    auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    INFO("the traversal took " << millis << " ms");
+    CHECK(millis < 5000);
+
+    db.close();
+}
+
+/**
+ * The same preflight, reached through the file cache.
+ *
+ * Historical resolution does not open version files directly — it goes through
+ * the cache, which had its own `open_only` and so its own five-minute wait. The
+ * property worth testing is not "database_impl checks" but "every opening of an
+ * existing version goes through the same preflight", and the cache is the path
+ * a node actually spends its time on: a deferred lookup or deletion sweeping
+ * back through older generations.
+ *
+ * As above, the bound is what distinguishes the preflight from its absence; the
+ * error is the same either way.
+ */
+TEST_CASE("a truncated version reached through the file cache is refused promptly",
+          "[database][recovery][cache]") {
+    SECTION("full mode, through a deferred lookup") {
+        auto const path = unique_path("cachetrunc_full");
+        fs::remove_all(path);
+        scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
+
+        auto const expected = build_mergeable(path, 3);
+        REQUIRE_FALSE(expected.empty());
+
+        // A key that lives in an older generation, so resolving it has to walk
+        // back through the version the cache will open.
+        auto const witness = expected.front();
+
+        std::vector<std::string> older;
+        for (auto const& entry : fs::directory_iterator(path)) {
+            auto const name = entry.path().filename().string();
+            if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+        }
+        std::ranges::sort(older);
+        REQUIRE(older.size() >= 3);
+
+        {
+            std::ofstream ofs(fs::path(path) / older.front(), std::ios::binary | std::ios::trunc);
+            ofs << "far too small to be a segment";
+        }
+
+        auto opened = utxoz::full_db::open_for_testing(path);
+        REQUIRE(opened);
+        auto db = std::move(*opened);
+
+        // Misses the active map and defers, which is what sends the sweep
+        // through the cache.
+        CHECK_FALSE(db.find(witness, 900));
+
+        auto const start = std::chrono::steady_clock::now();
+        auto const resolved = db.process_pending_lookups();
+        auto const elapsed = std::chrono::steady_clock::now() - start;
+
+        // Semantics before timing. A sweep that returned an error immediately —
+        // before it ever reached the cache — would also be fast, and the
+        // stopwatch alone would call that a pass.
+        REQUIRE(resolved);
+        auto const& [found, unresolved] = *resolved;
+
+        CHECK_FALSE(found.contains(witness));
+        CHECK(std::ranges::any_of(unresolved,
+                                  [&](auto const& entry) { return entry.key == witness; }));
+
+        auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+        INFO("the sweep took " << millis << " ms");
+        CHECK(millis < 5000);
+
+        db.close();
+    }
+
+    SECTION("compact mode, through a deferred lookup") {
+        auto const path = unique_path("cachetrunc_compact");
+        fs::remove_all(path);
+        scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
+
+        utxoz::raw_outpoint witness{};
+
+        {
+            auto opened = utxoz::compact_db::open_for_testing(path, true);
+            REQUIRE(opened);
+            auto db = std::move(*opened);
+
+            witness = make_key(0);
+            uint64_t next = 0;
+            while (count_matching_exact(path, "compact_v") < 3) {
+                REQUIRE(db.insert(make_key(next), next % 1000, uint32_t(next), 100).value());
+                ++next;
+                REQUIRE(next < 3'000'000);
+            }
+            db.close();
+        }
+
+        std::vector<std::string> older;
+        for (auto const& entry : fs::directory_iterator(path)) {
+            auto const name = entry.path().filename().string();
+            if (name.rfind("compact_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+        }
+        std::ranges::sort(older);
+        REQUIRE(older.size() >= 3);
+
+        {
+            std::ofstream ofs(fs::path(path) / older.front(), std::ios::binary | std::ios::trunc);
+            ofs << "far too small to be a segment";
+        }
+
+        auto opened = utxoz::compact_db::open_for_testing(path);
+        REQUIRE(opened);
+        auto db = std::move(*opened);
+
+        CHECK_FALSE(db.find(witness, 900));
+
+        auto const start = std::chrono::steady_clock::now();
+        auto const resolved = db.process_pending_lookups();
+        auto const elapsed = std::chrono::steady_clock::now() - start;
+
+        // See above: the sweep has to have reached that request, not merely
+        // returned quickly.
+        REQUIRE(resolved);
+        auto const& [found, unresolved] = *resolved;
+
+        CHECK_FALSE(found.contains(witness));
+        CHECK(std::ranges::any_of(unresolved,
+                                  [&](auto const& entry) { return entry.key == witness; }));
+
+        auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+        INFO("the sweep took " << millis << " ms");
+        CHECK(millis < 5000);
+
+        db.close();
+    }
+}
+
+/**
+ * The other half of the protection, on its own.
+ *
+ * The preflight recognises a file too small to be one of ours. It cannot
+ * recognise a file of exactly the right size whose header happens not to say
+ * "initialised" — and that is the state Boost interprets as *another process is
+ * still creating this*, which is what it waits for.
+ *
+ * This case builds precisely that: a version file of the configured size with
+ * `InitializingSegment` written into its header word. The preflight passes it,
+ * so what is left is the build's cap on Boost's timeout, and nothing else.
+ *
+ * Kept apart from the truncated-file case deliberately. That one pins the
+ * preflight and finishes in milliseconds; this one pins the fallback and takes
+ * about ten seconds. Folded together, whichever fired first would hide the
+ * other, and a regression in either would still look green.
+ */
+TEST_CASE("a file whose header claims a creation in progress is not waited on for five minutes",
+          "[database][recovery][slow]") {
+    auto const path = unique_path("initializing");
+    fs::remove_all(path);
+    scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
+
+    auto const expected = build_mergeable(path, 3);
+    REQUIRE_FALSE(expected.empty());
+
+    std::vector<std::string> older;
+    for (auto const& entry : fs::directory_iterator(path)) {
+        auto const name = entry.path().filename().string();
+        if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+    }
+    std::ranges::sort(older);
+    REQUIRE(older.size() >= 3);
+
+    auto const victim = fs::path(path) / older.front();
+    auto const original_size = fs::file_size(victim);
+
+    // Boost's states are Uninitialized, Initializing, Initialized, Corrupted —
+    // in that order, in a uint32 at offset zero. `Initializing` is the one it
+    // waits on; `Corrupted` it reports at once, which would not exercise this.
+    {
+        std::fstream f(victim, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(f);
+        uint32_t const initializing = 1;
+        f.seekp(0);
+        f.write(reinterpret_cast<char const*>(&initializing), sizeof(initializing));
+        REQUIRE(f);
+    }
+
+    // The size is untouched, so the preflight has nothing to object to — which
+    // is the point: this reaches Boost.
+    REQUIRE(fs::file_size(victim) == original_size);
+    REQUIRE(original_size >= utxoz::detail::smallest_configured_file);
+
+    auto opened = utxoz::full_db::open_for_testing(path);
+    REQUIRE(opened);
+    auto db = std::move(*opened);
+
+    auto const start = std::chrono::steady_clock::now();
+    auto const scanned = db.for_each_key([](utxoz::raw_outpoint const&) {});
+    auto const elapsed = std::chrono::steady_clock::now() - start;
+
+    REQUIRE_FALSE(scanned);
+    CHECK(scanned.error() == utxoz::error_code::file_open_failed);
+
+    auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+    INFO("the traversal took " << seconds << " seconds");
+
+    // Generous: the cap is ten seconds, the default it replaces is three
+    // hundred. Anything in between says the cap is in force; thirty leaves room
+    // for a slow machine without coming close to the default.
+    CHECK(seconds < 30);
+
+    db.close();
+}

@@ -188,7 +188,7 @@ void database_impl::new_version() {
 template<size_t Index>
 std::unique_ptr<bip::managed_mapped_file> database_impl::open_container_file(size_t version) {
     auto file_name = fmt::format(data_file_format, db_path_.string(), Index, version);
-    return std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+    return open_existing_segment(file_name);
 }
 
 // =============================================================================
@@ -439,7 +439,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         for (auto const v : compact_catalog_.below(latest_version)) {
             auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
             try {
-                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto segment = open_existing_segment(file_name);
                 auto* map_ptr = segment->template find<compact_map_t>("db_map").first;
                 if (map_ptr) {
                     entries_count_ += map_ptr->size();
@@ -490,7 +490,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
             for (auto const v : catalogs_[I].below(latest_version)) {
                 auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
                 try {
-                    auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                    auto segment = open_existing_segment(file_name);
                     auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
                     if (map_ptr) {
                         entries_count_ += map_ptr->size();
@@ -1204,8 +1204,8 @@ result<> database_impl::directory_barrier(failpoints::dir_barrier stage) const {
 result<merge_marker> database_impl::read_target_marker(size_t index, size_t version) const {
     auto const path = data_path(index, version);
     try {
-        bip::managed_mapped_file segment(bip::open_only, path.c_str());
-        auto const found = segment.find<merge_marker>(merge_marker::object_name);
+        auto const segment = open_existing_segment(path);
+        auto const found = segment->find<merge_marker>(merge_marker::object_name);
         if (found.first == nullptr) {
             log::error("recovery: {} carries no merge marker", path);
             return std::unexpected(error_code::recovery_failed);
@@ -1672,8 +1672,7 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
         meta.container_index = Index;
         meta.version = target;
         try {
-            auto segment = std::make_unique<bip::managed_mapped_file>(
-                bip::open_only, data_path(Index, target).c_str());
+            auto segment = open_existing_segment(data_path(Index, target));
             if (auto* map_ptr =
                     segment->template find<utxo_map<container_sizes[Index]>>("db_map").first) {
                 for (auto const& [key, val] : *map_ptr) {
@@ -1808,7 +1807,7 @@ result<> database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&),
             auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
 
             try {
-                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto segment = open_existing_segment(file_name);
                 auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
                 if (!map_ptr) continue;
 
@@ -1846,7 +1845,7 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
             auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
 
             try {
-                auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+                auto segment = open_existing_segment(file_name);
                 auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
                 if (!map_ptr) continue;
 
@@ -2462,7 +2461,7 @@ result<> database_impl::compact_for_each_key(void(*cb)(void*, raw_outpoint const
         auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
 
         try {
-            auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+            auto segment = open_existing_segment(file_name);
             auto* map_ptr = segment->find<compact_map_t>("db_map").first;
             if (!map_ptr) continue;
 
@@ -2497,7 +2496,7 @@ result<> database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint con
         auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
 
         try {
-            auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+            auto segment = open_existing_segment(file_name);
             auto* map_ptr = segment->find<compact_map_t>("db_map").first;
             if (!map_ptr) continue;
 
@@ -2560,8 +2559,7 @@ result<> database_impl::merge_compact_sources(std::vector<size_t> const& sources
         segment->construct<merge_marker>(merge_marker::object_name)(merge_id);
 
         for (auto const source : sources) {
-            auto source_segment = std::make_unique<bip::managed_mapped_file>(
-                bip::open_only, data_path(idx, source).c_str());
+            auto source_segment = open_existing_segment(data_path(idx, source));
             auto* source_map = source_segment->find<compact_map_t>("db_map").first;
             if ( ! source_map) continue;
 
@@ -2734,8 +2732,7 @@ result<> database_impl::merge_compact_sources(std::vector<size_t> const& sources
         meta.container_index = idx;
         meta.version = target;
         try {
-            auto segment = std::make_unique<bip::managed_mapped_file>(
-                bip::open_only, data_path(idx, target).c_str());
+            auto segment = open_existing_segment(data_path(idx, target));
             if (auto* map_ptr = segment->find<compact_map_t>("db_map").first) {
                 for (auto const& [key, val] : *map_ptr) meta.update_on_insert(key, val.height);
             }
@@ -3229,7 +3226,7 @@ result<> database_impl::compact_for_each_entry_typed(
         auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
 
         try {
-            auto segment = std::make_unique<bip::managed_mapped_file>(bip::open_only, file_name.c_str());
+            auto segment = open_existing_segment(file_name);
             auto* map_ptr = segment->find<compact_map_t>("db_map").first;
             if (!map_ptr) continue;
 

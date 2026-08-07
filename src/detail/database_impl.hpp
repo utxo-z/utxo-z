@@ -28,6 +28,7 @@
 #include "file_metadata_io.hpp"
 #include "merge_sidecar.hpp"
 #include "scope_exit.hpp"
+#include "segment_open.hpp"
 #include "version_catalog.hpp"
 #include "utxo_value.hpp"
 
