@@ -23,6 +23,7 @@
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <fmt/format.h>
 
+#include "durability.hpp"
 #include "segment_open.hpp"
 #include "utxo_value.hpp"
 
@@ -161,6 +162,31 @@ struct file_cache {
      */
     void clear() {
         cache_.clear();
+    }
+
+    /**
+     * @brief Flushes the dirty pages of every mapping the cache holds.
+     *
+     * Historical resolution erases entries in older version files through this
+     * cache, so those mappings carry writes that no active container knows
+     * about. A sync that covered only the active containers would report the
+     * database durable while the deletions a batch applied to older generations
+     * were still nowhere but memory.
+     *
+     * The pages only. Making the files themselves durable is the caller's next
+     * step, and it needs their paths, which it already has.
+     */
+    [[nodiscard]]
+    result<> sync_mappings() const {
+        for (auto const& [file_key, cf] : cache_) {
+            if ( ! cf.segment) continue;
+            if (auto const synced = sync_mapped_region(cf.segment->get_address(),
+                                                       cf.segment->get_size());
+                ! synced && synced.error() != error_code::sync_unsupported) {
+                return synced;
+            }
+        }
+        return {};
     }
 
     std::vector<std::pair<size_t, size_t>> get_cached_files() const {

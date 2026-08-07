@@ -56,6 +56,20 @@ size_t db_base::deferred_lookups_size() const {
     return impl_ ? impl_->deferred_lookups_size() : 0;
 }
 
+durability_level platform_durability() noexcept {
+    switch (detail::platform_sync_support()) {
+        case detail::sync_support::full:      return durability_level::full;
+        case detail::sync_support::file_only: return durability_level::contents_only;
+        case detail::sync_support::none:      return durability_level::none;
+    }
+    return durability_level::none;
+}
+
+result<> db_base::sync() {
+    if ( ! impl_) return std::unexpected(error_code::closed);
+    return impl_->sync();
+}
+
 result<> db_base::compact_all() {
     if (!impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());

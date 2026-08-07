@@ -170,6 +170,18 @@ void database_impl::close_container() {
 
 template<size_t Index>
 void database_impl::new_version() {
+    // The version being retired received every insert since it was opened, and
+    // closing it flushes asynchronously — which schedules writeback and
+    // promises nothing. Once it stops being active it is no longer covered by
+    // the active-container barriers, so the obligation is recorded here.
+    //
+    // Recorded at the rotation rather than at each insert on purpose: the
+    // active version is covered as an active container for as long as it is
+    // one, so the only moment coverage could be lost is the moment it stops
+    // being active. Marking per insert would put a set lookup on the hot path
+    // to record something already known.
+    note_dirty(Index, current_versions_[Index]);
+
     close_container<Index>();
 
     // The file first, the catalogue after. Publishing the identity before the
@@ -420,6 +432,11 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
     auto const config_exists = path_exists(config_path);
     if ( ! config_exists) return std::unexpected(config_exists.error());
 
+    // Written once, when the database is created, and never again: the content
+    // does not change, and rewriting it on every open would put a barrier — and
+    // a way to fail — on a path that has nothing to say.
+    bool must_write_config = false;
+
     if (*config_exists && !remove_existing) {
         if (auto r = load_config_from_disk(); !r) {
             return std::unexpected(r.error());
@@ -428,6 +445,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
             return std::unexpected(error_code::storage_mode_mismatch);
         }
     } else {
+        must_write_config = true;
         // No config file — check for pre-existing data files from the other mode
         if (!remove_existing) {
             auto const other_mode_file = mode == storage_mode::compact
@@ -548,7 +566,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         });
     }
 
-    save_config_to_disk();
+    if (must_write_config) return save_config_to_disk();
     return {};
 }
 
@@ -788,6 +806,10 @@ size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint
                         ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[Index];
 #endif
 
+                        // A historical file written to outside the sweep. The
+                        // obligation is the same, and so is the reason: the
+                        // mapping can be evicted before the next sync.
+                        note_dirty(container_index, version);
                         update_metadata_on_delete(Index, version);
                         result = 1;
                     }
@@ -941,6 +963,9 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
             while (it != deferred_deletions_.end()) {
                 auto erased_count = map.erase(it->key);
                 if (erased_count > 0) {
+                    // Written to. The obligation outlives the mapping, which
+                    // the LRU may evict before this sweep is over.
+                    note_dirty(container_index, version);
                     update_metadata_on_delete(Index, version);
 #ifdef UTXOZ_STATISTICS_ENABLED
                     auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
@@ -976,6 +1001,7 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
             while (it != deferred_deletions_.end()) {
                 auto erased_count = map.erase(it->key);
                 if (erased_count > 0) {
+                    note_dirty(compact_sentinel_index, version);
                     if (auto* meta = compact_catalog_.find_metadata(version)) {
                         meta->update_on_delete();
                     }
@@ -1653,7 +1679,13 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
 
     // Published. From here the sources are redundant and the catalogue says so.
     catalogs_[Index].add(target);
-    for (auto const source : sources) catalogs_[Index].remove(source);
+    for (auto const source : sources) {
+        catalogs_[Index].remove(source);
+        // The obligation goes with the file. Its entries are in the target,
+        // which was made durable before it was published, so there is nothing
+        // left to flush and nothing left to flush it to.
+        dirty_versions_.erase({Index, source});
+    }
 
     // Retire the sources. Every failure is recorded and the rest are still
     // attempted, but the operation does not report success while any of them
@@ -1903,6 +1935,104 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
     });
 
     return outcome;
+}
+
+/**
+ * Puts everything written so far on stable storage.
+ *
+ * Three things carry writes and all three are covered. The active container of
+ * each size class, obviously. The mappings the file cache holds, less
+ * obviously: historical resolution erases entries in older generations through
+ * it, so a sync that covered only the active containers would report a database
+ * durable while a batch's deletions to older files were still nowhere but
+ * memory. And the directory, because a file that exists only in an unflushed
+ * directory entry is a file that does not exist.
+ *
+ * Each mapping is flushed before the file that backs it: the page barrier
+ * covers the dirty pages, the file barrier covers the inode, and neither covers
+ * the other.
+ *
+ * Derived metadata is deliberately **not** part of the promise. Losing a
+ * metadata record costs a rescan and nothing else — an absent or damaged one
+ * degrades to "unknown", which every consumer already handles — so paying a
+ * barrier per record would buy nothing a caller could use. What sync() promises
+ * is that the entries are there.
+ */
+result<> database_impl::sync() {
+    if (auto const ready = refuse_if_recovery_pending(); ! ready) {
+        return std::unexpected(ready.error());
+    }
+
+    if constexpr (platform_sync_support() == sync_support::none) {
+        // Emscripten. There is no stable storage to reach, and returning
+        // success would be a promise nothing here can keep.
+        return std::unexpected(error_code::sync_unsupported);
+    }
+
+    // Absorbed where a platform simply has no such barrier; propagated when one
+    // exists and failed. A caller that needs to know what this platform can
+    // promise asks platform_sync_support() rather than inferring it from a
+    // success here.
+    auto barrier = [](result<> outcome) -> result<> {
+        if ( ! outcome && outcome.error() == error_code::sync_unsupported) return {};
+        return outcome;
+    };
+
+    if (mode_ == storage_mode::compact) {
+        if (compact_segment_) {
+            if (auto const r = barrier(sync_mapped_region(compact_segment_->get_address(),
+                                                          compact_segment_->get_size()));
+                ! r) {
+                return r;
+            }
+            if (auto const r = barrier(sync_file(data_path(compact_sentinel_index,
+                                                           compact_current_version_)));
+                ! r) {
+                return r;
+            }
+        }
+    } else {
+        result<> outcome;
+        for_each_index<container_count>([&](auto I) {
+            if ( ! outcome.has_value()) return;
+            if ( ! segments_[I]) return;
+
+            outcome = barrier(sync_mapped_region(segments_[I]->get_address(),
+                                                 segments_[I]->get_size()));
+            if ( ! outcome.has_value()) return;
+
+            outcome = barrier(sync_file(data_path(I, current_versions_[I])));
+        });
+        if ( ! outcome.has_value()) return outcome;
+    }
+
+    // The pages of whatever mappings are still resident. Only the resident ones
+    // can be flushed this way — the rest were unmapped, and unmapping is not a
+    // barrier, which is why the file barriers below are driven by the dirty
+    // register and not by what the cache happens to be holding.
+    if (file_cache_) {
+        if (auto const r = barrier(file_cache_->sync_mappings()); ! r) return r;
+    }
+
+    // Every version this instance wrote to and has not yet made durable,
+    // whether or not its mapping survived. A sweep that deletes from three
+    // generations evicts the first two before it ends; walking the cache would
+    // flush the third and call the database durable.
+    for (auto const& [container_index, version] : dirty_versions_) {
+        if (auto const r = barrier(sync_file(data_path(container_index, version))); ! r) {
+            // Nothing is discharged. An obligation half met is an obligation,
+            // and the next sync has to attempt all of them again.
+            return r;
+        }
+    }
+
+    // A rotation creates a file, and a file nothing has flushed the directory
+    // for is a file that may not be there after a power cut.
+    if (auto const r = barrier(sync_directory(db_path_)); ! r) return r;
+
+    // Only now, with every barrier this call owed having returned.
+    dirty_versions_.clear();
+    return {};
 }
 
 result<> database_impl::compact_all() {
@@ -2337,6 +2467,11 @@ void database_impl::compact_close_container() {
 }
 
 void database_impl::compact_new_version() {
+    // See new_version(): the retiring version stops being covered as an active
+    // container the moment it stops being one, and closing it only schedules
+    // writeback.
+    note_dirty(compact_sentinel_index, compact_current_version_);
+
     compact_close_container();
 
     // The file first, the catalogue after: see new_version().
@@ -2445,6 +2580,7 @@ size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
 #endif
                     map.erase(it);
 
+                    note_dirty(compact_sentinel_index, version);   // see the full-mode path
                     if (auto* meta = compact_catalog_.find_metadata(version)) {
                         meta->update_on_delete();
                     }
@@ -2724,7 +2860,10 @@ result<> database_impl::merge_compact_sources(std::vector<size_t> const& sources
     failpoints::maybe_crash(failpoints::crash_point::before_source_unlink);
 
     compact_catalog_.add(target);
-    for (auto const source : sources) compact_catalog_.remove(source);
+    for (auto const source : sources) {
+        compact_catalog_.remove(source);
+        dirty_versions_.erase({compact_sentinel_index, source});   // see merge_sources()
+    }
 
     auto retire = [](std::string const& path) -> result<> {
         if (failpoints::fail_source_unlink.load(std::memory_order_relaxed)) {
@@ -2889,25 +3028,70 @@ void database_impl::compact_load_metadata(size_t version) {
 // database_impl - Config persistence
 // =============================================================================
 
-void database_impl::save_config_to_disk() {
-    auto config_path = db_path_ / "utxoz_config.dat";
-    std::ofstream ofs(config_path, std::ios::binary);
-    if (!ofs) {
-        log::warn("Failed to save config: {}", config_path.string());
-        return;
+result<> database_impl::save_config_to_disk() {
+    auto const config_path = db_path_ / "utxoz_config.dat";
+    auto const temp_path = fs::path(config_path).concat(".tmp");
+
+    // Published, not written in place. This file says whether a database is
+    // full or compact, and a reader that finds half of it reads the wrong
+    // answer about the whole store — the same reasoning as the metadata
+    // records, and a stronger case, because this one is authoritative.
+    {
+        std::ofstream ofs(temp_path, std::ios::binary | std::ios::trunc);
+        if ( ! ofs) {
+            log::error("Failed to write config: {}", temp_path.string());
+            return std::unexpected(error_code::config_file_corrupt);
+        }
+
+        char const magic[4] = {'U', 'T', 'X', 'O'};
+        ofs.write(magic, 4);
+
+        uint32_t const version = 1;
+        ofs.write(reinterpret_cast<char const*>(&version), sizeof(version));
+
+        uint8_t const mode_byte = static_cast<uint8_t>(mode_);
+        ofs.write(reinterpret_cast<char const*>(&mode_byte), sizeof(mode_byte));
+
+        ofs.close();
+        if (ofs.fail()) {
+            std::error_code cleanup;
+            fs::remove(temp_path, cleanup);
+            log::error("Failed to write config: {}", temp_path.string());
+            return std::unexpected(error_code::config_file_corrupt);
+        }
     }
 
-    // Magic: "UTXO"
-    char magic[4] = {'U', 'T', 'X', 'O'};
-    ofs.write(magic, 4);
+    auto discard_temp = [&] {
+        std::error_code cleanup;
+        fs::remove(temp_path, cleanup);
+    };
 
-    // Version
-    uint32_t version = 1;
-    ofs.write(reinterpret_cast<char const*>(&version), sizeof(version));
+    // Contents before the name that publishes them. Reported rather than
+    // warned about: sync() leaves this file out of its promise on the grounds
+    // that it was made durable here, so if that did not happen, open is the
+    // only place anyone finds out.
+    if (auto const synced = sync_file(temp_path);
+        ! synced && synced.error() != error_code::sync_unsupported) {
+        discard_temp();
+        log::error("Could not make the config file durable: {}", temp_path.string());
+        return std::unexpected(synced.error());
+    }
 
-    // Mode
-    uint8_t mode_byte = static_cast<uint8_t>(mode_);
-    ofs.write(reinterpret_cast<char const*>(&mode_byte), sizeof(mode_byte));
+    if (auto const replaced = replace_file_atomically(temp_path, config_path); ! replaced) {
+        discard_temp();
+        log::error("Could not publish the config file: {}", config_path.string());
+        return std::unexpected(replaced.error());
+    }
+
+    if (auto const synced = sync_directory(db_path_);
+        ! synced && synced.error() != error_code::sync_unsupported) {
+        // Published. The name may not survive a crash, which is a weaker
+        // failure than a torn file but still one the caller has to hear.
+        log::error("Could not make the config file's directory entry durable");
+        return std::unexpected(synced.error());
+    }
+
+    return {};
 }
 
 result<> database_impl::load_config_from_disk() {
