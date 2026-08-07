@@ -186,6 +186,66 @@ struct db_base {
     result<> compact_all();
 
     /**
+     * @brief Puts everything written so far on stable storage.
+     *
+     * Returns once the entries this database holds have reached the disk: the
+     * active container of each size class, the older generations a batch's
+     * deferred deletions reached through the file cache, and the directory
+     * entries that name them. Until it returns, a power cut can lose writes
+     * that every earlier call reported as successful — that is not a defect,
+     * it is what buffered I/O is, and this is the call that ends it.
+     *
+     * @par How often
+     * Not decided here. The store has no idea what a caller is willing to lose,
+     * and a policy baked into it would be wrong for everyone: a node syncing
+     * per block pays for durability it may not need below a checkpoint, and one
+     * syncing per hour may not be able to answer what it has. The caller knows
+     * the answer and calls this when it wants the guarantee.
+     *
+     * @par What it does not cover
+     * Derived metadata. Losing a record costs a rescan and nothing else — an
+     * absent or damaged one degrades to "unknown", which every consumer already
+     * handles — so a barrier per record would buy nothing usable. What this
+     * promises is that the entries are there.
+     *
+     * @par Retrying
+     * A failure discharges nothing: every barrier this call owed is still owed
+     * afterwards, so calling again is well defined and attempts all of them —
+     * including the ones that had already succeeded, since a partial result is
+     * not recorded. What retrying cannot do is make a disk that refused to
+     * flush agree to. Treat a failure as fatal to whatever depended on the
+     * guarantee rather than as a transient to spin on; a caller that does retry
+     * is not left with a half-kept promise, which is the point.
+     *
+     * @par On a closed database
+     * error_code::closed. There is nothing mapped and nothing this object still
+     * holds, so reporting a successful sync would suggest a guarantee about a
+     * database it has let go of. Note that closing does **not** make anything
+     * durable: sync() before close() if the guarantee is wanted.
+     *
+     * @par Per platform
+     * On POSIX the file and directory barriers both exist and this is a full
+     * guarantee. On Windows the file contents are flushed and there is no
+     * directory barrier, so the ordering between a rotation and the data it
+     * publishes is weaker than POSIX gives — documented rather than assumed
+     * equivalent. Under Emscripten the filesystem is virtual and there is no
+     * stable storage to reach, so this returns error_code::sync_unsupported
+     * rather than a success it cannot honour.
+     *
+     * Ask platform_durability() for that difference rather than inferring it:
+     * success here means every barrier this platform *has* was crossed, which
+     * under durability_level::contents_only is not the same as every barrier
+     * the guarantee would need. A caller recording a checkpoint on the strength
+     * of a sync should know which of the two it got.
+     *
+     * @return empty on success; sync_failed if a barrier was attempted and
+     *         failed; sync_unsupported where the platform has none;
+     *         recovery_required if this instance is latched.
+     */
+    [[nodiscard]]
+    result<> sync();
+
+    /**
      * @brief Iterate over all keys in the database
      *
      * @param f Callable with signature void(raw_outpoint const&)

@@ -165,6 +165,25 @@ enum class error_code : uint8_t {
 };
 
 /**
+ * @brief What sync() can promise on this platform.
+ *
+ * A caller that needs the difference has to be able to ask for it. `sync()`
+ * returning success under `contents_only` means the entries are on the disk and
+ * the directory entries that name them are not — the ordering between a
+ * rotation and the data it publishes is then weaker than POSIX gives, and a
+ * caller recording a checkpoint on the strength of it should know that.
+ */
+enum class durability_level : uint8_t {
+    full,           ///< File contents and directory entries can both be made durable.
+    contents_only,  ///< Contents can; directory entries have no exposed barrier.
+    none,           ///< A virtual filesystem: there is no stable storage to reach.
+};
+
+/// What this build's platform can promise. Constant, and safe to branch on.
+[[nodiscard]]
+durability_level platform_durability() noexcept;
+
+/**
  * @brief Result type for operations that can fail
  */
 template<typename T = void>

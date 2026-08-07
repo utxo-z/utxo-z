@@ -22,6 +22,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 
@@ -85,6 +86,20 @@ struct failpoints {
     /// cover different things and fail for different reasons, so a test that
     /// cannot drive them apart cannot show that both are wired.
     static inline std::atomic<bool> fail_sync_mapped_region{false};
+
+    /// How many times the page barrier has been crossed. A test that needs to
+    /// know a set of mappings was *visited* cannot learn it from a failure —
+    /// the first one aborts the rest — so it counts instead.
+    static inline std::atomic<uint64_t> sync_mapped_region_calls{0};
+
+    /// How many times the file barrier has been crossed, for the same reason.
+    static inline std::atomic<uint64_t> sync_file_calls{0};
+
+    /// Fails the Nth file barrier and no other, counting from one. Blanket
+    /// failure cannot reach past the first barrier a call performs, so it
+    /// cannot show what happens when one in the middle fails — which is the
+    /// case where a partial result could be recorded and must not be.
+    static inline std::atomic<uint64_t> fail_sync_file_at{0};
     static inline std::atomic<bool> fail_sync_directory{false};
     static inline std::atomic<bool> fail_replace{false};
     static inline std::atomic<bool> fail_unlink{false};
@@ -152,6 +167,9 @@ struct failpoints {
     static void clear() noexcept {
         fail_sync_file.store(false, std::memory_order_relaxed);
         fail_sync_mapped_region.store(false, std::memory_order_relaxed);
+        sync_mapped_region_calls.store(0, std::memory_order_relaxed);
+        sync_file_calls.store(0, std::memory_order_relaxed);
+        fail_sync_file_at.store(0, std::memory_order_relaxed);
         fail_sync_directory.store(false, std::memory_order_relaxed);
         fail_replace.store(false, std::memory_order_relaxed);
         fail_unlink.store(false, std::memory_order_relaxed);
@@ -178,6 +196,8 @@ struct failpoints {
  */
 [[nodiscard]]
 inline result<> sync_mapped_region(void* address, size_t length) {
+    failpoints::sync_mapped_region_calls.fetch_add(1, std::memory_order_relaxed);
+
     if (failpoints::fail_sync_mapped_region.load(std::memory_order_relaxed)) {
         return std::unexpected(error_code::sync_failed);
     }
@@ -204,7 +224,13 @@ inline result<> sync_mapped_region(void* address, size_t length) {
  */
 [[nodiscard]]
 inline result<> sync_file(fs::path const& path) {
+    auto const nth = failpoints::sync_file_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+
     if (failpoints::fail_sync_file.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::sync_failed);
+    }
+    if (auto const target = failpoints::fail_sync_file_at.load(std::memory_order_relaxed);
+        target != 0 && nth == target) {
         return std::unexpected(error_code::sync_failed);
     }
 

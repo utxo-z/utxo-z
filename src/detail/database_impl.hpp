@@ -13,6 +13,8 @@
 #include <array>
 #include <filesystem>
 #include <memory>
+#include <set>
+#include <utility>
 #include <variant>
 
 #include <boost/unordered/unordered_flat_set.hpp>
@@ -65,6 +67,9 @@ struct database_impl {
     size_t deferred_lookups_size() const;
 
     result<> compact_all();
+
+    /// Puts everything written so far on stable storage. See db_base::sync().
+    result<> sync();
     result<> for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     result<> for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
@@ -210,6 +215,28 @@ private:
     /// instance and released by its destructor. Nothing releases it by hand.
     database_lock lock_;
 
+    /**
+     * @brief Version files this instance has written to and not yet made durable.
+     *
+     * Kept apart from the file cache on purpose. The cache is an LRU that holds
+     * one mapping by default, so a sweep that deletes from three generations
+     * evicts the first two before it finishes — and unmapping is not a barrier.
+     * A sync that walked the cache would flush whatever happened to still be
+     * resident and report the database durable, with the other two generations'
+     * deletions nowhere but in pages the kernel had not been asked to write.
+     *
+     * So the obligation is recorded by identity and outlives the mapping. It is
+     * discharged by a successful sync(), or by compaction retiring the file —
+     * a version that no longer exists cannot owe anything. A partial sync
+     * clears nothing: an obligation half met is an obligation.
+     */
+    std::set<std::pair<size_t, size_t>> dirty_versions_;
+
+    /// Records that a historical version file was written to.
+    void note_dirty(size_t container_index, size_t version) {
+        dirty_versions_.emplace(container_index, version);
+    }
+
 public:
     /// Refuses every operation once a merge has published its target and could
     /// not retire everything it superseded. Until this instance is closed and
@@ -265,7 +292,8 @@ private:
     compact_map_t const& compact_map() const;
 
     // Config persistence
-    void save_config_to_disk();
+    [[nodiscard]]
+    result<> save_config_to_disk();
     result<> load_config_from_disk();
 
     // Compact metadata helpers
