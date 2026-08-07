@@ -91,7 +91,7 @@ struct file_cache {
         auto file_path = make_file_path(container_index, version);
         auto segment = open_existing_segment(file_path);
 
-        auto* map = segment->find<utxo_map<container_sizes[Index]>>("db_map").first;
+        auto* map = segment->find<utxo_map<container_sizes[Index]>>(map_object_name).first;
         if (!map) {
             throw std::runtime_error("Map not found in file: " + file_path);
         }
@@ -128,7 +128,7 @@ struct file_cache {
         auto file_path = make_file_path(compact_sentinel_index, version);
         auto segment = open_existing_segment(file_path);
 
-        auto* map = segment->find<compact_map_t>("db_map").first;
+        auto* map = segment->find<compact_map_t>(map_object_name).first;
         if (!map) {
             throw std::runtime_error("Map not found in compact file: " + file_path);
         }

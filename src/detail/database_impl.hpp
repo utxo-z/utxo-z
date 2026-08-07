@@ -29,6 +29,7 @@
 #include "file_cache.hpp"
 #include "file_metadata.hpp"
 #include "file_metadata_io.hpp"
+#include "merge_policy.hpp"
 #include "merge_sidecar.hpp"
 #include "scope_exit.hpp"
 #include "segment_open.hpp"
@@ -141,8 +142,6 @@ private:
     template<size_t Index>
     void new_version();
 
-    template<size_t Index>
-    std::unique_ptr<bip::managed_mapped_file> open_container_file(size_t version);
 
     // Safety checks
     template<size_t Index>
@@ -190,17 +189,16 @@ private:
     result<> recover_one(merge_plan const& plan, std::string const& sidecar);
 
     /// Builds one new version file holding everything in `sources`, publishes
-    /// it, and retires them.
-    template<size_t Index>
-    result<> merge_sources(std::vector<size_t> const& sources);
-    result<> merge_compact_sources(std::vector<size_t> const& sources);
+    /// it, and retires them. One implementation; the policy names the six
+    /// things that differ between the storage modes.
+    template<typename Policy>
+    result<> merge_versions(Policy policy, std::vector<size_t> const& sources);
 
     /// The merging itself, bracketed by compact_container() so that reopening
     /// the active container is part of the typed result rather than something a
     /// destructor does and cannot report.
-    template<size_t Index>
-    result<> compact_merge_groups();
-    result<> compact_merge_compact_groups();
+    template<typename Policy>
+    result<> merge_groups(Policy policy);
 
     template<size_t Index>
     result<> reopen_active_container();
@@ -214,6 +212,9 @@ private:
     /// The exclusive claim on the database directory, held for the life of this
     /// instance and released by its destructor. Nothing releases it by hand.
     database_lock lock_;
+
+    template <size_t I> friend struct full_merge_policy;
+    friend struct compact_merge_policy;
 
     /**
      * @brief Version files this instance has written to and not yet made durable.

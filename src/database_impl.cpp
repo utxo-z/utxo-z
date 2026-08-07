@@ -148,7 +148,7 @@ void database_impl::open_or_create_container(size_t version) {
         bip::open_or_create, file_name.c_str(), active_file_sizes_[Index]);
 
     auto* segment = segments_[Index].get();
-    containers_[Index] = segment->find_or_construct<utxo_map<container_sizes[Index]>>("db_map")(
+    containers_[Index] = segment->find_or_construct<utxo_map<container_sizes[Index]>>(map_object_name)(
         min_buckets_ok_[Index],
         outpoint_hash{},
         outpoint_equal{},
@@ -195,12 +195,6 @@ void database_impl::new_version() {
     catalogs_[Index].add(next);
     catalogs_[Index].metadata(next) = file_metadata{};
     log::debug("Container {} rotated to version {}", Index, current_versions_[Index]);
-}
-
-template<size_t Index>
-std::unique_ptr<bip::managed_mapped_file> database_impl::open_container_file(size_t version) {
-    auto file_name = fmt::format(data_file_format, db_path_.string(), Index, version);
-    return open_existing_segment(file_name);
 }
 
 // =============================================================================
@@ -500,7 +494,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
             auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
             try {
                 auto segment = open_existing_segment(file_name);
-                auto* map_ptr = segment->template find<compact_map_t>("db_map").first;
+                auto* map_ptr = segment->template find<compact_map_t>(map_object_name).first;
                 if (map_ptr) {
                     entries_count_ += map_ptr->size();
                 }
@@ -551,7 +545,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
                 auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
                 try {
                     auto segment = open_existing_segment(file_name);
-                    auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
+                    auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>(map_object_name).first;
                     if (map_ptr) {
                         entries_count_ += map_ptr->size();
                     }
@@ -1443,39 +1437,70 @@ result<> database_impl::recover_pending_merges() {
     return {};
 }
 
-template<size_t Index>
-result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
+// The six things that differ between the storage modes, and nothing else does.
+template <size_t Index>
+size_t full_merge_policy<Index>::index() const { return Index; }
+template <size_t Index>
+size_t full_merge_policy<Index>::file_size() const { return db.active_file_sizes_[Index]; }
+template <size_t Index>
+size_t full_merge_policy<Index>::min_buckets() const { return db.min_buckets_ok_[Index]; }
+template <size_t Index>
+version_catalog& full_merge_policy<Index>::catalogue() const { return db.catalogs_[Index]; }
+template <size_t Index>
+void full_merge_policy<Index>::save_metadata(size_t version) const {
+    db.save_metadata_to_disk(Index, version);
+}
+template <size_t Index>
+std::string full_merge_policy<Index>::describe(size_t version) const {
+    return fmt::format("container {} v{}", Index, version);
+}
+
+size_t compact_merge_policy::index() const { return compact_sentinel_index; }
+size_t compact_merge_policy::file_size() const { return db.compact_active_file_size_; }
+size_t compact_merge_policy::min_buckets() const { return db.compact_min_buckets_ok_; }
+version_catalog& compact_merge_policy::catalogue() const { return db.compact_catalog_; }
+void compact_merge_policy::save_metadata(size_t version) const {
+    db.compact_save_metadata(version);
+}
+std::string compact_merge_policy::describe(size_t version) const {
+    return fmt::format("compact v{}", version);
+}
+
+template<typename Policy>
+result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const& sources) {
+    auto const idx = policy.index();
+
     if (sources.size() < 2) return {};   // nothing to gain from rewriting one file
 
     // A fresh identity, never used before. It must not name anything that
     // exists: publishing over a file would destroy it, and a collision means
     // the catalogue and the directory disagree about what is there.
-    size_t const target = catalogs_[Index].next_version();
+    size_t const target = policy.catalogue().next_version();
 
-    auto const target_exists = path_exists(data_path(Index, target));
+    auto const target_exists = path_exists(data_path(idx, target));
     if ( ! target_exists) return std::unexpected(target_exists.error());
     if (*target_exists) {
-        log::error("compaction: identity v{} of container {} is already taken", target, Index);
+        log::error("compaction: the identity of {} is already taken", policy.describe(target));
         return std::unexpected(error_code::identity_collision);
     }
 
     // A metadata record for an identity with no data file is the second state
     // removal_failed describes. It must not survive to describe the new file.
-    if (auto const r = remove_if_present(metadata_path(Index, target)); ! r) return r;
+    if (auto const r = remove_if_present(metadata_path(idx, target)); ! r) return r;
 
     // Preventive only: a real ENOSPC during the write stays authoritative. The
     // peak is one more file at the size this container is configured for, and
     // containers are merged one at a time so it does not accumulate.
     std::error_code space_ec;
     auto const space = fs::space(db_path_, space_ec);
-    if ( ! space_ec && space.available < active_file_sizes_[Index]) {
-        log::error("compaction: container {} needs {} bytes for a new file and {} are available",
-                   Index, active_file_sizes_[Index], space.available);
+    if ( ! space_ec && space.available < policy.file_size()) {
+        log::error("compaction: {} needs {} bytes for a new file and {} are available",
+                   policy.describe(target), policy.file_size(), space.available);
         return std::unexpected(error_code::insufficient_space);
     }
 
-    auto const building = building_path(Index, target);
-    auto const sidecar = sidecar_path(Index, target);
+    auto const building = building_path(idx, target);
+    auto const sidecar = sidecar_path(idx, target);
 
     // Generated once, written into the target and into the record that names
     // it. Recovery compares the two before retiring anything. Drawn before
@@ -1498,18 +1523,15 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
         fs::remove(building, ec);   // a leftover from a previous attempt
 
         auto segment = std::make_unique<bip::managed_mapped_file>(
-            bip::create_only, building.c_str(), active_file_sizes_[Index]);
-        auto* target_map = segment->find_or_construct<utxo_map<container_sizes[Index]>>("db_map")(
-            min_buckets_ok_[Index], outpoint_hash{}, outpoint_equal{},
-            segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>());
+            bip::create_only, building.c_str(), policy.file_size());
+        auto* target_map = Policy::construct_map(*segment, policy.min_buckets());
 
         // Before the barriers, so the marker is as durable as the entries.
-        segment->construct<merge_marker>(merge_marker::object_name)(merge_id);
+        segment->template construct<merge_marker>(merge_marker::object_name)(merge_id);
 
         for (auto const source : sources) {
-            auto source_segment = open_container_file<Index>(source);
-            auto* source_map =
-                source_segment->template find<utxo_map<container_sizes[Index]>>("db_map").first;
+            auto source_segment = open_existing_segment(data_path(idx, source));
+            auto* source_map = Policy::find_map(*source_segment);
             if ( ! source_map) continue;
 
             for (auto const& [key, value] : *source_map) {
@@ -1521,8 +1543,8 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
                         // being locally inconsistent, and it is reported rather
                         // than resolved: choosing a copy would hide it. Nothing
                         // canonical has changed at this point.
-                        log::error("compaction: duplicate key across sources of container {}: {}",
-                                   Index, outpoint_to_string(key));
+                        log::error("compaction: duplicate key across the sources of {}: {}",
+                                   policy.describe(target), outpoint_to_string(key));
                         source_segment.reset();
                         segment.reset();
                         abandon();
@@ -1533,8 +1555,8 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
                     // The group was planned to fit and did not. Leave every
                     // source exactly as it is and let the caller try a smaller
                     // group; sources are only ever read here.
-                    log::debug("compaction: container {} target filled early, {} entries in",
-                               Index, entries_moved);
+                    log::debug("compaction: {} filled early, {} entries in",
+                               policy.describe(target), entries_moved);
                     source_segment.reset();
                     segment.reset();
                     abandon();
@@ -1556,7 +1578,7 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
         // no permission, no file. Boost reports that by throwing, and this is a
         // result-typed API, so it stops here. Nothing canonical has changed:
         // the sources are only ever read.
-        log::error("compaction: could not build a merge target for container {}: {}", Index, e.what());
+        log::error("compaction: could not build {}: {}", policy.describe(target), e.what());
         abandon();
         return std::unexpected(error_code::file_open_failed);
     }
@@ -1574,7 +1596,7 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
     // The sidecar goes before the target. It is the only thing that will tell a
     // later open that the sources are redundant.
     merge_plan plan;
-    plan.container = Index;
+    plan.container = idx;
     plan.target = target;
     plan.id = merge_id;
     plan.sources = sources;
@@ -1598,8 +1620,8 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
         // Continuing instead would let a second merge publish another sidecar
         // for this container, and a crash would then find two — which recovery
         // refuses to choose between, and rightly.
-        log::error("compaction: the merge record for container {} v{} was published "
-                   "without a durable barrier; the instance will not continue", Index, target);
+        log::error("compaction: the merge record for {} was published without a durable "
+                   "barrier; the instance will not continue", policy.describe(target));
         // Tidy-up, not an undo, and deliberately unchecked: this removal rests
         // on the same barrier that just failed, so it may not persist either.
         // That is exactly why the latch below is unconditional rather than
@@ -1621,7 +1643,7 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
     // documented precondition that nothing currently enforces (#71). So this
     // refuses a taken name rather than replacing it, and the marker check below
     // is what actually establishes that the file is ours.
-    if (auto const published = publish_new_file(building, data_path(Index, target)); ! published) {
+    if (auto const published = publish_new_file(building, data_path(idx, target)); ! published) {
         // The record is already durable. Calling this off means removing it, and
         // the removal is only real once the directory says so — a best-effort
         // delete would leave a record that may come back after a crash, naming a
@@ -1637,8 +1659,8 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
             return std::unexpected(published.error());
         }
 
-        log::error("compaction: container {} could not be published and its merge record could "
-                   "not be durably withdrawn; the instance will not continue", Index);
+        log::error("compaction: {} could not be published and its merge record could not be "
+                   "durably withdrawn; the instance will not continue", policy.describe(target));
         cleanup_pending_ = true;
         return std::unexpected(error_code::recovery_required);
     }
@@ -1651,8 +1673,8 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
     // and the record still in place.
     if (auto const synced = directory_barrier(failpoints::dir_barrier::after_target); ! synced) {
         if (synced.error() != error_code::sync_unsupported) {
-            log::error("compaction: container {} v{} was published but its name could not be made "
-                       "durable; no source will be retired", Index, target);
+            log::error("compaction: {} was published but its name could not be made durable; "
+                       "no source will be retired", policy.describe(target));
             cleanup_pending_ = true;
             return std::unexpected(error_code::recovery_required);
         }
@@ -1666,10 +1688,10 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
         // Against the record's copy, not the local variable: the retirement
         // then rests on exactly the evidence recovery would use, rather than on
         // the assumption that the file just published is still ours.
-        auto const marker = read_target_marker(Index, target);
+        auto const marker = read_target_marker(idx, target);
         if ( ! marker || *marker != plan.id) {
-            log::error("compaction: the file now at container {} v{} is not the one this merge "
-                       "built; no source will be retired", Index, target);
+            log::error("compaction: the file now at {} is not the one this merge built; "
+                       "no source will be retired", policy.describe(target));
             cleanup_pending_ = true;
             return std::unexpected(error_code::recovery_failed);
         }
@@ -1678,13 +1700,13 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
     failpoints::maybe_crash(failpoints::crash_point::before_source_unlink);
 
     // Published. From here the sources are redundant and the catalogue says so.
-    catalogs_[Index].add(target);
+    policy.catalogue().add(target);
     for (auto const source : sources) {
-        catalogs_[Index].remove(source);
+        policy.catalogue().remove(source);
         // The obligation goes with the file. Its entries are in the target,
         // which was made durable before it was published, so there is nothing
         // left to flush and nothing left to flush it to.
-        dirty_versions_.erase({Index, source});
+        dirty_versions_.erase({idx, source});
     }
 
     // Retire the sources. Every failure is recorded and the rest are still
@@ -1703,12 +1725,12 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
     for (auto const source : sources) {
         if (retired == 1) failpoints::maybe_crash(failpoints::crash_point::mid_source_unlink);
         ++retired;
-        if (auto const r = retire(data_path(Index, source)); ! r) {
-            log::error("compaction: could not retire container {} v{}", Index, source);
+        if (auto const r = retire(data_path(idx, source)); ! r) {
+            log::error("compaction: could not retire {}", policy.describe(source));
             all_retired = false;
         }
-        if (auto const r = retire(metadata_path(Index, source)); ! r) {
-            log::error("compaction: could not retire the metadata of container {} v{}", Index, source);
+        if (auto const r = retire(metadata_path(idx, source)); ! r) {
+            log::error("compaction: could not retire the metadata of {}", policy.describe(source));
             all_retired = false;
         }
     }
@@ -1734,33 +1756,32 @@ result<> database_impl::merge_sources(std::vector<size_t> const& sources) {
         // The record is gone and so are the sources; a record that came back
         // would find its target published and nothing left to retire, which
         // recovery completes as a no-op.
-        log::warn("compaction: the merge record of container {} v{} was removed without a barrier",
-                  Index, target);
+        log::warn("compaction: the merge record of {} was removed without a barrier",
+                  policy.describe(target));
     }
 
     // Metadata last, and only now: it describes a file that exists, and it is
     // rebuilt rather than carried over from anything.
     {
-        auto& meta = catalogs_[Index].metadata(target);
+        auto& meta = policy.catalogue().metadata(target);
         meta = file_metadata{};
-        meta.container_index = Index;
+        meta.container_index = idx;
         meta.version = target;
         try {
-            auto segment = open_existing_segment(data_path(Index, target));
-            if (auto* map_ptr =
-                    segment->template find<utxo_map<container_sizes[Index]>>("db_map").first) {
+            auto segment = open_existing_segment(data_path(idx, target));
+            if (auto* map_ptr = Policy::find_map(*segment)) {
                 for (auto const& [key, val] : *map_ptr) {
-                    meta.update_on_insert(key, val.block_height);
+                    meta.update_on_insert(key, Policy::height_of(val));
                 }
             }
         } catch (std::exception const& e) {
-            log::warn("compaction: could not summarise container {} v{}: {}", Index, target, e.what());
+            log::warn("compaction: could not summarise {}: {}", policy.describe(target), e.what());
         }
-        save_metadata_to_disk(Index, target);
+        policy.save_metadata(target);
     }
 
-    log::debug("Merged {} files of container {} into v{}: {} entries",
-               sources.size(), Index, target, entries_moved);
+    log::debug("Merged {} files into {}: {} entries",
+               sources.size(), policy.describe(target), entries_moved);
     return {};
 }
 
@@ -1804,7 +1825,7 @@ result<> database_impl::compact_container() {
     // reopen's result is part of what comes back.
     auto outcome = [&]() -> result<> {
         try {
-            return compact_merge_groups<Index>();
+            return merge_groups(full_merge_policy<Index>{*this});
         } catch (std::exception const& e) {
             log::error("compaction: container {} failed: {}", Index, e.what());
             return std::unexpected(error_code::file_open_failed);
@@ -1819,11 +1840,12 @@ result<> database_impl::compact_container() {
     return reopened;
 }
 
-template<size_t Index>
-result<> database_impl::compact_merge_groups() {
-    auto const versions = catalogs_[Index].versions();
+template<typename Policy>
+result<> database_impl::merge_groups(Policy policy) {
+    auto const versions = policy.catalogue().versions();
     if (versions.size() <= 1) {
-        log::trace("Container {} has {} files, no compaction needed", Index, versions.size());
+        log::trace("{} has {} files, no compaction needed",
+                   policy.describe(policy.catalogue().active()), versions.size());
         return {};
     }
 
@@ -1841,7 +1863,7 @@ result<> database_impl::compact_merge_groups() {
         while (count >= 2) {
             std::vector<size_t> const group(versions.begin() + std::ptrdiff_t(first),
                                             versions.begin() + std::ptrdiff_t(first + count));
-            outcome = merge_sources<Index>(group);
+            outcome = merge_versions(policy, group);
             if (outcome || outcome.error() != error_code::insufficient_space) break;
             --count;
         }
@@ -1882,7 +1904,7 @@ result<> database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&),
 
             try {
                 auto segment = open_existing_segment(file_name);
-                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
+                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>(map_object_name).first;
                 if (!map_ptr) continue;
 
                 for (auto const& [key, _] : *map_ptr) {
@@ -1920,7 +1942,7 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
 
             try {
                 auto segment = open_existing_segment(file_name);
-                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>("db_map").first;
+                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>(map_object_name).first;
                 if (!map_ptr) continue;
 
                 for (auto const& [key, val] : *map_ptr) {
@@ -2447,7 +2469,7 @@ void database_impl::compact_open_or_create(size_t version) {
     compact_segment_ = std::make_unique<bip::managed_mapped_file>(
         bip::open_or_create, file_name.c_str(), compact_active_file_size_);
 
-    compact_container_ = compact_segment_->find_or_construct<compact_map_t>("db_map")(
+    compact_container_ = compact_segment_->find_or_construct<compact_map_t>(map_object_name)(
         compact_min_buckets_ok_,
         outpoint_hash{},
         outpoint_equal{},
@@ -2640,7 +2662,7 @@ result<> database_impl::compact_for_each_key(void(*cb)(void*, raw_outpoint const
 
         try {
             auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+            auto* map_ptr = segment->find<compact_map_t>(map_object_name).first;
             if (!map_ptr) continue;
 
             for (auto const& [key, _] : *map_ptr) {
@@ -2675,7 +2697,7 @@ result<> database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint con
 
         try {
             auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+            auto* map_ptr = segment->find<compact_map_t>(map_object_name).first;
             if (!map_ptr) continue;
 
             for (auto const& [key, val] : *map_ptr) {
@@ -2687,243 +2709,6 @@ result<> database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint con
         }
     }
 
-    return {};
-}
-
-result<> database_impl::merge_compact_sources(std::vector<size_t> const& sources) {
-    if (sources.size() < 2) return {};
-
-    size_t const target = compact_catalog_.next_version();
-    size_t const idx = compact_sentinel_index;
-
-    auto const target_exists = path_exists(data_path(idx, target));
-    if ( ! target_exists) return std::unexpected(target_exists.error());
-    if (*target_exists) {
-        log::error("compaction: compact identity v{} is already taken", target);
-        return std::unexpected(error_code::identity_collision);
-    }
-
-    if (auto const r = remove_if_present(metadata_path(idx, target)); ! r) return r;
-
-    std::error_code space_ec;
-    auto const space = fs::space(db_path_, space_ec);
-    if ( ! space_ec && space.available < compact_active_file_size_) {
-        log::error("compaction: the compact container needs {} bytes for a new file and {} "
-                   "are available", compact_active_file_size_, space.available);
-        return std::unexpected(error_code::insufficient_space);
-    }
-
-    auto const building = building_path(idx, target);
-    auto const sidecar = sidecar_path(idx, target);
-
-    // See merge_sources().
-    auto const drawn = generate_merge_id();
-    if ( ! drawn) return std::unexpected(drawn.error());
-    auto const merge_id = *drawn;
-
-    auto abandon = [&] { std::error_code ec; fs::remove(building, ec); };
-
-    size_t entries_moved = 0;
-    try {
-        std::error_code ec;
-        fs::remove(building, ec);
-
-        auto segment = std::make_unique<bip::managed_mapped_file>(
-            bip::create_only, building.c_str(), compact_active_file_size_);
-        auto* target_map = segment->find_or_construct<compact_map_t>("db_map")(
-            compact_min_buckets_ok_, outpoint_hash{}, outpoint_equal{},
-            segment->get_allocator<typename compact_map_t::value_type>());
-
-        segment->construct<merge_marker>(merge_marker::object_name)(merge_id);
-
-        for (auto const source : sources) {
-            auto source_segment = open_existing_segment(data_path(idx, source));
-            auto* source_map = source_segment->find<compact_map_t>("db_map").first;
-            if ( ! source_map) continue;
-
-            for (auto const& [key, value] : *source_map) {
-                try {
-                    auto const [pos, inserted] = target_map->emplace(key, value);
-                    if ( ! inserted) {
-                        log::error("compaction: duplicate key across compact sources: {}",
-                                   outpoint_to_string(key));
-                        source_segment.reset();
-                        segment.reset();
-                        abandon();
-                        return std::unexpected(error_code::duplicate_key);
-                    }
-                    ++entries_moved;
-                } catch (boost::interprocess::bad_alloc const&) {
-                    source_segment.reset();
-                    segment.reset();
-                    abandon();
-                    return std::unexpected(error_code::insufficient_space);
-                }
-            }
-        }
-
-        if (auto const synced = sync_mapped_region(segment->get_address(), segment->get_size());
-            ! synced && synced.error() != error_code::sync_unsupported) {
-            segment.reset();
-            abandon();
-            return std::unexpected(synced.error());
-        }
-    } catch (std::exception const& e) {
-        log::error("compaction: could not build a compact merge target: {}", e.what());
-        abandon();
-        return std::unexpected(error_code::file_open_failed);
-    }
-
-    failpoints::maybe_crash(failpoints::crash_point::after_build);
-
-    if (auto const synced = sync_file(building);
-        ! synced && synced.error() != error_code::sync_unsupported) {
-        abandon();
-        return std::unexpected(synced.error());
-    }
-
-    failpoints::maybe_crash(failpoints::crash_point::after_file_sync);
-
-    merge_plan plan;
-    plan.container = idx;
-    plan.target = target;
-    plan.id = merge_id;
-    plan.sources = sources;
-
-    auto const written = write_merge_sidecar(sidecar, plan);
-    if ( ! written) {
-        abandon();
-        return std::unexpected(written.error());
-    }
-    if ( ! written->durable) {
-        // See merge_sources(): named without a durable barrier is uncertain,
-        // not failed, and the instance stops rather than build on it.
-        log::error("compaction: the merge record for compact v{} was published without a "
-                   "durable barrier; the instance will not continue", target);
-        // Tidy-up, not an undo, and deliberately unchecked: this removal rests
-        // on the same barrier that just failed, so it may not persist either.
-        // That is exactly why the latch below is unconditional rather than
-        // contingent on it, and why the merge is not reported as "did not
-        // publish". Recovery settles whichever state is really there.
-        abandon();
-        std::error_code ec;
-        fs::remove(sidecar, ec);
-
-        cleanup_pending_ = true;
-        return std::unexpected(error_code::recovery_required);
-    }
-
-    failpoints::maybe_crash(failpoints::crash_point::after_sidecar_publish);
-    failpoints::run_before_target_publish();
-
-    if (auto const published = publish_new_file(building, data_path(idx, target)); ! published) {
-        // See merge_sources(): the record is durable, so calling this off means
-        // durably withdrawing it, and anything less latches.
-        auto const removed = failpoints::fail_sidecar_removal.load(std::memory_order_relaxed)
-            ? result<>(std::unexpected(error_code::removal_failed))
-            : remove_if_present(sidecar);
-        auto const confirmed = removed ? directory_barrier(failpoints::dir_barrier::after_sidecar)
-                                       : result<>{};
-
-        if (removed && (confirmed || confirmed.error() == error_code::sync_unsupported)) {
-            abandon();
-            return std::unexpected(published.error());
-        }
-
-        log::error("compaction: the compact target could not be published and its merge record "
-                   "could not be durably withdrawn; the instance will not continue");
-        cleanup_pending_ = true;
-        return std::unexpected(error_code::recovery_required);
-    }
-
-    failpoints::maybe_crash(failpoints::crash_point::after_target_publish);
-
-    if (auto const synced = directory_barrier(failpoints::dir_barrier::after_target); ! synced) {
-        if (synced.error() != error_code::sync_unsupported) {
-            log::error("compaction: compact v{} was published but its name could not be made "
-                       "durable; no source will be retired", target);
-            cleanup_pending_ = true;
-            return std::unexpected(error_code::recovery_required);
-        }
-    }
-
-    {
-        auto const marker = read_target_marker(idx, target);
-        if ( ! marker || *marker != plan.id) {
-            log::error("compaction: the file now at compact v{} is not the one this merge built; "
-                       "no source will be retired", target);
-            cleanup_pending_ = true;
-            return std::unexpected(error_code::recovery_failed);
-        }
-    }
-
-    failpoints::maybe_crash(failpoints::crash_point::before_source_unlink);
-
-    compact_catalog_.add(target);
-    for (auto const source : sources) {
-        compact_catalog_.remove(source);
-        dirty_versions_.erase({compact_sentinel_index, source});   // see merge_sources()
-    }
-
-    auto retire = [](std::string const& path) -> result<> {
-        if (failpoints::fail_source_unlink.load(std::memory_order_relaxed)) {
-            return std::unexpected(error_code::removal_failed);
-        }
-        return remove_if_present(path);
-    };
-
-    bool all_retired = true;
-    size_t retired = 0;
-    for (auto const source : sources) {
-        if (retired == 1) failpoints::maybe_crash(failpoints::crash_point::mid_source_unlink);
-        ++retired;
-        if (auto const r = retire(data_path(idx, source)); ! r) {
-            log::error("compaction: could not retire compact v{}", source);
-            all_retired = false;
-        }
-        if (auto const r = retire(metadata_path(idx, source)); ! r) {
-            log::error("compaction: could not retire the metadata of compact v{}", source);
-            all_retired = false;
-        }
-    }
-    if (auto const synced = directory_barrier(failpoints::dir_barrier::after_source_retire);
-        ! synced && synced.error() != error_code::sync_unsupported) {
-        all_retired = false;
-    }
-
-    if ( ! all_retired) {
-        cleanup_pending_ = true;
-        return std::unexpected(error_code::recovery_required);
-    }
-
-    failpoints::maybe_crash(failpoints::crash_point::after_sources_retired);
-
-    if (auto const r = remove_if_present(sidecar); ! r) {
-        cleanup_pending_ = true;
-        return std::unexpected(error_code::recovery_required);
-    }
-    if (auto const synced = directory_barrier(failpoints::dir_barrier::after_sidecar_removal);
-        ! synced && synced.error() != error_code::sync_unsupported) {
-        log::warn("compaction: the merge record of compact v{} was removed without a barrier", target);
-    }
-
-    {
-        auto& meta = compact_catalog_.metadata(target);
-        meta = file_metadata{};
-        meta.container_index = idx;
-        meta.version = target;
-        try {
-            auto segment = open_existing_segment(data_path(idx, target));
-            if (auto* map_ptr = segment->find<compact_map_t>("db_map").first) {
-                for (auto const& [key, val] : *map_ptr) meta.update_on_insert(key, val.height);
-            }
-        } catch (std::exception const& e) {
-            log::warn("compaction: could not summarise compact v{}: {}", target, e.what());
-        }
-        compact_save_metadata(target);
-    }
-
-    log::debug("Merged {} compact files into v{}: {} entries", sources.size(), target, entries_moved);
     return {};
 }
 
@@ -2953,7 +2738,7 @@ result<> database_impl::compact_compact_container() {
     // destructor that cannot.
     auto outcome = [&]() -> result<> {
         try {
-            return compact_merge_compact_groups();
+            return merge_groups(compact_merge_policy{*this});
         } catch (std::exception const& e) {
             log::error("compaction: the compact container failed: {}", e.what());
             return std::unexpected(error_code::file_open_failed);
@@ -2965,31 +2750,6 @@ result<> database_impl::compact_compact_container() {
     return reopened;
 }
 
-result<> database_impl::compact_merge_compact_groups() {
-    auto const versions = compact_catalog_.versions();
-    if (versions.size() <= 1) return {};
-
-    // Whole files only, and never a group of one: see compact_container().
-    size_t first = 0;
-    while (first < versions.size()) {
-        size_t count = versions.size() - first;
-        result<> outcome;
-
-        while (count >= 2) {
-            std::vector<size_t> const group(versions.begin() + std::ptrdiff_t(first),
-                                            versions.begin() + std::ptrdiff_t(first + count));
-            outcome = merge_compact_sources(group);
-            if (outcome || outcome.error() != error_code::insufficient_space) break;
-            --count;
-        }
-
-        if (count < 2) { ++first; continue; }
-        if ( ! outcome) return outcome;
-        first += count;
-    }
-
-    return {};
-}
 
 // =============================================================================
 // database_impl - Compact metadata helpers
@@ -3453,7 +3213,7 @@ result<> database_impl::compact_for_each_entry_typed(
 
         try {
             auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<compact_map_t>("db_map").first;
+            auto* map_ptr = segment->find<compact_map_t>(map_object_name).first;
             if (!map_ptr) continue;
 
             for (auto const& [key, val] : *map_ptr) {

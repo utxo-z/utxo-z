@@ -65,6 +65,14 @@ struct utxo_value {
     }
 };
 
+/// The name the entry map is stored under inside a segment.
+///
+/// One spelling, because every reader has to use the one the writer used, and a
+/// literal repeated at fifteen call sites is one typo away from a file whose
+/// map nothing can find — which reads as an empty version rather than as an
+/// error.
+inline constexpr char const* map_object_name = "db_map";
+
 template<size_t Size>
 using utxo_map = boost::unordered_flat_map<
     raw_outpoint,
