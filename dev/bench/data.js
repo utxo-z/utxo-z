@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786123727076,
+  "lastUpdate": 1786125873633,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -10781,6 +10781,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 5.71,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "042c67f44fcec69700bd0e901f68b392537a7ead",
+          "message": "feat: add sync(), which puts what has been written on stable storage (#80)\n\nEvery write until now has been buffered. Inserts and erases land in mapped\nfiles, the kernel writes those pages back when it chooses, and a power cut\nloses whatever it had not got to — including writes that every call\nreported as successful. That is not a defect, it is what buffered I/O is,\nand there was no way to end it.\n\nsync() ends it, and covers three things because all three carry writes. The\nactive container of each size class, obviously. Every historical generation\nthis instance has written to, which is the part worth being careful about.\nAnd the directory, because a file that exists only in an unflushed directory\nentry is a file that may not be there.\n\nA version owes a barrier from any of three directions, and all three are\nrecorded: written to by a deferred deletion sweep; written to directly in a\ncached historical file, outside the sweep; or active, receiving inserts, and\nthen rotating. The rotation is the one worth spelling out: a\nversion that stops being active stops being covered by the active-container\nbarriers, and closing it only calls the asynchronous flush, which schedules\nwriteback and promises nothing. It is recorded at the rotation rather than\nat each insert because the active version is covered for as long as it is\nactive, so the only moment coverage could be lost is the moment it stops\nbeing one; marking per insert would put a lookup on the hot path to record\nsomething already known.\n\nThe historical generations are tracked by identity, not by what the file\ncache is holding. The cache is an LRU of one mapping by default, so a sweep\nthat deletes from three generations has evicted the first two before it\nends — and unmapping is not a barrier: those pages are still dirty and\nnothing has asked the kernel to write them. A sync driven by the cache would\nflush the one survivor and report the database durable. So a version is\nrecorded as dirty when it is written to, the record outlives the mapping,\nand it is discharged only by a sync in which every barrier owed returned.\nA partial failure discharges nothing. Compaction retiring a source discharges\nthat source, since its entries are in a target made durable before it was\npublished.\n\nThe config file is published rather than written in place — a temp, a\nbarrier, an atomic replace, a directory barrier — and made durable there\nrather than by sync(). It says whether a database is full or compact, so a\nreader finding half of it reads the wrong answer about the whole store.\nWriting it now happens only when the database is created — the content\nnever changes, so rewriting it on every open put a barrier, and a way to\nfail, on a path with nothing to say. It says whether a database is full or\ncompact, so failing to make it durable is reported rather than warned about:\nsync() leaves it out of its promise on the grounds that this happened, and\nif it did not, open is the only place anyone finds out. A directory barrier\nis not a substitute for flushing its contents.\n\nCallers that need to know what a platform can promise ask\nplatform_durability(). Success under contents_only means the entries reached\nthe disk and the directory entries naming them did not, which is not the\nsame guarantee — and a caller recording a checkpoint on the strength of a\nsync should be able to tell them apart rather than infer it.\n\nEach mapping is flushed before the file behind it. The page barrier covers\nthe dirty pages, the file barrier covers the inode, and neither covers the\nother.\n\nHow often is not decided here. The store has no idea what a caller is\nwilling to lose, and a policy baked into it would be wrong for everyone: a\nnode syncing per block pays for durability it may not need below a\ncheckpoint, one syncing per hour may not be able to say what it has. The\ncaller knows and calls this when it wants the guarantee.\n\nDerived metadata is deliberately outside the promise. Losing a record costs\na rescan and nothing else, since an absent or damaged one degrades to\nunknown, so a barrier per record would buy nothing a caller could use.\n\nPer platform, stated rather than implied: POSIX has both barriers and this\nis a full guarantee; Windows flushes file contents and has no directory\nbarrier, so the ordering between a rotation and the data it publishes is\nweaker; under Emscripten the filesystem is virtual and there is no stable\nstorage to reach, so it returns sync_unsupported rather than a success it\ncannot honour.\n\nA failure is not retryable in any useful sense: the platform refused to\nflush, and asking again asks the same disk the same question.\n\nThe case that matters most is coverage of the evicted generations, and it is\ncounted rather than provoked: a failing barrier comes back whether or not\nthose files are reached, because the active containers are flushed first. It\nrequires more file barriers than a cache-driven sync could perform at all,\nwhich is the one thing separating the two designs. Driven by the cache\ninstead it reports six barriers against five active containers and one\nresident mapping, and fails.",
+          "timestamp": "2026-08-07T20:01:59+02:00",
+          "tree_id": "b2df01d904c689455931d3a2320d1ec80ea44902",
+          "url": "https://github.com/utxo-z/utxo-z/commit/042c67f44fcec69700bd0e901f68b392537a7ead"
+        },
+        "date": 1786125872887,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 191847.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 300857.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 257565,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 261242.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 386.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 371.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12034721.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 11997338.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12049157.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12454.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 8989365.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 13237629.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 96723.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 9385.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2210.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2861.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2864.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.39,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 55.96,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 55.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 55.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.04,
             "unit": "ops/sec"
           }
         ]
