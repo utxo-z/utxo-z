@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786023010541,
+  "lastUpdate": 1786108196048,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -10225,6 +10225,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 53.37,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c573f6e246b69b92566cba1acff4904ab4cab45b",
+          "message": "feat!: make compaction crash-atomic by building a new file and swapping it in (#70)\n\nCompaction drained one version file into another in place: it inserted an\nentry into the target and then erased it from the source, mutating both\nmapped files with no ordering between them. A process that died in that\nwindow left the entry in both files — a durable, silent duplicate — and,\nbecause writeback of the two files is independent, could equally leave it\nin neither. The first breaks the uniqueness invariant. The second loses a\nlive UTXO. Neither was detectable afterwards, and a partially written\ntarget could also be left structurally inconsistent, since emplace dirties\nthe segment's allocator metadata along with the entry.\n\nA merge now builds a new version file from whole sources and swaps it in.\nThe canonical name is granted last and only to a file whose contents are\nalready durable, so the existence of that name is itself the proof that the\nfile is complete: recovery never verifies a merge, re-reads a source, or\ncompares payloads. Sources are only ever read, so the states a crash can\nleave are the ones this design chose, not whatever the allocator was doing.\n\nThe sequence is build under a name discovery does not accept, barrier the\npages, barrier the file, publish a sidecar naming the target and what it\nsupersedes, publish the target, retire the sources, remove the sidecar,\nwith a directory barrier after each rename and each batch of unlinks. The\nsidecar goes before the target, never after: reversed, a crash between them\nwould leave the target and its sources all canonical with nothing recording\nwhich are redundant.\n\nA sidecar names its target by identity, and an identity is only a number.\nNothing locks the database, so a file at that number is not necessarily the\nfile the record meant, and retiring the sources on that assumption deletes\nthe only copies of their entries. Each merge therefore draws a 128-bit\nidentifier from the system's cryptographic generator — named directly, since\nstd::random_device is permitted to be deterministic, and never derived from\nthe clock or the process id, which two containers can share — writes it into\nthe target before the barriers and into the record that names it, and\nverifies the two match before retiring anything. A target with no marker, a\ndifferent marker, more than one, or one that cannot be read all stop with\nevery file intact. Failing to obtain entropy stops the merge before anything\nis written.\n\nPublishing the target cannot be undone by wishing. A failure there leaves a\ndurable record, so calling the merge off means withdrawing that record and\nhaving the directory confirm it; anything less latches the instance rather\nthan reporting a clean failure. And the target's canonical name is not\ndurable until the directory says so — retiring sources before then is how a\npower cut leaves the sources gone and the target unreachable, so on\nplatforms with that barrier its failure stops the merge with nothing\nretired. Where the platform has no directory barrier the guarantee is\nweaker, and says so.\n\nCompaction closes the active container before it starts, and putting one\nback is part of the typed result rather than something a scope guard does:\na guard runs in a destructor, cannot report, and must swallow what it\ncatches, so a reopen that failed left the call returning success with\nnothing mapped and the next operation dereferencing a null container. A\nfailed reopen now reports and latches.\n\nRecovery is a mandatory phase of open(), before any container is opened, so\nan intermediate state is never observable. It acts only on evidence the\nstore wrote, and removes only names that parse inside its reserved\nnamespace. A sidecar with no target abandons the merge; a sidecar with a\ntarget finishes retiring the sources; a sidecar that cannot be fully\nvalidated, or more than one for a container, is fatal. Nothing is guessed.\n\nPublication cannot overwrite. The target takes an identity that was never\nissued, and it is placed with a move that fails if the name is taken rather\nthan a rename that would replace it — single-instance exclusion is why the\ncheck is meaningful, and this is what happens when that precondition does\nnot hold.\n\nA merge that publishes and then cannot retire what it superseded leaves\nseveral canonical files holding the same keys. Exclusion is what kept that\nunobservable and exclusion ends when the call returns, so the instance\nlatches: every operation that reads or changes stored state returns\nrecovery_required until it is closed and reopened. size(), the queue sizes\nand the statistics keep answering, and are documented as diagnostic rather\nthan access to the authoritative state.\n\nGroups are whole files and never fewer than two. A source is never\npartially consumed, because one that was would have to survive holding\nentries the new file also holds.\n\nBoth storage modes.\n\nBREAKING CHANGE: six public operations now return result<>, so that an\ninstance with cleanup pending can refuse them rather than answer from a state\nholding duplicates: db_base::erase(), db_base::process_pending_deletions(),\ndb_base::for_each_key(), full_db::process_pending_lookups() and\ncompact_db::process_pending_lookups(), and full_db::for_each_entry() and\ncompact_db::for_each_entry(). The iteration methods are [[nodiscard]], since a\nresult a caller may silently drop is not a refusal. erase() previously returned\na count whose zero was already documented as not authoritative, which would\nhave made a refusal indistinguishable from a deferral. error_code gains\nentropy_unavailable, file_open_failed, identity_collision,\ninsufficient_space, recovery_required and recovery_failed. The merge record\nformat moves to version 2 and version 1 is refused rather than read, so a\ndatabase left mid-merge by an earlier build stops at open with\nrecovery_failed. Such a record must not simply be deleted: without an\nidentifier the store cannot tell whether the target was published or how\nmany sources are already retired, and in every state but the first the\nrecord is the only thing saying what supersedes what. Reading it instead\nwould retire sources on an identity match alone. All of it lands in the unreleased 0.9.0.",
+          "timestamp": "2026-08-07T15:07:26+02:00",
+          "tree_id": "9959b209a13ba838c83e9f7834a8d3b4ff45f0df",
+          "url": "https://github.com/utxo-z/utxo-z/commit/c573f6e246b69b92566cba1acff4904ab4cab45b"
+        },
+        "date": 1786108195601,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 301603.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 301900.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 676165.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 852315.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 492.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 528.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 13179908.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 13149923.67,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12904638.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13206.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 15740042.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 15971522.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 168444.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 14726.28,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2928.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3595.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2699.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 54.17,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 54.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 54.24,
             "unit": "ops/sec"
           }
         ]
