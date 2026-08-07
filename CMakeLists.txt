@@ -109,6 +109,18 @@ if(WIN32)
     target_link_libraries(utxoz PRIVATE bcrypt)
 endif()
 
+# Given a mapped file whose header does not read as initialised, Boost assumes
+# another process is still creating it and spins for this long before reporting
+# corruption — five minutes by default. Nothing here waits on another process
+# creating a segment: one instance per database is the documented contract, and
+# a precondition nothing yet enforces (see #71), but either way this store never
+# waits for such a creator. So a corrupt or foreign file should be reported
+# promptly rather than five minutes later.
+# Private: Boost.Interprocess is an implementation detail and this must not
+# change the behaviour of anything a consumer compiles.
+target_compile_definitions(utxoz
+    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u)
+
 # Log backend configuration (defines are in config.hpp)
 if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
     target_link_libraries(utxoz PRIVATE spdlog::spdlog_header_only)
