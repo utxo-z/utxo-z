@@ -142,6 +142,14 @@ enum class error_code : uint8_t {
     sync_unsupported,       ///< This platform has no such durability barrier; nothing was promised
     sync_failed,            ///< A durability barrier was attempted and failed
     rename_failed,          ///< A file could not be moved onto its final name
+    /// Another instance holds this database. Reserved for exactly that: the
+    /// lock was attempted and someone else has it.
+    database_in_use,
+    /// The claim could not be attempted at all — no permission, a filesystem
+    /// without locking, a lock file that is not a regular file. Distinct from
+    /// database_in_use because they send an operator looking in different
+    /// places.
+    database_lock_unavailable,
     entropy_unavailable,    ///< The system's cryptographic generator would not produce bytes
     file_open_failed,       ///< A version file could not be created or opened
     identity_collision,     ///< A version identity about to be published is already taken

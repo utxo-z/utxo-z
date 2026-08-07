@@ -360,18 +360,60 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
     // back as an error. Asked the throwing way, an unreadable directory raises
     // out of a result-typed open(); asked the swallowing way, it answers "no"
     // and the database gets recreated over data that is still there.
-    auto const exists = path_exists(db_path_);
-    if ( ! exists) return std::unexpected(exists.error());
-
-    if (remove_existing && *exists) {
-        std::error_code ec;
-        fs::remove_all(db_path_, ec);
-        if (ec) return std::unexpected(error_code::catalog_unreadable);
-    }
-
     std::error_code ec;
     fs::create_directories(db_path_, ec);
     if (ec) return std::unexpected(error_code::catalog_unreadable);
+
+    // Any claim this instance already held goes first. Pointed at the same
+    // directory it would otherwise refuse itself — the lock belongs to an open
+    // file description, and a second descriptor on the same file conflicts even
+    // within one process — and pointed at a different one it would keep the old
+    // database claimed for nothing.
+    lock_.release();
+
+    // The claim comes before everything: before recovery, which unlinks files
+    // and which two processes must never run over one directory at once, and
+    // before the mode check, so a database that is both in use and of the wrong
+    // mode reports the one that stops you either way.
+    //
+    // On the way out it is released by the destructor: a configure() that fails
+    // below leaves open() destroying this instance, and the claim goes with it.
+    // That is a property of how open() uses the impl, not of an arbitrary
+    // return from here — which is why the release above stands on its own, for
+    // an instance that were ever configured twice.
+    auto claimed = database_lock::acquire(db_path_);
+    if ( ! claimed) return std::unexpected(claimed.error());
+    lock_ = std::move(*claimed);
+    lock_.record_holder();
+
+    if (remove_existing) {
+        // The children, not the directory. Removing the directory would unlink
+        // the file this instance holds its claim on: the lock would survive on
+        // an inode with no name, while a second process created a fresh lock
+        // file, locked a different inode, and both believed they were alone.
+        // Checked where each step happens, not at the top of the next
+        // iteration. A range-for advances with the throwing operator, and a
+        // failure to construct leaves the iterator at the end — so the body
+        // never runs, the check inside it never fires, and a directory that
+        // could not be read looks like a directory that was already empty.
+        // That is the same mistake enumerate_versions() exists to avoid.
+        fs::directory_iterator it(db_path_, ec);
+        if (ec) return std::unexpected(error_code::catalog_unreadable);
+
+        auto const end = fs::directory_iterator{};
+        while (it != end) {
+            if (it->path().filename() != database_lock::file_name) {
+                fs::remove_all(it->path(), ec);
+                if (ec) return std::unexpected(error_code::catalog_unreadable);
+            }
+
+            // After the increment, not at the top of the next iteration: a
+            // failing increment can leave the iterator at the end, and a check
+            // placed there would simply never run.
+            it.increment(ec);
+            if (ec) return std::unexpected(error_code::catalog_unreadable);
+        }
+    }
 
     // Check config persistence (detect mode mismatch on reopen)
     auto config_path = db_path_ / "utxoz_config.dat";
