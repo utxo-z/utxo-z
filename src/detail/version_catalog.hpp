@@ -172,8 +172,8 @@ inline result<bool> path_exists(fs::path const& p) {
  */
 [[nodiscard]]
 inline std::optional<size_t> parse_canonical_version(std::string const& name,
-                                                     std::string const& prefix) {
-    static constexpr std::string_view suffix = ".dat";
+                                                     std::string const& prefix,
+                                                     std::string_view suffix = ".dat") {
 
     if (name.size() <= prefix.size() + suffix.size()) return std::nullopt;
     if (name.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
@@ -206,7 +206,8 @@ inline std::optional<size_t> parse_canonical_version(std::string const& name,
  * nothing is published unless the whole directory was walked.
  */
 [[nodiscard]]
-inline result<std::vector<size_t>> enumerate_versions(fs::path const& dir, std::string const& prefix) {
+inline result<std::vector<size_t>> enumerate_versions(fs::path const& dir, std::string const& prefix,
+                                                     std::string_view suffix = ".dat") {
     std::error_code ec;
 
     auto const status = fs::status(dir, ec);
@@ -235,7 +236,7 @@ inline result<std::vector<size_t>> enumerate_versions(fs::path const& dir, std::
         if (ec) return std::unexpected(error_code::catalog_unreadable);
 
         if (fs::is_regular_file(entry_status)) {
-            if (auto const v = parse_canonical_version(it->path().filename().string(), prefix)) {
+            if (auto const v = parse_canonical_version(it->path().filename().string(), prefix, suffix)) {
                 versions.push_back(*v);
             }
         }

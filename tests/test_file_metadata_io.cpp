@@ -40,6 +40,7 @@
 #include <fmt/format.h>
 
 #include "detail/durability.hpp"
+#include "detail/system_entropy.hpp"
 #include "detail/file_metadata_io.hpp"
 #include "detail/scope_exit.hpp"
 
@@ -602,4 +603,101 @@ TEST_CASE("a failed content barrier happens before the replace", "[metadata][fai
     REQUIRE(read);
     CHECK(read->entry_count == 1);
     CHECK_FALSE(fs::exists(fs::path(dir) / "meta_0_v00000.dat.tmp"));
+}
+
+/**
+ * The page barrier and the file barrier cover different things — dirty pages of
+ * a mapping, and the file's own size and inode — and fail for different
+ * reasons. A single switch driving both cannot show that both are wired, and
+ * would hide one of them being dropped.
+ */
+TEST_CASE("the page barrier and the file barrier fail independently", "[durability][failpoint]") {
+    if constexpr (platform_sync_support() == sync_support::none) return;
+
+    auto const dir = unique_dir("barriers");
+    fs::create_directories(dir);
+    scope_exit const cleanup([&] {
+        failpoints::clear();
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    });
+
+    auto const path = fs::path(dir) / "meta_0_v00000.dat";
+    REQUIRE(write_metadata_file(path, sample()));
+
+    // An empty range: the page barrier short-circuits it, so what is left to
+    // observe is precisely the seam, which is what this case is about. Handing
+    // it a heap buffer instead would fail for a real reason — msync wants a
+    // mapping, not any address — and prove nothing about the failpoint.
+    auto page_barrier = [] { return utxoz::detail::sync_mapped_region(nullptr, 0); };
+
+    SECTION("the file barrier alone") {
+        failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
+
+        CHECK_FALSE(utxoz::detail::sync_file(path));
+        // The other one is untouched.
+        CHECK(page_barrier());
+    }
+
+    SECTION("the page barrier alone") {
+        failpoints::fail_sync_mapped_region.store(true, std::memory_order_relaxed);
+
+        CHECK_FALSE(page_barrier());
+        CHECK(utxoz::detail::sync_file(path));
+    }
+
+    SECTION("clear() disarms both") {
+        failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
+        failpoints::fail_sync_mapped_region.store(true, std::memory_order_relaxed);
+        failpoints::clear();
+
+        CHECK(utxoz::detail::sync_file(path));
+        CHECK(page_barrier());
+    }
+}
+
+/**
+ * The platform generators take a bounded count — `BCryptGenRandom` a `ULONG`,
+ * `getentropy` at most 256 bytes — while the caller passes a `size_t`. Casting a
+ * larger request down asks for the wrong number of bytes and reports success,
+ * which is the worst of both: fewer bytes than asked for, and no error.
+ *
+ * The splitting is tested here rather than by asking for four gigabytes of
+ * entropy, which is why it is a function and not a cast at the call site.
+ */
+TEST_CASE("an entropy request larger than the platform call is split, not truncated",
+          "[durability]") {
+    using utxoz::detail::entropy_chunk;
+
+    constexpr size_t win_limit = size_t(std::numeric_limits<uint32_t>::max());
+
+    // Under the limit: taken whole.
+    CHECK(entropy_chunk(0, win_limit) == 0);
+    CHECK(entropy_chunk(16, win_limit) == 16);
+    CHECK(entropy_chunk(win_limit - 1, win_limit) == win_limit - 1);
+
+    // At and over it: capped, never wrapped.
+    CHECK(entropy_chunk(win_limit, win_limit) == win_limit);
+    if constexpr (sizeof(size_t) > sizeof(uint32_t)) {
+        CHECK(entropy_chunk(win_limit + 1, win_limit) == win_limit);
+        CHECK(entropy_chunk(win_limit * 3, win_limit) == win_limit);
+
+        // The cast this replaces would have asked for one byte, not 4 GiB + 1.
+        CHECK(uint32_t(win_limit + 1) == 0u);
+    }
+
+    // The same function bounds getentropy, whose limit is much smaller.
+    CHECK(entropy_chunk(1000, 256) == 256);
+    CHECK(entropy_chunk(200, 256) == 200);
+
+    // And a whole request is covered by successive chunks with nothing left.
+    size_t remaining = 1000;
+    size_t issued = 0;
+    while (remaining > 0) {
+        auto const chunk = entropy_chunk(remaining, 256);
+        REQUIRE(chunk > 0);
+        remaining -= chunk;
+        issued += chunk;
+    }
+    CHECK(issued == 1000);
 }

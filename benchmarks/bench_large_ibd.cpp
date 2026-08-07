@@ -62,8 +62,12 @@ void run_ibd_simulation() {
         fs::remove_all(path);
     }
 
-    utxoz::db db;
-    db.configure(path, true);
+    auto opened = utxoz::full_db::open(path, true);
+    if ( ! opened) {
+        fmt::println("could not open the database at {}", path);
+        return;
+    }
+    auto db = std::move(*opened);
 
     // =========================================================================
     // Parameters
@@ -138,7 +142,7 @@ void run_ibd_simulation() {
         (void)db.erase(key, static_cast<uint32_t>(total_inserts / 1000 + i / 1000));
 
         if ((i + 1) % deferred_interval == 0) {
-            auto [processed, failed] = db.process_pending_deletions();
+            auto [processed, failed] = db.process_pending_deletions().value();
             deferred_total += processed;
         }
 
@@ -158,7 +162,7 @@ void run_ibd_simulation() {
     // =========================================================================
     fmt::println("\n--- Phase 3: Process remaining deferred deletions ---");
     t.reset();
-    auto [processed, failed] = db.process_pending_deletions();
+    auto [processed, failed] = db.process_pending_deletions().value();
     double deferred_s = t.elapsed_s();
     fmt::println("  Processed: {:L}, Failed: {:L}, Time: {:.3f}s",
         processed, failed.size(), deferred_s);

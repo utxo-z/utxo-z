@@ -94,6 +94,13 @@ struct db_base {
      * @brief Get the total number of UTXOs in the database
      */
     [[nodiscard]]
+    /// @warning Diagnostic, not authoritative access to the stored state. It
+    /// keeps answering after a failed cleanup has latched the instance, and in
+    /// that state it counts entries that several files hold at once. Every
+    /// operation that reads or changes what is stored reports
+    /// error_code::recovery_required instead; this one, the queue sizes and the
+    /// statistics do not, because they exist to describe a database that is in
+    /// trouble.
     size_t size() const;
 
     /**
@@ -116,7 +123,7 @@ struct db_base {
      * @see process_pending_deletions()
      */
     [[nodiscard]]
-    size_t erase(raw_outpoint const& key, uint32_t height);
+    result<size_t> erase(raw_outpoint const& key, uint32_t height);
 
     /**
      * @brief Process all pending deferred deletions
@@ -136,7 +143,7 @@ struct db_base {
      * @return Pair of (successful_deletions_count, failed_deletions).
      */
     [[nodiscard]]
-    std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
+    result<std::pair<uint32_t, std::vector<deferred_deletion_entry>>> process_pending_deletions();
 
     /**
      * @brief Get the number of pending deferred deletions
@@ -184,8 +191,9 @@ struct db_base {
      * @param f Callable with signature void(raw_outpoint const&)
      */
     template<typename F>
-    void for_each_key(F&& f) const {
-        for_each_key_impl([](void* ctx, raw_outpoint const& key) {
+    [[nodiscard]]
+    result<> for_each_key(F&& f) const {
+        return for_each_key_impl([](void* ctx, raw_outpoint const& key) {
             (*static_cast<std::remove_reference_t<F>*>(ctx))(key);
         }, &f);
     }
@@ -204,7 +212,8 @@ struct db_base {
 protected:
     db_base();
     ~db_base();
-    void for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
+    [[nodiscard]]
+    result<> for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     std::unique_ptr<detail::database_impl> impl_;
 };
 
@@ -312,7 +321,7 @@ struct full_db : db_base {
      * @return Pair of (resolved_lookups_map, unresolved_lookups).
      */
     [[nodiscard]]
-    std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+    result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
 
     /**
      * @brief Iterate over all entries (key + value) in the database
@@ -320,15 +329,17 @@ struct full_db : db_base {
      * @param f Callable with signature void(raw_outpoint const&, uint32_t block_height, std::span<uint8_t const> data)
      */
     template<typename F>
-    void for_each_entry(F&& f) const {
-        for_each_entry_impl([](void* ctx, raw_outpoint const& key, uint32_t height, std::span<uint8_t const> data) {
+    [[nodiscard]]
+    result<> for_each_entry(F&& f) const {
+        return for_each_entry_impl([](void* ctx, raw_outpoint const& key, uint32_t height, std::span<uint8_t const> data) {
             (*static_cast<std::remove_reference_t<F>*>(ctx))(key, height, data);
         }, &f);
     }
 
 private:
     full_db();
-    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
+    [[nodiscard]]
+    result<> for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 };
 
 // =============================================================================
@@ -406,7 +417,7 @@ struct compact_db : db_base {
      * @return Pair of (resolved_lookups_map, unresolved_lookups).
      */
     [[nodiscard]]
-    std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>> process_pending_lookups();
+    result<std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
 
     /**
      * @brief Iterate over all entries (key + compact fields) in the database
@@ -414,8 +425,9 @@ struct compact_db : db_base {
      * @param f Callable with signature void(raw_outpoint const&, uint32_t height, uint32_t file_number, uint32_t offset)
      */
     template<typename F>
-    void for_each_entry(F&& f) const {
-        for_each_entry_impl([](void* ctx, raw_outpoint const& key, uint32_t height,
+    [[nodiscard]]
+    result<> for_each_entry(F&& f) const {
+        return for_each_entry_impl([](void* ctx, raw_outpoint const& key, uint32_t height,
                                uint32_t file_number, uint32_t offset) {
             (*static_cast<std::remove_reference_t<F>*>(ctx))(key, height, file_number, offset);
         }, &f);
@@ -423,7 +435,8 @@ struct compact_db : db_base {
 
 private:
     compact_db();
-    void for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
+    [[nodiscard]]
+    result<> for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 };
 
 // =============================================================================

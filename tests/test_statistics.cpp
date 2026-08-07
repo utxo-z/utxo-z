@@ -93,7 +93,7 @@ TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
         for (size_t i = entries; i < entries + 100; ++i) {
             CHECK_FALSE(db.find(make_key(i), 200).has_value());
         }
-        auto const [resolved, unresolved] = db.process_pending_lookups();
+        auto const [resolved, unresolved] = db.process_pending_lookups().value();
         CHECK(resolved.empty());
         CHECK(unresolved.size() == 100);
 
@@ -231,7 +231,7 @@ TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurre
 
         // Single version, so the sweep resolves nothing and returns exactly the
         // set that was queued — no losses, no duplicates, no extras.
-        auto const [resolved, unresolved] = db.process_pending_lookups();
+        auto const [resolved, unresolved] = db.process_pending_lookups().value();
         CHECK(resolved.empty());
         REQUIRE(unresolved.size() == absent);
 
@@ -338,7 +338,7 @@ TEST_CASE("probe and resolution counters describe different phases",
         // Resolving it counts on the resolution side, and leaves the probe
         // counters exactly where they were — the same lookup is not counted
         // twice inside one denominator.
-        auto const [found, unresolved] = db.process_pending_lookups();
+        auto const [found, unresolved] = db.process_pending_lookups().value();
         CHECK(unresolved.empty());
         CHECK(found.size() == 1);
 
@@ -356,7 +356,7 @@ TEST_CASE("probe and resolution counters describe different phases",
         db.reset_search_stats();
         CHECK_FALSE(db.find(make_key(0xDEAD'BEEF), 300).has_value());
         {
-            auto const [f2, u2] = db.process_pending_lookups();
+            auto const [f2, u2] = db.process_pending_lookups().value();
             CHECK(f2.empty());
             CHECK(u2.size() == 1);
         }
@@ -403,7 +403,7 @@ TEST_CASE("erases do not contaminate the probe age", "[statistics][contract]") {
 
         // Erasing at a very different height must not move it.
         for (size_t i = 0; i < 50; ++i) {
-            CHECK(db.erase(make_key(i), 9'000) == 1);
+            CHECK(db.erase(make_key(i), 9'000).value() == 1);
         }
         auto const after = db.get_statistics();
         CHECK(after.probes.probes == 100);

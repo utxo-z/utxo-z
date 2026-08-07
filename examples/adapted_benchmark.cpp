@@ -175,7 +175,7 @@ int run_adapted_benchmark() {
 
             // Process pending deletions
             if (height % 5 == 0) {
-                auto [deleted, failed] = db.process_pending_deletions();
+                auto [deleted, failed] = db.process_pending_deletions().value();
                 fmt::println("Processed deletions: {} successful, {} failed", deleted, failed.size());
             }
 

@@ -164,7 +164,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Deferred deletions", "[database]") {
     }
 
     // Process pending deletions
-    auto [deleted, failed] = db_->process_pending_deletions();
+    auto [deleted, failed] = db_->process_pending_deletions().value();
     CHECK(failed.size() == 0); // No failures expected
 
     // Verify deletions
