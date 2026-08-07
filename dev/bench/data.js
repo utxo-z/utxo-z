@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786113918725,
+  "lastUpdate": 1786119750272,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -10503,6 +10503,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 5.12,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c2954f4b85a169e911ad562c6cf486526437a4d4",
+          "message": "feat!: claim a database exclusively while an instance holds it (#77)\n\nThe store is written for a single owner: one catalogue, one set of deferred\nqueues, one active container per size class. Two instances over one\ndirectory would each hold their own and neither would know about the\nother's rotations, merges or recoveries. Compaction was made safe against a\nsecond process destroying data — a merge cannot retire a source unless the\ntarget carries its identifier — but safe against that one hazard is not\nmulti-process safe.\n\nAn instance now takes an exclusive claim on the directory and holds it for\nits life. What that excludes is cooperating processes using this library; a\nprocess that ignores the claim, or someone deleting files by hand, is\noutside it, as it is for any advisory lock. It adds no thread safety: the\ncontract of one mutating operation at a time is unchanged.\n\nThe claim is a lock on an open descriptor, not the existence of a file. The\nkernel releases it when the last copy of that descriptor closes, which\nincludes a process dying however it dies; a lock file would outlive a crash\nand shut the database out until someone deleted it by hand. That is also\nwhy the descriptor is close-on-exec and the handle non-inheritable — a copy\ninherited across an exec would hold the claim in a process that never asked\nfor it.\n\nTwo failures are kept apart because they send an operator to different\nplaces: database_in_use means the lock was attempted and someone else has\nit, and nothing else maps to it; database_lock_unavailable means the\nattempt could not be made at all.\n\nIt is taken before recovery, which unlinks files and which two processes\nmust never run at once over one directory, and before the mode check, so a\ndatabase that is both in use and of the wrong mode reports the one that\nstops you either way. remove_existing empties the directory's children\nrather than the directory: removing it would unlink the inode the claim is\nheld on, leaving the holder locked to a name nobody can reach while a\nsecond process created a new lock file, claimed a different inode, and both\nbelieved they were alone.\n\nThe holder's pid and the time it took the claim are written into the file\nafterwards, for whoever reads a log. They are diagnostic: never consulted\nto decide ownership, never read by recovery, and failing to write them does\nnot weaken a claim already held.\n\nThat text is readable while the claim is held on POSIX only. flock leaves\nthe contents readable; LockFileEx locks them, so on Windows nothing can\nread it until the holder lets go — which is when it would have been useful.\nThe limitation is documented rather than worked around: a readable holder\nthere means locking one region and keeping the text in another, which is a\ncontract to design rather than a detail. The claim itself, and the\nexclusion it provides, are identical on both.\n\nUnder Emscripten the filesystem is virtual and there is no second process,\nso the claim succeeds and is documented as vacuous. Refusing would break\nthe one build where the hazard cannot arise.\n\nCloses #71\n\nBREAKING CHANGE: opening a database that another instance holds now fails\nwith error_code::database_in_use rather than succeeding and corrupting it.\nerror_code also gains database_lock_unavailable. A database directory\nacquires a permanent .utxoz.lock file, which must not be removed, renamed\nor replaced while an instance exists.",
+          "timestamp": "2026-08-07T18:20:04+02:00",
+          "tree_id": "4e3da1a0c912903aada62ee6a0f45e36f51eb903",
+          "url": "https://github.com/utxo-z/utxo-z/commit/c2954f4b85a169e911ad562c6cf486526437a4d4"
+        },
+        "date": 1786119749962,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 409345.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 363657.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 545628.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 621620.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 446.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 499.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 13320117.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 13233436.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 13003112.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12988.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 9497482.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14126800.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 139548.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 13079.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2641.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3446.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2758.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 54.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 53.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 53.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 54.13,
             "unit": "ops/sec"
           }
         ]
