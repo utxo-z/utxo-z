@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786119750272,
+  "lastUpdate": 1786123727076,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -10642,6 +10642,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 54.13,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "94bf695b6d8251532f3f47eaf04c69fa95b6e2c2",
+          "message": "test: run the crash matrix against compact mode as well (#78)\n\nThe crash-atomic merge protocol is written twice, once per storage mode,\nand the eight-point matrix only ever ran the full one. Two copies of a\nsequence whose correctness is entirely in its ordering is the shape that\ndrifts, and a matrix watching one of them would not notice the other\ndrifting.\n\nCompact mode had the latch, the uncertain-record and the name-barrier\ncases, but nothing that cut the protocol at each barrier and checked what\nreopening made of it. It does now: the same eight points, the same row per\npoint, the same requirements — every key exactly once, the merge finished\nor abandoned according to whether the target was published, no reserved\nnames left, the database serving again, and a second recovery that changes\nnothing.\n\nThis also puts a net under #72. Once the two implementations are one, both\nmatrices exercise the same code, and a barrier moved in it fails on both\nsides rather than silently in the mode nobody was watching.",
+          "timestamp": "2026-08-07T19:25:47+02:00",
+          "tree_id": "4e0ed392063b7a845d90fc172486f3f8e2ea539f",
+          "url": "https://github.com/utxo-z/utxo-z/commit/94bf695b6d8251532f3f47eaf04c69fa95b6e2c2"
+        },
+        "date": 1786123726607,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 15739186.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 15292932.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 8361030.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 5354491.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 638.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 1030.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 16853472.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 11926273.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 15626481.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13984.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 17149736.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 10594795.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 184487.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 15455.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 3483.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 6562.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3174.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 5.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 5.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 5.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 5.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 5.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 5.71,
             "unit": "ops/sec"
           }
         ]
