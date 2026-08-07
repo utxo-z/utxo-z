@@ -198,14 +198,15 @@ std::vector<utxoz::raw_outpoint> build_mergeable(std::string const& path, size_t
  */
 namespace {
 
-void compact_and_die(std::string const& path, crash_point point) {
+template <typename Db>
+void compact_and_die_as(std::string const& path, crash_point point) {
     pid_t const child = ::fork();
     REQUIRE(child >= 0);
 
     if (child == 0) {
         // No Catch2 assertions past this line: this process is going to die on
         // purpose, and a failed REQUIRE here would be reported as the child's.
-        auto opened = utxoz::full_db::open_for_testing(path);
+        auto opened = Db::open_for_testing(path);
         if ( ! opened) ::_exit(2);
         auto db = std::move(*opened);
 
@@ -223,6 +224,38 @@ void compact_and_die(std::string const& path, crash_point point) {
     // 99 is the deliberate death; 3 means compaction finished without reaching
     // the point, which would make the case vacuous.
     REQUIRE(WEXITSTATUS(status) == 99);
+}
+
+void compact_and_die(std::string const& path, crash_point point) {
+    compact_and_die_as<utxoz::full_db>(path, point);
+}
+
+/// A compact-mode database with three versions and room to merge them.
+std::vector<utxoz::raw_outpoint> build_mergeable_compact(std::string const& path,
+                                                         size_t want_files) {
+    auto opened = utxoz::compact_db::open_for_testing(path, true);
+    REQUIRE(opened);
+    auto db = std::move(*opened);
+
+    uint64_t next = 0;
+    while (count_matching_exact(path, "compact_v") < want_files) {
+        REQUIRE(db.insert(make_key(next), next % 1000, uint32_t(next), 100).value());
+        ++next;
+        REQUIRE(next < 3'000'000);
+    }
+
+    std::vector<utxoz::raw_outpoint> keys;
+    REQUIRE(db.for_each_key([&](utxoz::raw_outpoint const& k) { keys.push_back(k); }));
+    for (size_t i = 0; i < keys.size(); i += 2) {
+        REQUIRE(db.erase(keys[i], 400));
+    }
+    (void)db.process_pending_deletions();
+
+    std::vector<utxoz::raw_outpoint> remaining;
+    REQUIRE(db.for_each_key([&](utxoz::raw_outpoint const& k) { remaining.push_back(k); }));
+    std::ranges::sort(remaining);
+    db.close();
+    return remaining;
 }
 
 /// Everything that has to be true of a database after recovery, whatever it
@@ -1748,3 +1781,132 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
 
     db.close();
 }
+
+#ifndef _WIN32
+
+/**
+ * The same eight barriers, in compact mode.
+ *
+ * The protocol is written twice — once per storage mode — and only the full
+ * one was covered here. Two copies of a sequence whose correctness is entirely
+ * in its ordering is exactly the shape that drifts, and a matrix that watches
+ * one of them would not notice the other drifting.
+ *
+ * This is the net for #72: once the two are one piece of code, both matrices
+ * exercise it, and a barrier moved in the shared version fails on both sides
+ * rather than silently in the mode nobody watched.
+ */
+TEST_CASE("a crash at any barrier of a compact merge leaves a state reopening can settle",
+          "[database][compaction][recovery][crash][compact]") {
+    struct step {
+        crash_point point;
+        char const* name;
+        bool target_published;
+    };
+
+    std::vector<step> const steps{
+        {crash_point::after_build,           "after_build",           false},
+        {crash_point::after_file_sync,       "after_file_sync",       false},
+        {crash_point::after_sidecar_sync,    "after_sidecar_sync",    false},
+        {crash_point::after_sidecar_publish, "after_sidecar_publish", false},
+        {crash_point::after_target_publish,  "after_target_publish",  true},
+        {crash_point::before_source_unlink,  "before_source_unlink",  true},
+        {crash_point::mid_source_unlink,     "mid_source_unlink",     true},
+        {crash_point::after_sources_retired, "after_sources_retired", true},
+    };
+
+    for (auto const& s : steps) {
+        auto const path = unique_path(fmt::format("compactcrash_{}", s.name));
+        fs::remove_all(path);
+        INFO("crash point: " << s.name);
+        scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
+
+        auto const expected = build_mergeable_compact(path, 3);
+        REQUIRE_FALSE(expected.empty());
+        auto const files_before = count_matching_exact(path, "compact_v");
+        REQUIRE(files_before == 3);
+
+        compact_and_die_as<utxoz::compact_db>(path, s.point);
+
+        std::vector<utxoz::raw_outpoint> expected_after;
+
+        auto const files_after_crash = count_matching_exact(path, "compact_v");
+        INFO("after the crash: " << files_after_crash << " data files");
+
+        if (s.target_published) {
+            REQUIRE(files_after_crash > 0);
+        } else {
+            REQUIRE(files_after_crash == files_before);
+        }
+
+        // Recovery, then the row this crash belongs to.
+        {
+            auto opened = utxoz::compact_db::open_for_testing(path);
+            REQUIRE(opened);
+            auto db = std::move(*opened);
+
+            auto const files_after_recovery = count_matching_exact(path, "compact_v");
+            INFO("after recovery: " << files_after_recovery << " data files");
+
+            if (s.target_published) {
+                REQUIRE(files_after_recovery < files_before);
+            } else {
+                REQUIRE(files_after_recovery == files_before);
+            }
+            REQUIRE(count_reserved(path) == 0);
+
+            std::vector<utxoz::raw_outpoint> keys;
+            REQUIRE(db.for_each_key([&](utxoz::raw_outpoint const& k) { keys.push_back(k); }));
+            std::ranges::sort(keys);
+            REQUIRE(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
+            REQUIRE(keys == expected);
+
+            // It serves: reads, writes, deletes and another compaction.
+            auto const fresh = make_key(9'500'000);
+            REQUIRE(db.insert(fresh, 1, 2, 500).value());
+            REQUIRE(db.find(fresh, 500));
+
+            // The count, not merely the absence of an error: a successful
+            // delete of nothing satisfies the latter, and a database that
+            // accepts writes but silently deletes none of them would pass.
+            REQUIRE(db.erase(fresh, 600).value() == 1);
+            (void)db.process_pending_deletions();
+            CHECK_FALSE(db.find(fresh, 700));
+
+            REQUIRE(db.compact_all());
+
+            // What the database holds once this iteration has finished with it.
+            // The second recovery must find exactly this.
+            REQUIRE(db.for_each_key([&](utxoz::raw_outpoint const& k) {
+                expected_after.push_back(k);
+            }));
+            std::ranges::sort(expected_after);
+
+            db.close();
+        }
+
+        // And a second recovery changes nothing.
+        auto const settled = count_matching_exact(path, "compact_v");
+        auto again = utxoz::compact_db::open_for_testing(path);
+        REQUIRE(again);
+        auto db2 = std::move(*again);
+        REQUIRE(count_matching_exact(path, "compact_v") == settled);
+        REQUIRE(count_reserved(path) == 0);
+
+        // On the keys, not only on the file count. A recovery that moved or
+        // dropped entries without changing how many files there are would
+        // satisfy every count above and still have lost data.
+        std::vector<utxoz::raw_outpoint> settled_keys;
+        REQUIRE(db2.for_each_key([&](utxoz::raw_outpoint const& k) {
+            settled_keys.push_back(k);
+        }));
+        std::ranges::sort(settled_keys);
+        REQUIRE(std::adjacent_find(settled_keys.begin(), settled_keys.end())
+                == settled_keys.end());
+        REQUIRE(settled_keys == expected_after);
+
+        db2.close();
+    }
+}
+
+#endif // _WIN32
