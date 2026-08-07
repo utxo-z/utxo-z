@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786108196048,
+  "lastUpdate": 1786113918725,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -10364,6 +10364,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 54.24,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d68a607f2b926a6e8513f369f5adc10f2330374f",
+          "message": "fix: refuse an unusable version file at once instead of waiting five minutes (#76)\n\nBoost, handed a mapped file whose header does not read as initialised,\nassumes another process is midway through creating it and spins waiting for\nthat to finish. It waits for\nBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC, which is\nfive minutes by default, and only then reports corruption.\n\nNothing here ever waits on another process creating a segment — one\ninstance owns a database — so that wait is pure delay. A truncated or\nforeign file at a canonical version name stalled the operation that met it\nfor five minutes, and for five minutes per file if more than one was\ndamaged. An open that meets three of them took a quarter of an hour to\nreport a problem it knew about immediately.\n\nEvery version file is now opened through one function that first refuses\nwhat cannot be one of ours — including the two openings inside the file\ncache, which is the path historical resolution actually takes and had its\nown wait. There is no other open_only left in src/, so the check is a\nproperty of the store rather than of the call sites that remembered it. The floor is derived from the sizing constants\nrather than chosen, so it follows them: no configuration in this build\ncreates a version file below the smallest configured size, and a file under\nthat is rejected for the cost of one stat. The build also caps the Boost\ntimeout, which bounds whatever the size check cannot recognise.\n\nThe two are complementary and the test tells them apart by the only\nobservable that differs, since the error is the same either way: with the\nsize check a traversal over a truncated file takes milliseconds, with only\nthe cap about twenty seconds, with neither five minutes. The bound is five\nseconds — three orders of magnitude above the real figure, and failing if\neither protection is removed.\n\nThis was found while investigating the CI critical path in #74. One test\ncase accounted for 91% of the suite's runtime, all of it spent in that\nwait rather than in anything the test was checking. The suite goes from\n334 to 35 seconds with no case removed, shortened or weakened.\n\nCloses #74",
+          "timestamp": "2026-08-07T16:42:24+02:00",
+          "tree_id": "d3e06ec34e6bf56eaffb4c9914b42d0b4c60c7d5",
+          "url": "https://github.com/utxo-z/utxo-z/commit/d68a607f2b926a6e8513f369f5adc10f2330374f"
+        },
+        "date": 1786113918246,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 15382089.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 15355703.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 10337501.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 9197040.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 576.17,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 884.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 14407584.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 10738592.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 13528176,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 11982.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 15562991.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14480669.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 169319.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 16399.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 3600.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 6914.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2769.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 5.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 5.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 5.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 5.01,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 5.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 5.12,
             "unit": "ops/sec"
           }
         ]
