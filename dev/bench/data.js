@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786125873633,
+  "lastUpdate": 1786143651808,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -10920,6 +10920,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.04,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "934954845abad7453fc6e49f49277651580b6d6b",
+          "message": "refactor: write the merge protocol once instead of once per storage mode (#81)\n\nThe crash-atomic merge was implemented twice, once per storage mode, and\nthe two were identical step for step — twenty-eight of them in the same\norder, down to which failpoint sits between which barriers. Only six things\ndiffered: the map type, the container's identity, the file size, the bucket\ncount, which catalogue holds the versions, and where the block height lives\nin a stored value.\n\nTwo copies of a sequence whose correctness is entirely in its ordering is\nthe shape that drifts, and this one already had. The compact twin was left\non the previous protocol when the full one was rewritten, and every\ncorrection since — the merge identifier, the withdrawal of a record whose\npublication failed, the barrier before any source is retired — had to be\napplied twice by hand, with nothing checking that both landed.\n\nThe six differences are named in a policy and the protocol is written once.\nNothing else changes: not the order, not a failpoint, not an error, not a\nstate. The only edits inside the body are the mechanical ones the policy\nexists to make, plus log lines that now name a version through the policy\nrather than formatting a container index that no longer exists there.\n\nProven rather than asserted. Extracting the sequence of barriers, crash\npoints, catalogue mutations and latches from all three versions — the two\nthat were replaced and the one that replaces them — gives twenty-eight\nsteps, and the unified sequence is identical to both. Both crash matrices\npass, which is what #78 was written to make possible: they now exercise the\nsame code, so a barrier moved in it fails on both sides rather than\nsilently in the mode nobody was watching.\n\nCloses #72",
+          "timestamp": "2026-08-08T00:58:02+02:00",
+          "tree_id": "68e44bd6e020794706febb927dcc9da4024a701f",
+          "url": "https://github.com/utxo-z/utxo-z/commit/934954845abad7453fc6e49f49277651580b6d6b"
+        },
+        "date": 1786143651068,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 277233.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 321641.66,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 314415.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 272168.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 362.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 432.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12493991.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 9932715.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12165787.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13215.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 9327859.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 10372712.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 109585.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 7966.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2110.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2983.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2884.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 52.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 52.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 52.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 52.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 52.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 52.78,
             "unit": "ops/sec"
           }
         ]
