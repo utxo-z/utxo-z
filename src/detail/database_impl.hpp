@@ -23,6 +23,7 @@
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
+#include "database_lock.hpp"
 #include "file_cache.hpp"
 #include "file_metadata.hpp"
 #include "file_metadata_io.hpp"
@@ -204,6 +205,10 @@ private:
     /// it superseded. Latches: the instance serves nothing further until it is
     /// closed and reopened, which runs recovery.
     bool cleanup_pending_ = false;
+
+    /// The exclusive claim on the database directory, held for the life of this
+    /// instance and released by its destructor. Nothing releases it by hand.
+    database_lock lock_;
 
 public:
     /// Refuses every operation once a merge has published its target and could
