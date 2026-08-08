@@ -33,6 +33,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The refusals run before the version is derived, so a regression in the
+      # pattern is a red build rather than a quiet widening. Every case is a
+      # branch name somebody can push.
+      - name: 🧪 Version derivation refuses what it should
+        run: ./ci/test_determine_version.sh
+
       - name: 🔧 Determine version
         id: version
         uses: ./.github/actions/determine-version
@@ -40,12 +46,21 @@ jobs:
           github-ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
           run-number: ${{ github.run_number }}
 
+      # Through the environment for the same reason as everywhere else: github.ref
+      # is attacker-chosen on a pull request, and an expression in `run:` is
+      # substituted into the script before the shell sees it.
       - name: 📊 Build configuration summary
+        env:
+          UTXOZ_BUILD_VERSION: ${{ steps.version.outputs.build-version }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
-          echo "## Build Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** \`${{ steps.version.outputs.build-version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Event:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Ref:** ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Build Configuration"
+            echo "**Version:** \`${UTXOZ_BUILD_VERSION}\`"
+            echo "**Event:** ${EVENT_NAME}"
+            echo "**Ref:** ${REF}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: [setup]
@@ -160,8 +175,10 @@ jobs:
           Add-Content $profile "`n[conf]`ntools.cmake.cmaketoolchain:generator=Ninja`ntools.microsoft.msbuild:vs_version=18"
 
       - name: 📦 Install dependencies
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version=${{ needs.setup.outputs.build-version }} --build=missing -pr:h ci/conan-cpp23 -s build_type=${{ matrix.build-type }} -o sanitizer=${{ matrix.sanitizer }}
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=${{ matrix.build-type }} -o sanitizer=${{ matrix.sanitizer }}
 
       - name: ⚙️ Configure CMake
         run: |
@@ -316,12 +333,16 @@ jobs:
           path: toolchain-publish-${{ runner.os }}.json
 
       - name: 📦 Create package
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan create . --version=${{ needs.setup.outputs.build-version }} --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
+          conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
 
       - name: 🚀 Upload to Conan remote
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan upload utxoz/${{ needs.setup.outputs.build-version }} -r kth -c
+          conan upload "utxoz/$UTXOZ_BUILD_VERSION" -r kth -c
 
   build-wasm:
     needs: [setup]
@@ -368,8 +389,10 @@ jobs:
           EOF
 
       - name: 📦 Install dependencies
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version=${{ needs.setup.outputs.build-version }} --build=missing -pr ems2
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr ems2
 
       - name: ⚙️ Configure CMake
         run: |
@@ -460,22 +483,15 @@ jobs:
       # conan create builds the package; only a consumer proves it is usable. A
       # header missing from the install is invisible here and fatal downstream.
       #
-      # The version arrives through the environment rather than being expanded
-      # into the script text. determine-version derives it from the ref, and on a
-      # pull request the ref is the contributor's branch name — a branch called
-      # release/anything lands that "anything" here verbatim. Interpolated into
-      # the command line it would be shell source; as $UTXOZ_BUILD_VERSION it is
-      # a string, and the pattern below accepts only the shapes that action
-      # actually produces: X.Y.Z, and X.Y.Z with a -prerelease or +build suffix,
-      # which is the form the commit.<run-number> development versions take.
+      # The version arrives through the environment and is quoted, as everywhere
+      # else. The pattern check that used to sit here is gone: determine-version
+      # now refuses a ref that does not yield a version, so the value cannot
+      # reach any job unless it already is one. One check that nobody can forget
+      # beats six that somebody eventually will.
       - name: 📦 Package is consumable
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          if [[ ! "$UTXOZ_BUILD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "refusing to build a package for version '$UTXOZ_BUILD_VERSION'" >&2
-            exit 1
-          fi
           conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
 
   benchmark:
@@ -511,8 +527,10 @@ jobs:
           conan profile detect --force
 
       - name: 📦 Install dependencies
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version=${{ needs.setup.outputs.build-version }} -o with_benchmarks=True -o with_large_benchmarks=False --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" -o with_benchmarks=True -o with_large_benchmarks=False --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
 
       - name: ⚙️ Configure CMake
         run: |
