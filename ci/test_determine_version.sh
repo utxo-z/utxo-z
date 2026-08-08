@@ -66,8 +66,26 @@ accepts "refs/heads/release/1.2.3-rc1" "1.2.3-rc1"
 accepts "refs/heads/master"          "0.8.1-commit.42"
 accepts "refs/heads/main"            "0.8.1-commit.42"
 accepts "refs/heads/feature/anything" "0.8.1-commit.42"
-accepts "refs/tags/v0.9.0"           "0.8.1-commit.42"  # unchanged behaviour, see the script
 accepts "refs/pull/86/merge"         "0.8.1-commit.42"
+
+echo
+echo "== tags name their own version =="
+accepts "refs/tags/v0.9.0"           "0.9.0"
+accepts "refs/tags/0.9.0"            "0.9.0"          # no leading v
+accepts "refs/tags/v0.9.0-rc1"       "0.9.0-rc1"
+accepts "refs/tags/v1.2.3+build.5"   "1.2.3+build.5"
+# The newest tag is irrelevant here: the ref names the version, not LAST_TAG.
+LAST_TAG='0.1.0' accepts "refs/tags/v9.9.9" "9.9.9"
+
+echo
+echo "== branches keep the development form =="
+accepts "refs/heads/master"          "0.8.1-commit.42"
+accepts "refs/heads/dev"             "0.8.1-commit.42"
+accepts "refs/heads/feature/tags"    "0.8.1-commit.42"
+accepts "refs/heads/release/0.9.0"   "0.9.0"
+accepts "refs/heads/hotfix/0.9.1"    "0.9.1"
+# A branch that merely looks like a tag ref is still a branch.
+accepts "refs/heads/tags/v0.9.0"     "0.8.1-commit.42"
 
 echo
 echo "== refused =="
@@ -88,6 +106,22 @@ refuses 'refs/heads/release/--version'            "an option"
 # is the form a pull request delivers.
 refuses 'release/0.9.0; whoami'                   "a semicolon, bare branch"
 refuses 'release/$(id)'                           "command substitution, bare branch"
+
+# A tag now names the version directly, so a tag that is not a version must be
+# refused rather than laundered into <last-tag>-commit.<run>.
+refuses 'refs/tags/not-a-version'                 "a tag that is not a version"
+refuses 'refs/tags/v'                             "a tag that is only the v"
+refuses 'refs/tags/latest'                        "a moving tag name"
+refuses 'refs/tags/v0.9.0; whoami'                "a semicolon in a tag"
+refuses 'refs/tags/v0.9'                          "a tag with two components"
+
+# Refs are hierarchical. The tag archive/v0.9.0 is a different tag from v0.9.0,
+# and taking only the last component would publish both as 0.9.0 — two tags, one
+# package version, whichever built last winning.
+refuses 'refs/tags/archive/v0.9.0'                "a hierarchical tag name"
+refuses 'refs/tags/releases/2026/v0.9.0'          "a deeply nested tag name"
+refuses 'refs/heads/release/foo/0.9.0'            "a hierarchical release branch"
+refuses 'refs/heads/hotfix/foo/0.9.1'             "a hierarchical hotfix branch"
 
 # A tag that is not a version poisons every development version derived from it.
 echo
@@ -145,6 +179,21 @@ elif [[ ! -s "${work}/stderr" ]]; then
     failures=$((failures + 1))
 else
     printf 'ok    git failing to read the tags          -> refused, nothing on stdout\n'
+fi
+
+# A tag names its own version, so it must not need the tag list at all. Run from
+# a directory that is not a repository, with LAST_TAG unset: git would fail if it
+# were consulted, and the answer must still come out of the ref.
+set +e
+actual="$(cd "${work}/not-a-repo" && GITHUB_REF_INPUT=refs/tags/v0.9.0 RUN_NUMBER=42 \
+          env -u LAST_TAG "${SCRIPT}" 2>/dev/null)"
+status=$?
+set -e
+if [[ ${status} -ne 0 || "${actual}" != "0.9.0" ]]; then
+    printf 'FAIL  a tag outside a repository gave rc=%d %q, expected 0.9.0\n' "${status}" "${actual}"
+    failures=$((failures + 1))
+else
+    printf 'ok    a tag needs no tag list                 -> %s\n' "${actual}"
 fi
 
 rm -rf "${work}"
