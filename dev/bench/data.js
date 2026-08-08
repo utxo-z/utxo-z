@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786206746528,
+  "lastUpdate": 1786233330996,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -11476,6 +11476,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 53.99,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "914bbc287cdc30d238d783151371412bb999ca96",
+          "message": "fix: refuse a build version that is not a version (#90)\n\nPart of the build version comes from a branch name, and on a pull request\nthe branch name is written by whoever opened it. `determine-version` takes\nthe last path component of a `release/*` or `hotfix/*` ref verbatim, so a\nbranch called `release/0.9.0; whoami` yields exactly that string — verified\nagainst the previous code, which produces `0.9.0; whoami`.\n\nThat string was then expanded into six `run:` blocks. An expression in\n`run:` is substituted into the script before the shell sees it, so quoting\nat the point of use would not have helped: it was not an argument, it was\nshell source, in `conan install`, `conan create` and `conan upload`.\n\nThe first injection point was inside the action itself:\n\n    GITHUB_REF=\"${{ inputs.github-ref }}\"\n\nwhich is command substitution in the assignment, before any output exists\nto validate. So the inputs now arrive through `env:`, and so does every\nconsumer's copy of the version, quoted at each use.\n\nThe check runs once, in the derivation, before the value can become a step\noutput. No consumer can forget it, and the per-job guard that had been\nadded to one job is gone — one check nobody can skip beats six that\nsomebody eventually will. A ref that does not yield a version fails\n`setup`, so no job runs at all.\n\nThe derivation moved to `ci/determine_version.sh` so that the thing under\ntest is the thing that runs, and `ci/test_determine_version.sh` is the\ntest: nine refs that must be accepted, and sixteen that must be refused —\na space, `;`, `$()`, backquotes, an embedded newline, a leading `v`, an\nempty component, two components, path traversal, `&&`, `|`, `--version`,\nthe hostile names again as bare branch names, and a newest tag that is\nnot itself a version. Removing the pattern turns all sixteen red.\n\nReading the newest tag is one checkable command rather than\n`git tag -l | head -n 1`. A pipeline reports the status of its last stage, so\nhead succeeding hid git failing and left the tag empty — indistinguishable\nfrom a repository that simply has no tags, and it became 0.0.0-commit.<run>\nas though that were an answer. `git for-each-ref --count=1` separates them:\na query that finds nothing still falls back to 0.0.0, a query that fails\nwrites to stderr, exits non-zero and puts nothing on stdout. Both are tested,\nand the failing-git case is accepted as 0.0.0-commit.42 by the previous\npipeline.\n\nBehaviour is otherwise unchanged, deliberately. A tag still publishes\n`<last-tag>-commit.<run>` rather than its own version — surprising, and\nhow every release so far was cut, so changing it belongs to whoever owns\nreleases rather than to a fix about quoting.\n\nCloses #87",
+          "timestamp": "2026-08-09T01:52:02+02:00",
+          "tree_id": "e3a564faa3212181b82768498973aa345757f8be",
+          "url": "https://github.com/utxo-z/utxo-z/commit/914bbc287cdc30d238d783151371412bb999ca96"
+        },
+        "date": 1786233330259,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 276612.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 274306.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 326786.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 281000.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 456.82,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 454.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 13298614.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12921604.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 13196233.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13482.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 7867640.67,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14013852.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 119604.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 10072.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 1799.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3049.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2763.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 53.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 52.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 53.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 53.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 53.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.24,
             "unit": "ops/sec"
           }
         ]
