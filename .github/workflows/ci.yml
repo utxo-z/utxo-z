@@ -159,6 +159,15 @@ jobs:
           $profile = Join-Path $env:USERPROFILE '.conan2\profiles\default'
           Add-Content $profile "`n[conf]`ntools.cmake.cmaketoolchain:generator=Ninja`ntools.microsoft.msbuild:vs_version=18"
 
+      # Runs on each operating system, because the thing it catches is a
+      # platform's checkout converting text to CRLF — which is invisible from any
+      # other platform. Skipped on the sanitizer job only because it is the same
+      # Linux checkout as the job above it.
+      - name: 🧬 The recipe hashes the same everywhere
+        if: matrix.sanitizer == 'none'
+        shell: bash
+        run: ./ci/check_recipe_reproducible.sh
+
       - name: 📦 Install dependencies
         run: |
           conan install . -of build --version=${{ needs.setup.outputs.build-version }} --build=missing -pr:h ci/conan-cpp23 -s build_type=${{ matrix.build-type }} -o sanitizer=${{ matrix.sanitizer }}
