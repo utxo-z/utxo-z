@@ -1,5 +1,17 @@
 name: Build and Test
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Pull-request revisions supersede each other. Release and hotfix publishing
+  # must not be cancelled halfway through an artifact upload.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CONAN_VERSION: 2.31.2
+
 on:
   push:
     branches: [main, master, 'release/**', 'hotfix/**']
@@ -11,14 +23,15 @@ on:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       build-version: ${{ steps.version.outputs.build-version }}
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 🔧 Determine version
         id: version
@@ -41,25 +54,41 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            name: 🐧 Linux x86_64 GCC 15
+            name: 🐧 Linux x86_64 GCC 16
+            runner-os: Linux
+            runner-arch: X64
+            compiler-kind: gcc
+            compiler-major: 16
             configure-preset: conan-release
             build-preset: conan-release
             build-type: Release
             sanitizer: "none"
-          - os: macos-15
-            name: 🍎 macOS arm64 Apple Clang 17
+          - os: macos-26
+            name: 🍎 macOS arm64 Xcode 26.6 / Apple Clang 21
+            runner-os: macOS
+            runner-arch: ARM64
+            compiler-kind: apple-clang
+            compiler-major: 21
             configure-preset: conan-release
             build-preset: conan-release
             build-type: Release
             sanitizer: "none"
           - os: windows-2025
-            name: 🪟 Windows x64 MSVC 2025
-            configure-preset: conan-default
+            name: 🪟 Windows Server 2025 / VS 2026 (MSVC 14.44)
+            runner-os: Windows
+            runner-arch: X64
+            compiler-kind: msvc
+            compiler-major: 44
+            configure-preset: conan-release
             build-preset: conan-release
             build-type: Release
             sanitizer: "none"
           - os: ubuntu-24.04
-            name: 🧹 Linux x86_64 GCC 15 ASAN+UBSAN
+            name: 🧹 Linux x86_64 GCC 16 ASAN+UBSAN
+            runner-os: Linux
+            runner-arch: X64
+            compiler-kind: gcc
+            compiler-major: 16
             configure-preset: conan-debug
             build-preset: conan-debug
             build-type: Debug
@@ -70,24 +99,93 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Select compiler
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+            sudo apt-get update
+            sudo apt-get install --yes gcc-16 g++-16
+            echo "CC=gcc-16" >> "$GITHUB_ENV"
+            echo "CXX=g++-16" >> "$GITHUB_ENV"
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          fi
+
+      - name: 🔧 Locate MSVC
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'Visual Studio installation not found' }
+          $toolsetRoot = Join-Path $installation 'VC\Tools\MSVC'
+          $toolset = Get-ChildItem $toolsetRoot -Directory |
+            Where-Object Name -Like '14.44.*' |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $toolset) { throw "MSVC 14.44 is not installed under $toolsetRoot" }
+          $compiler = Join-Path $installation "VC\Tools\MSVC\$toolset\bin\Hostx64\x64\cl.exe"
+          if (-not (Test-Path $compiler)) { throw "MSVC x64 compiler not found at $compiler" }
+          $devShell = Join-Path $installation 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+          Import-Module $devShell
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -vcvars_ver=14.44'
+          @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCToolsInstallDir', 'VCINSTALLDIR', 'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion', 'UCRTVersion', 'UniversalCRTSdkDir') | ForEach-Object {
+            $value = [Environment]::GetEnvironmentVariable($_)
+            if ($value) { "$_=$value" >> $env:GITHUB_ENV }
+          }
+          "CXX=$compiler" >> $env:GITHUB_ENV
+          "VSWHERE=$vswhere" >> $env:GITHUB_ENV
 
       - name: 🐍 Install Conan
         run: |
-          pipx install conan
+          pipx install conan==${{ env.CONAN_VERSION }}
           conan --version
 
       - name: 🔧 Configure Conan
         run: |
           conan profile detect --force
 
+      - name: 🔧 Use selected MSVC with Ninja
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profile = Join-Path $env:USERPROFILE '.conan2\profiles\default'
+          Add-Content $profile "`n[conf]`ntools.cmake.cmaketoolchain:generator=Ninja`ntools.microsoft.msbuild:vs_version=18"
+
       - name: 📦 Install dependencies
         run: |
-          conan install . -of build --version=${{ needs.setup.outputs.build-version }} --build=missing -s build_type=${{ matrix.build-type }} -s compiler.cppstd=23 -o sanitizer=${{ matrix.sanitizer }}
+          conan install . -of build --version=${{ needs.setup.outputs.build-version }} --build=missing -pr:h ci/conan-cpp23 -s build_type=${{ matrix.build-type }} -o sanitizer=${{ matrix.sanitizer }}
 
       - name: ⚙️ Configure CMake
         run: |
           cmake --preset ${{ matrix.configure-preset }}
+
+      - name: 🧪 Verify configured toolchain
+        env:
+          EXPECTED_COMPILER_KIND: ${{ matrix.compiler-kind }}
+          EXPECTED_COMPILER_MAJOR: ${{ matrix.compiler-major }}
+          EXPECTED_XCODE: ${{ runner.os == 'macOS' && '26.6' || '' }}
+          EXPECTED_VISUAL_STUDIO: ${{ runner.os == 'Windows' && '18' || '' }}
+          EXPECTED_RUNNER_OS: ${{ matrix.runner-os }}
+          EXPECTED_RUNNER_ARCH: ${{ matrix.runner-arch }}
+          EXPECTED_CPPSTD: 23
+          CMAKE_CACHE: build/build/${{ matrix.build-type }}/CMakeCache.txt
+          CONAN_PROFILE: ci/conan-cpp23
+          TOOLCHAIN_MANIFEST: toolchain-${{ runner.os }}-${{ matrix.build-type }}-${{ matrix.sanitizer }}.json
+        run: python3 scripts/ci_toolchain_manifest.py
+
+      - name: 📤 Upload toolchain manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-${{ runner.os }}-${{ matrix.build-type }}-${{ matrix.sanitizer }}
+          path: toolchain-${{ runner.os }}-${{ matrix.build-type }}-${{ matrix.sanitizer }}.json
 
       - name: 🔨 Build
         run: |
@@ -111,21 +209,75 @@ jobs:
         include:
           - os: ubuntu-24.04
             name: 📦 Publish Linux x86_64
-          - os: macos-15
+            runner-os: Linux
+            runner-arch: X64
+            compiler-kind: gcc
+            compiler-major: 16
+          - os: macos-26
             name: 📦 Publish macOS arm64
+            runner-os: macOS
+            runner-arch: ARM64
+            compiler-kind: apple-clang
+            compiler-major: 21
           - os: windows-2025
             name: 📦 Publish Windows x64
+            runner-os: Windows
+            runner-arch: X64
+            compiler-kind: msvc
+            compiler-major: 44
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Select compiler
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+            sudo apt-get update
+            sudo apt-get install --yes gcc-16 g++-16
+            echo "CC=gcc-16" >> "$GITHUB_ENV"
+            echo "CXX=g++-16" >> "$GITHUB_ENV"
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          fi
+
+      - name: 🔧 Locate MSVC
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'Visual Studio installation not found' }
+          $toolsetRoot = Join-Path $installation 'VC\Tools\MSVC'
+          $toolset = Get-ChildItem $toolsetRoot -Directory |
+            Where-Object Name -Like '14.44.*' |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $toolset) { throw "MSVC 14.44 is not installed under $toolsetRoot" }
+          $compiler = Join-Path $installation "VC\Tools\MSVC\$toolset\bin\Hostx64\x64\cl.exe"
+          if (-not (Test-Path $compiler)) { throw "MSVC x64 compiler not found at $compiler" }
+          $devShell = Join-Path $installation 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+          Import-Module $devShell
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -vcvars_ver=14.44'
+          @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCToolsInstallDir', 'VCINSTALLDIR', 'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion', 'UCRTVersion', 'UniversalCRTSdkDir') | ForEach-Object {
+            $value = [Environment]::GetEnvironmentVariable($_)
+            if ($value) { "$_=$value" >> $env:GITHUB_ENV }
+          }
+          "CXX=$compiler" >> $env:GITHUB_ENV
+          "VSWHERE=$vswhere" >> $env:GITHUB_ENV
 
       - name: 🐍 Install Conan
         run: |
-          pipx install conan
+          pipx install conan==${{ env.CONAN_VERSION }}
           conan --version
 
       - name: 🔧 Configure Conan
@@ -137,9 +289,35 @@ jobs:
           conan remote add kth https://packages.kth.cash/api/
           conan remote login kth $CONAN_LOGIN_USERNAME -p $CONAN_PASSWORD
 
+      - name: 🔧 Use selected MSVC with Ninja
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profile = Join-Path $env:USERPROFILE '.conan2\profiles\default'
+          Add-Content $profile "`n[conf]`ntools.cmake.cmaketoolchain:generator=Ninja`ntools.microsoft.msbuild:vs_version=18"
+
+      - name: 🧪 Verify toolchain
+        env:
+          EXPECTED_COMPILER_KIND: ${{ matrix.compiler-kind }}
+          EXPECTED_COMPILER_MAJOR: ${{ matrix.compiler-major }}
+          EXPECTED_XCODE: ${{ runner.os == 'macOS' && '26.6' || '' }}
+          EXPECTED_VISUAL_STUDIO: ${{ runner.os == 'Windows' && '18' || '' }}
+          EXPECTED_RUNNER_OS: ${{ matrix.runner-os }}
+          EXPECTED_RUNNER_ARCH: ${{ matrix.runner-arch }}
+          EXPECTED_CPPSTD: 23
+          CONAN_PROFILE: ci/conan-cpp23
+          TOOLCHAIN_MANIFEST: toolchain-publish-${{ runner.os }}.json
+        run: python3 scripts/ci_toolchain_manifest.py
+
+      - name: 📤 Upload toolchain manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-publish-${{ runner.os }}
+          path: toolchain-publish-${{ runner.os }}.json
+
       - name: 📦 Create package
         run: |
-          conan create . --version=${{ needs.setup.outputs.build-version }} --build=missing -s build_type=Release -s compiler.cppstd=23 -o with_tests=False -o with_examples=False -o with_benchmarks=False
+          conan create . --version=${{ needs.setup.outputs.build-version }} --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
 
       - name: 🚀 Upload to Conan remote
         run: |
@@ -147,38 +325,46 @@ jobs:
 
   build-wasm:
     needs: [setup]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: 🌐 WebAssembly (Emscripten)
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🌐 Install Emscripten 6.0.6
+        uses: mymindstorm/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
+        with:
+          version: 6.0.6
+          actions-cache-folder: emsdk-cache
 
       - name: 🐍 Install Conan
         run: |
-          pipx install conan
+          pipx install conan==${{ env.CONAN_VERSION }}
           conan --version
 
       - name: 🔧 Setup Conan profiles
         run: |
           conan profile detect --force
 
-          cat > ~/.conan2/profiles/ems2 <<'EOF'
+          cat > ~/.conan2/profiles/ems2 <<EOF
           [settings]
           arch=wasm
           build_type=Release
           compiler=clang
           compiler.cppstd=23
           compiler.libcxx=libc++
-          compiler.version=14
+          compiler.version=21
           os=Emscripten
-
-          [tool_requires]
-          emsdk/3.1.73
 
           [buildenv]
           CC_FOR_BUILD=clang
           CXX_FOR_BUILD=clang++
+
+          [conf]
+          tools.cmake.cmaketoolchain:user_toolchain=["$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"]
           EOF
 
       - name: 📦 Install dependencies
@@ -188,6 +374,24 @@ jobs:
       - name: ⚙️ Configure CMake
         run: |
           cmake --preset conan-release
+
+      - name: 🧪 Verify configured toolchain
+        env:
+          EXPECTED_COMPILER_KIND: emscripten
+          EXPECTED_COMPILER_MAJOR: 6
+          EXPECTED_RUNNER_OS: Linux
+          EXPECTED_RUNNER_ARCH: X64
+          EXPECTED_CPPSTD: 23
+          CMAKE_CACHE: build/build/Release/CMakeCache.txt
+          CONAN_PROFILE: ems2
+          TOOLCHAIN_MANIFEST: toolchain-Emscripten.json
+        run: python3 scripts/ci_toolchain_manifest.py
+
+      - name: 📤 Upload toolchain manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-Emscripten
+          path: toolchain-Emscripten.json
 
       - name: 🔨 Build
         run: |
@@ -205,20 +409,45 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           # Otherwise the token is written into .git/config, where every build
           # step that follows can read it.
           persist-credentials: false
 
+      - name: 🔧 Select GCC 16
+        run: |
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes gcc-16 g++-16
+          echo "CC=gcc-16" >> "$GITHUB_ENV"
+          echo "CXX=g++-16" >> "$GITHUB_ENV"
+
       - name: 🐍 Install Conan
         run: |
-          pipx install conan
+          pipx install conan==${{ env.CONAN_VERSION }}
           conan --version
 
       - name: 🔧 Configure Conan
         run: |
           conan profile detect --force
+
+      - name: 🧪 Verify toolchain
+        env:
+          EXPECTED_COMPILER_KIND: gcc
+          EXPECTED_COMPILER_MAJOR: 16
+          EXPECTED_RUNNER_OS: Linux
+          EXPECTED_RUNNER_ARCH: X64
+          EXPECTED_CPPSTD: 23
+          CONAN_PROFILE: ci/conan-cpp23
+          TOOLCHAIN_MANIFEST: toolchain-generated-headers-Linux.json
+        run: python3 scripts/ci_toolchain_manifest.py
+
+      - name: 📤 Upload toolchain manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-generated-headers-Linux
+          path: toolchain-generated-headers-Linux.json
 
       # Two build directories with opposite configurations, a stale header
       # planted in the source tree, and an install inspected afterwards. Every
@@ -247,7 +476,7 @@ jobs:
             echo "refusing to build a package for version '$UTXOZ_BUILD_VERSION'" >&2
             exit 1
           fi
-          conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -s build_type=Release -s compiler.cppstd=23 -o with_tests=False -o with_examples=False -o with_benchmarks=False
+          conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
 
   benchmark:
     needs: [setup]
@@ -259,11 +488,22 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Select GCC 16
+        shell: bash
+        run: |
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes gcc-16 g++-16
+          echo "CC=gcc-16" >> "$GITHUB_ENV"
+          echo "CXX=g++-16" >> "$GITHUB_ENV"
 
       - name: 🐍 Install Conan
         run: |
-          pipx install conan
+          pipx install conan==${{ env.CONAN_VERSION }}
           conan --version
 
       - name: 🔧 Configure Conan
@@ -272,11 +512,29 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          conan install . -of build --version=${{ needs.setup.outputs.build-version }} -o with_benchmarks=True -o with_large_benchmarks=False --build=missing -s build_type=Release -s compiler.cppstd=23
+          conan install . -of build --version=${{ needs.setup.outputs.build-version }} -o with_benchmarks=True -o with_large_benchmarks=False --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
 
       - name: ⚙️ Configure CMake
         run: |
           cmake --preset conan-release
+
+      - name: 🧪 Verify configured toolchain
+        env:
+          EXPECTED_COMPILER_KIND: gcc
+          EXPECTED_COMPILER_MAJOR: 16
+          EXPECTED_RUNNER_OS: Linux
+          EXPECTED_RUNNER_ARCH: X64
+          EXPECTED_CPPSTD: 23
+          CMAKE_CACHE: build/build/Release/CMakeCache.txt
+          CONAN_PROFILE: ci/conan-cpp23
+          TOOLCHAIN_MANIFEST: toolchain-benchmark-Linux.json
+        run: python3 scripts/ci_toolchain_manifest.py
+
+      - name: 📤 Upload toolchain manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-benchmark-Linux
+          path: toolchain-benchmark-Linux.json
 
       - name: 🔨 Build
         run: |
@@ -307,7 +565,7 @@ jobs:
 
       - name: 💬 Comment on PR
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2
         with:
           header: benchmark-report
           path: benchmark_report.md
@@ -318,7 +576,7 @@ jobs:
           git checkout -- .
 
       - name: 📊 Store benchmark results
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1
         with:
           tool: customBiggerIsBetter
           output-file-path: benchmark_results_gh.json

@@ -15,6 +15,11 @@ echo "Building utxoz for WebAssembly (Emscripten)"
 
 cd "${PROJECT_DIR}"
 
+if ! command -v em++ >/dev/null 2>&1 || ! em++ --version | head -n 1 | grep -q ' 6\.'; then
+    echo "Error: Emscripten 6.x is required on PATH."
+    exit 1
+fi
+
 # Check that ems2 profile exists
 if ! conan profile show -pr ems2 > /dev/null 2>&1; then
     echo "Error: Conan profile 'ems2' not found."
@@ -27,11 +32,8 @@ if ! conan profile show -pr ems2 > /dev/null 2>&1; then
     echo "  compiler=clang"
     echo "  compiler.cppstd=23"
     echo "  compiler.libcxx=libc++"
-    echo "  compiler.version=14"
+    echo "  compiler.version=21"
     echo "  os=Emscripten"
-    echo ""
-    echo "  [tool_requires]"
-    echo "  emsdk/3.1.73"
     echo ""
     echo "  [buildenv]"
     echo "  CC_FOR_BUILD=clang"
