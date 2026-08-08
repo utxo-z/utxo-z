@@ -4,7 +4,7 @@
 
 /**
  * @file database.hpp
- * @brief Main database interface — db_base, full_db, compact_db
+ * @brief Main database interface — db_base, full_db, reference_db
  */
 
 #pragma once
@@ -30,7 +30,7 @@ struct database_impl;
 /**
  * @brief Base class with methods common to both storage modes.
  *
- * Not intended to be instantiated directly — use full_db::open() or compact_db::open().
+ * Not intended to be instantiated directly — use full_db::open() or reference_db::open().
  *
  * @par Threading
  * A database instance supports ONE mutating operation at a time, with no other
@@ -403,41 +403,41 @@ private:
 };
 
 // =============================================================================
-// compact_db — compact storage mode (fixed-size reference)
+// reference_db — reference storage mode (fixed-size reference)
 // =============================================================================
 
 /**
- * @brief Compact-mode UTXO Database
+ * @brief Reference-mode UTXO Database
  *
  * Stores only a small fixed-size reference (block_height, file_number, offset)
  * in a single container. Use this when the node stores full block data on disk
  * and only needs to track which file/offset each UTXO lives at.
  *
- * Create via compact_db::open() or compact_db::open_for_testing().
+ * Create via reference_db::open() or reference_db::open_for_testing().
  */
-struct compact_db : db_base {
-    ~compact_db();
+struct reference_db : db_base {
+    ~reference_db();
 
-    compact_db(compact_db&&) noexcept;
-    compact_db& operator=(compact_db&&) noexcept;
+    reference_db(reference_db&&) noexcept;
+    reference_db& operator=(reference_db&&) noexcept;
 
     /**
-     * @brief Open or create a database in compact mode
+     * @brief Open or create a database in reference mode
      * @param path Database directory path
      * @param remove_existing If true, remove existing database files
-     * @return compact_db on success, error on failure
+     * @return reference_db on success, error on failure
      */
     [[nodiscard]]
-    static result<compact_db> open(std::string_view path, bool remove_existing = false);
+    static result<reference_db> open(std::string_view path, bool remove_existing = false);
 
     /**
-     * @brief Open for testing with smaller file sizes (compact mode)
+     * @brief Open for testing with smaller file sizes (reference mode)
      */
     [[nodiscard]]
-    static result<compact_db> open_for_testing(std::string_view path, bool remove_existing = false);
+    static result<reference_db> open_for_testing(std::string_view path, bool remove_existing = false);
 
     /**
-     * @brief Insert a new UTXO with typed compact fields
+     * @brief Insert a new UTXO with typed reference fields
      * @param key UTXO key (transaction hash + output index)
      * @param file_number Block file number
      * @param offset Offset within the block file
@@ -457,12 +457,12 @@ struct compact_db : db_base {
      *
      * @param key UTXO key to search for
      * @param height Current block height (for statistics)
-     * @return compact_find_result if found in the latest version; error
+     * @return reference_find_result if found in the latest version; error
      *         not_found if the lookup was deferred (or the key does not exist)
      * @see process_pending_lookups()
      */
     [[nodiscard]]
-    result<compact_find_result> find(raw_outpoint const& key, uint32_t height) const;
+    result<reference_find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     /**
      * @brief Process all pending deferred lookups
@@ -477,10 +477,10 @@ struct compact_db : db_base {
      * @return Pair of (resolved_lookups_map, unresolved_lookups).
      */
     [[nodiscard]]
-    result<std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
+    result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
 
     /**
-     * @brief Iterate over all entries (key + compact fields) in the database
+     * @brief Iterate over all entries (key + reference fields) in the database
      *
      * @param f Callable with signature void(raw_outpoint const&, uint32_t height, uint32_t file_number, uint32_t offset)
      */
@@ -494,7 +494,7 @@ struct compact_db : db_base {
     }
 
 private:
-    compact_db();
+    reference_db();
     [[nodiscard]]
     result<> for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 };

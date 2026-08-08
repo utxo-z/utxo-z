@@ -3,14 +3,15 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 /**
- * @file test_compact_mode.cpp
- * @brief Tests for compact storage mode using compact_db
+ * @file test_reference_mode.cpp
+ * @brief Tests for reference storage mode using reference_db
  */
 
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <numeric>
 #include <random>
 
@@ -29,7 +30,7 @@
 
 namespace {
 
-inline std::atomic<uint64_t> compact_test_counter{0};
+inline std::atomic<uint64_t> reference_test_counter{0};
 
 utxoz::raw_outpoint make_test_key(uint32_t tx_id, uint32_t output_index) {
     utxoz::raw_outpoint key{};
@@ -44,36 +45,36 @@ utxoz::raw_outpoint make_test_key(uint32_t tx_id, uint32_t output_index) {
     return key;
 }
 
-struct CompactFixture {
-    CompactFixture() {
+struct ReferenceFixture {
+    ReferenceFixture() {
         auto ts = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-        auto unique_id = compact_test_counter.fetch_add(1);
-        test_path_ = fmt::format("./test_compact_db_{}_{}_{}", getpid(), ts, unique_id);
+        auto unique_id = reference_test_counter.fetch_add(1);
+        test_path_ = fmt::format("./test_reference_db_{}_{}_{}", getpid(), ts, unique_id);
 
         if (std::filesystem::exists(test_path_)) {
             std::filesystem::remove_all(test_path_);
         }
-        auto r = utxoz::compact_db::open_for_testing(test_path_, true);
+        auto r = utxoz::reference_db::open_for_testing(test_path_, true);
         if (!r) throw std::runtime_error("Failed to open test database");
         db_.emplace(std::move(*r));
     }
 
-    ~CompactFixture() {
+    ~ReferenceFixture() {
         db_.reset();
         if (std::filesystem::exists(test_path_)) {
             std::filesystem::remove_all(test_path_);
         }
     }
 
-    std::optional<utxoz::compact_db> db_;
+    std::optional<utxoz::reference_db> db_;
     std::string test_path_;
 };
 
 // Helper to create a fresh path without auto-configuring
 std::string make_fresh_path() {
     auto ts = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    auto unique_id = compact_test_counter.fetch_add(1);
-    auto path = fmt::format("./test_compact_db_{}_{}_{}", getpid(), ts, unique_id);
+    auto unique_id = reference_test_counter.fetch_add(1);
+    auto path = fmt::format("./test_reference_db_{}_{}_{}", getpid(), ts, unique_id);
     if (std::filesystem::exists(path)) {
         std::filesystem::remove_all(path);
     }
@@ -82,7 +83,7 @@ std::string make_fresh_path() {
 
 } // anonymous namespace
 
-TEST_CASE_METHOD(CompactFixture, "Compact: basic insert and find", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: basic insert and find", "[reference]") {
     auto key = make_test_key(1, 0);
     uint32_t file_number = 42;
     uint32_t offset = 12345;
@@ -102,7 +103,7 @@ TEST_CASE_METHOD(CompactFixture, "Compact: basic insert and find", "[compact]") 
     CHECK(db_->size() == 1);
 }
 
-TEST_CASE_METHOD(CompactFixture, "Compact: multiple inserts with typed fields", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: multiple inserts with typed fields", "[reference]") {
     for (int i = 0; i < 10; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         uint32_t file_number = static_cast<uint32_t>(i + 1);
@@ -117,7 +118,7 @@ TEST_CASE_METHOD(CompactFixture, "Compact: multiple inserts with typed fields", 
     CHECK(db_->size() == 10);
 }
 
-TEST_CASE_METHOD(CompactFixture, "Compact: erase operations", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: erase operations", "[reference]") {
     auto key = make_test_key(1, 0);
     uint32_t height = 100;
 
@@ -134,12 +135,12 @@ TEST_CASE_METHOD(CompactFixture, "Compact: erase operations", "[compact]") {
     CHECK(db_->erase(key2, height) == 0);
 }
 
-TEST_CASE("Compact: close and reopen", "[compact]") {
+TEST_CASE("Reference: close and reopen", "[reference]") {
     auto path = make_fresh_path();
 
     // Insert data
     {
-        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        auto r_db = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(r_db);
         auto db = std::move(*r_db);
 
@@ -153,7 +154,7 @@ TEST_CASE("Compact: close and reopen", "[compact]") {
 
     // Reopen and verify
     {
-        auto r_db = utxoz::compact_db::open_for_testing(path, false);
+        auto r_db = utxoz::reference_db::open_for_testing(path, false);
         REQUIRE(r_db);
         auto db = std::move(*r_db);
         CHECK(db.size() == 50);
@@ -171,12 +172,12 @@ TEST_CASE("Compact: close and reopen", "[compact]") {
     std::filesystem::remove_all(path);
 }
 
-TEST_CASE("Compact: mode mismatch detection", "[compact]") {
+TEST_CASE("Reference: mode mismatch detection", "[reference]") {
     auto path = make_fresh_path();
 
-    // Create as compact
+    // Create as reference
     {
-        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        auto r_db = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(r_db);
         auto db = std::move(*r_db);
         auto key = make_test_key(1, 0);
@@ -203,9 +204,9 @@ TEST_CASE("Compact: mode mismatch detection", "[compact]") {
         db.close();
     }
 
-    // Try to open as compact - should return error
+    // Try to open as reference - should return error
     {
-        auto r = utxoz::compact_db::open_for_testing(path2, false);
+        auto r = utxoz::reference_db::open_for_testing(path2, false);
         REQUIRE_FALSE(r.has_value());
         CHECK(r.error() == utxoz::error_code::storage_mode_mismatch);
     }
@@ -214,7 +215,7 @@ TEST_CASE("Compact: mode mismatch detection", "[compact]") {
     std::filesystem::remove_all(path2);
 }
 
-TEST_CASE_METHOD(CompactFixture, "Compact: deferred deletions", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: deferred deletions", "[reference]") {
     std::vector<utxoz::raw_outpoint> keys;
     for (int i = 0; i < 10; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
@@ -243,7 +244,7 @@ TEST_CASE_METHOD(CompactFixture, "Compact: deferred deletions", "[compact]") {
     }
 }
 
-TEST_CASE_METHOD(CompactFixture, "Compact: for_each_key", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: for_each_key", "[reference]") {
     for (int i = 0; i < 20; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         db_->insert(key, static_cast<uint32_t>(i), 0, 100).value();
@@ -257,7 +258,7 @@ TEST_CASE_METHOD(CompactFixture, "Compact: for_each_key", "[compact]") {
     CHECK(count == 20);
 }
 
-TEST_CASE_METHOD(CompactFixture, "Compact: for_each_entry", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: for_each_entry", "[reference]") {
     for (int i = 0; i < 20; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         db_->insert(key, static_cast<uint32_t>(i + 1), static_cast<uint32_t>(i * 100),
@@ -275,19 +276,19 @@ TEST_CASE_METHOD(CompactFixture, "Compact: for_each_entry", "[compact]") {
     CHECK(count == 20);
 }
 
-TEST_CASE_METHOD(CompactFixture, "Compact: statistics", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: statistics", "[reference]") {
     for (int i = 0; i < 50; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
         db_->insert(key, static_cast<uint32_t>(i), 0, static_cast<uint32_t>(100 + i)).value();
     }
 
     auto stats = db_->get_statistics();
-    CHECK(stats.mode == utxoz::storage_mode::compact);
+    CHECK(stats.mode == utxoz::storage_mode::reference);
     CHECK(stats.total_entries == 50);
     CHECK(stats.total_inserts >= 50);
 }
 
-TEST_CASE_METHOD(CompactFixture, "Compact: compaction", "[compact]") {
+TEST_CASE_METHOD(ReferenceFixture, "Reference: compaction", "[reference]") {
     // Insert enough data to verify compaction works
     for (int i = 0; i < 100; ++i) {
         auto key = make_test_key(static_cast<uint32_t>(i), 0);
@@ -312,11 +313,11 @@ TEST_CASE_METHOD(CompactFixture, "Compact: compaction", "[compact]") {
     }
 }
 
-TEST_CASE("Compact: file naming uses compact_v prefix", "[compact]") {
+TEST_CASE("Reference: file naming uses compact_v prefix", "[reference]") {
     auto path = make_fresh_path();
 
     {
-        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        auto r_db = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(r_db);
         auto db = std::move(*r_db);
         auto key = make_test_key(1, 0);
@@ -324,7 +325,7 @@ TEST_CASE("Compact: file naming uses compact_v prefix", "[compact]") {
         db.close();
     }
 
-    // Verify compact file exists
+    // Verify reference file exists
     CHECK(std::filesystem::exists(path + "/compact_v00000.dat"));
 
     // Verify no cont_ files exist
@@ -340,17 +341,78 @@ TEST_CASE("Compact: file naming uses compact_v prefix", "[compact]") {
     std::filesystem::remove_all(path);
 }
 
-TEST_CASE("Compact: config file is created", "[compact]") {
+TEST_CASE("Reference: config file is created", "[reference]") {
     auto path = make_fresh_path();
 
     {
-        auto r_db = utxoz::compact_db::open_for_testing(path, true);
+        auto r_db = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(r_db);
         auto db = std::move(*r_db);
         db.close();
     }
 
     CHECK(std::filesystem::exists(path + "/utxoz_config.dat"));
+
+    std::filesystem::remove_all(path);
+}
+
+/**
+ * The mode was renamed; the database was not.
+ *
+ * `compact_db` became `reference_db` to stop one word meaning two things — the
+ * storage mode, and the operation that merges version files. Nothing about what
+ * is written changed, and this is what says so: the files a reference database
+ * creates still carry the names they always did, and the byte the config stores
+ * for the mode is still the same byte.
+ *
+ * A database written by 0.8 has to open here, and one written here has to open
+ * there. Renaming the files or renumbering the enumerator would break both —
+ * silently in the second case, since that byte is what tells a reopen which
+ * kind of database it is looking at.
+ */
+TEST_CASE("renaming the mode did not rename anything on disk", "[reference][format]") {
+    auto const path = make_fresh_path();
+
+    {
+        auto opened = utxoz::reference_db::open_for_testing(path, true);
+        REQUIRE(opened);
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(make_test_key(1, 0), 7, 42, 100).value());
+        db.close();
+    }
+
+    // The names, unchanged from before the rename.
+    CHECK(std::filesystem::exists(fmt::format("{}/compact_v00000.dat", path)));
+    CHECK(std::filesystem::exists(fmt::format("{}/utxoz_config.dat", path)));
+
+    // And the mode byte the config carries.
+    {
+        std::ifstream ifs(fmt::format("{}/utxoz_config.dat", path), std::ios::binary);
+        REQUIRE(ifs);
+
+        char magic[4]{};
+        uint32_t version = 0;
+        uint8_t mode_byte = 0xFF;
+        ifs.read(magic, 4);
+        ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
+        ifs.read(reinterpret_cast<char*>(&mode_byte), sizeof(mode_byte));
+        REQUIRE(ifs);
+
+        CHECK(std::string(magic, 4) == "UTXO");
+        CHECK(version == 1);
+        CHECK(mode_byte == 1);
+        CHECK(mode_byte == static_cast<uint8_t>(utxoz::storage_mode::reference));
+    }
+
+    // It reopens, and what was written is there.
+    auto reopened = utxoz::reference_db::open_for_testing(path, false);
+    REQUIRE(reopened);
+    auto db = std::move(*reopened);
+    auto const found = db.find(make_test_key(1, 0), 200);
+    REQUIRE(found);
+    CHECK(found->file_number == 7);
+    CHECK(found->offset == 42);
+    db.close();
 
     std::filesystem::remove_all(path);
 }

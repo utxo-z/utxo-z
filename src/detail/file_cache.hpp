@@ -30,8 +30,8 @@
 namespace utxoz::detail {
 
 inline constexpr std::string_view data_file_format = "{}/cont_{}_v{:05}.dat";
-inline constexpr std::string_view compact_data_file_format = "{}/compact_v{:05}.dat";
-inline constexpr size_t compact_sentinel_index = SIZE_MAX;
+inline constexpr std::string_view reference_data_file_format = "{}/compact_v{:05}.dat";
+inline constexpr size_t reference_sentinel_index = SIZE_MAX;
 
 /**
  * @brief LRU cache for memory-mapped database files
@@ -43,7 +43,7 @@ inline constexpr size_t compact_sentinel_index = SIZE_MAX;
  * follow, and both are load-bearing:
  *
  * 1. Any map reference returned by the cache — get_or_open_file() or
- *    get_or_open_compact_file() alike — is valid only until the next cache
+ *    get_or_open_reference_file() alike — is valid only until the next cache
  *    operation. Evicting an entry destroys its managed_mapped_file, which
  *    unmaps the memory the map lives in, so holding a reference across a second
  *    call is a use-after-unmap. This bites single-threaded code too, as soon as
@@ -107,8 +107,8 @@ struct file_cache {
         return {*map, false};
     }
 
-    std::pair<compact_map_t&, bool> get_or_open_compact_file(size_t version) {
-        file_key_t file_key{compact_sentinel_index, version};
+    std::pair<reference_map_t&, bool> get_or_open_reference_file(size_t version) {
+        file_key_t file_key{reference_sentinel_index, version};
 
         ++gets_;
         auto const now = std::chrono::steady_clock::now();
@@ -118,19 +118,19 @@ struct file_cache {
             it->second.last_used = now;
             ++it->second.access_count;
             ++hits_;
-            return {*static_cast<compact_map_t*>(it->second.map_ptr), true};
+            return {*static_cast<reference_map_t*>(it->second.map_ptr), true};
         }
 
         if (cache_.size() >= max_cached_files_) {
             evict_lru();
         }
 
-        auto file_path = make_file_path(compact_sentinel_index, version);
+        auto file_path = make_file_path(reference_sentinel_index, version);
         auto segment = open_existing_segment(file_path);
 
-        auto* map = segment->find<compact_map_t>(map_object_name).first;
+        auto* map = segment->find<reference_map_t>(map_object_name).first;
         if (!map) {
-            throw std::runtime_error("Map not found in compact file: " + file_path);
+            throw std::runtime_error("Map not found in reference file: " + file_path);
         }
 
         cache_[file_key] = cached_file{
@@ -223,8 +223,8 @@ private:
     };
 
     std::string make_file_path(size_t container_index, size_t version) const {
-        if (container_index == compact_sentinel_index) {
-            return fmt::format(compact_data_file_format, base_path_, version);
+        if (container_index == reference_sentinel_index) {
+            return fmt::format(reference_data_file_format, base_path_, version);
         }
         return fmt::format(data_file_format, base_path_, container_index, version);
     }

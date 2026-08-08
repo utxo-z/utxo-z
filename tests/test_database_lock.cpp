@@ -226,12 +226,12 @@ TEST_CASE("a failed open releases the claim it took", "[database][lock]") {
     fs::remove_all(path);
     scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
 
-    // A compact database, then opened as a full one. configure() takes the
+    // A reference database, then opened as a full one. configure() takes the
     // claim before it checks the mode, so this is a failure *after* the claim —
     // exactly the shape that would leak it if release were a call at each exit
     // rather than a destructor.
     {
-        auto created = utxoz::compact_db::open_for_testing(path, true);
+        auto created = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(created);
         auto db = std::move(*created);
         db.close();
@@ -242,7 +242,7 @@ TEST_CASE("a failed open releases the claim it took", "[database][lock]") {
     CHECK(wrong_mode.error() == utxoz::error_code::storage_mode_mismatch);
 
     // If the claim had leaked, this would be refused.
-    auto const reopened = utxoz::compact_db::open_for_testing(path);
+    auto const reopened = utxoz::reference_db::open_for_testing(path);
     REQUIRE(reopened);
 }
 

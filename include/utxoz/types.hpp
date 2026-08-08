@@ -120,9 +120,9 @@ inline constexpr size_t container_count = container_sizes.size();
  * @brief Storage mode selection
  *
  * - full: Stores complete UTXO output data (scriptPubKey + amount) across 5 size-tiered containers
- * - compact: Stores only a small fixed-size reference (e.g. block file position) in a single container
+ * - reference: Stores only a small fixed-size reference (e.g. block file position) in a single container
  */
-enum class storage_mode : uint8_t { full = 0, compact = 1 };
+enum class storage_mode : uint8_t { full = 0, reference = 1 };
 
 /**
  * @brief Error codes for database operations
@@ -195,8 +195,8 @@ struct full_find_result {
     uint32_t block_height;
 };
 
-/// Result of compact_db::find(): typed compact fields + block height.
-struct compact_find_result {
+/// Result of reference_db::find(): typed reference fields + block height.
+struct reference_find_result {
     uint32_t block_height;
     uint32_t file_number;
     uint32_t offset;
@@ -206,14 +206,14 @@ struct compact_find_result {
 using find_result = full_find_result;
 
 /**
- * @brief File size for compact mode (production)
+ * @brief File size for reference mode (production)
  */
-inline constexpr size_t compact_file_size = 4_gib;
+inline constexpr size_t reference_file_size = 4_gib;
 
 /**
- * @brief File size for compact mode (testing)
+ * @brief File size for reference mode (testing)
  */
-inline constexpr size_t compact_test_file_size = 10_mib;
+inline constexpr size_t reference_test_file_size = 10_mib;
 
 /**
  * @brief Deferred deletion entry

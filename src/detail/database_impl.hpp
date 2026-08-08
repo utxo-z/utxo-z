@@ -78,11 +78,11 @@ struct database_impl {
     std::optional<full_find_result> full_find(raw_outpoint const& key, uint32_t height) const;
     std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>> full_process_pending_lookups();
 
-    // Typed compact-mode methods (no serialization)
-    result<bool> compact_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
-    std::optional<compact_find_result> compact_find_typed(raw_outpoint const& key, uint32_t height) const;
-    std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>> compact_process_pending_lookups();
-    result<> compact_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
+    // Typed reference-mode methods (no serialization)
+    result<bool> reference_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
+    std::optional<reference_find_result> reference_find_typed(raw_outpoint const& key, uint32_t height) const;
+    std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>> reference_process_pending_lookups();
+    result<> reference_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 
     database_statistics get_statistics();
     void print_statistics();
@@ -202,7 +202,7 @@ private:
 
     template<size_t Index>
     result<> reopen_active_container();
-    result<> reopen_active_compact_container();
+    result<> reopen_active_reference_container();
 
     /// True once a merge published its target and could not retire everything
     /// it superseded. Latches: the instance serves nothing further until it is
@@ -214,7 +214,7 @@ private:
     database_lock lock_;
 
     template <size_t I> friend struct full_merge_policy;
-    friend struct compact_merge_policy;
+    friend struct reference_merge_policy;
 
     /**
      * @brief Version files this instance has written to and not yet made durable.
@@ -272,34 +272,34 @@ private:
     // Statistics
     void update_fragmentation_stats();
 
-    // Compact mode operations
-    result<bool> compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height);
-    std::optional<find_result> compact_find(raw_outpoint const& key, uint32_t height) const;
-    std::optional<find_result> compact_find_in_latest(raw_outpoint const& key, uint32_t height) const;
-    size_t compact_erase(raw_outpoint const& key, uint32_t height);
-    size_t compact_erase_in_latest(raw_outpoint const& key, uint32_t height);
+    // Reference mode operations
+    result<bool> reference_insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+    std::optional<find_result> reference_find(raw_outpoint const& key, uint32_t height) const;
+    std::optional<find_result> reference_find_in_latest(raw_outpoint const& key, uint32_t height) const;
+    size_t reference_erase(raw_outpoint const& key, uint32_t height);
+    size_t reference_erase_in_latest(raw_outpoint const& key, uint32_t height);
 
-    void compact_open_or_create(size_t version);
-    void compact_close_container();
-    void compact_new_version();
-    bool compact_can_insert_safely() const;
-    result<> compact_compact_container();
-    result<> compact_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
-    result<> compact_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
+    void reference_open_or_create(size_t version);
+    void reference_close_container();
+    void reference_new_version();
+    bool reference_can_insert_safely() const;
+    result<> compact_reference_container();
+    result<> reference_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
+    result<> reference_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
-    size_t find_optimal_buckets_compact(std::string const& file_path, size_t file_size, size_t initial_buckets);
+    size_t find_optimal_buckets_reference(std::string const& file_path, size_t file_size, size_t initial_buckets);
 
-    compact_map_t& compact_map();
-    compact_map_t const& compact_map() const;
+    reference_map_t& reference_map();
+    reference_map_t const& reference_map() const;
 
     // Config persistence
     [[nodiscard]]
     result<> save_config_to_disk();
     result<> load_config_from_disk();
 
-    // Compact metadata helpers
-    void compact_save_metadata(size_t version) noexcept;
-    void compact_load_metadata(size_t version);
+    // Reference metadata helpers
+    void reference_save_metadata(size_t version) noexcept;
+    void reference_load_metadata(size_t version);
 
     // Member variables
     fs::path db_path_;
@@ -312,13 +312,13 @@ private:
     std::array<size_t, container_count> current_versions_{};
     std::array<size_t, container_count> min_buckets_ok_{};
 
-    // Compact mode storage
-    std::unique_ptr<bip::managed_mapped_file> compact_segment_;
-    void* compact_container_ = nullptr;
-    size_t compact_current_version_ = 0;
-    size_t compact_min_buckets_ok_ = 0;
-    size_t compact_active_file_size_ = 0;
-    version_catalog compact_catalog_;
+    // Reference mode storage
+    std::unique_ptr<bip::managed_mapped_file> reference_segment_;
+    void* reference_container_ = nullptr;
+    size_t reference_current_version_ = 0;
+    size_t reference_min_buckets_ok_ = 0;
+    size_t reference_active_file_size_ = 0;
+    version_catalog reference_catalog_;
 
     size_t entries_count_ = 0;
 

@@ -159,7 +159,7 @@ struct merge_plan {
     /// evidence of damage rather than an unusual plan.
     static constexpr size_t max_sources = 64;
 
-    size_t container = 0;             ///< Container index, or the compact sentinel.
+    size_t container = 0;             ///< Container index, or the reference sentinel.
     size_t target = 0;                ///< The new identity being published.
     merge_marker id;                  ///< What the target must carry to be the one meant.
     std::vector<size_t> sources;      ///< The identities it supersedes, ascending.

@@ -4,7 +4,7 @@
 
 /**
  * @file database.cpp
- * @brief Database interface implementation — db_base, full_db, compact_db
+ * @brief Database interface implementation — db_base, full_db, reference_db
  */
 
 #include <utxoz/database.hpp>
@@ -173,55 +173,55 @@ result<> full_db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint
 }
 
 // =============================================================================
-// compact_db
+// reference_db
 // =============================================================================
 
-compact_db::compact_db() = default;
-compact_db::~compact_db() = default;
-compact_db::compact_db(compact_db&&) noexcept = default;
-compact_db& compact_db::operator=(compact_db&&) noexcept = default;
+reference_db::reference_db() = default;
+reference_db::~reference_db() = default;
+reference_db::reference_db(reference_db&&) noexcept = default;
+reference_db& reference_db::operator=(reference_db&&) noexcept = default;
 
-result<compact_db> compact_db::open(std::string_view path, bool remove_existing) {
-    compact_db db;
+result<reference_db> reference_db::open(std::string_view path, bool remove_existing) {
+    reference_db db;
     db.impl_ = std::make_unique<detail::database_impl>();
-    auto r = db.impl_->configure(path, remove_existing, storage_mode::compact);
+    auto r = db.impl_->configure(path, remove_existing, storage_mode::reference);
     if (!r) return std::unexpected(r.error());
     return db;
 }
 
-result<compact_db> compact_db::open_for_testing(std::string_view path, bool remove_existing) {
-    compact_db db;
+result<reference_db> reference_db::open_for_testing(std::string_view path, bool remove_existing) {
+    reference_db db;
     db.impl_ = std::make_unique<detail::database_impl>();
-    auto r = db.impl_->configure_for_testing(path, remove_existing, storage_mode::compact);
+    auto r = db.impl_->configure_for_testing(path, remove_existing, storage_mode::reference);
     if (!r) return std::unexpected(r.error());
     return db;
 }
 
-result<bool> compact_db::insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height) {
+result<bool> reference_db::insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height) {
     if (!impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    return impl_->compact_insert_typed(key, height, file_number, offset);
+    return impl_->reference_insert_typed(key, height, file_number, offset);
 }
 
-result<compact_find_result> compact_db::find(raw_outpoint const& key, uint32_t height) const {
+result<reference_find_result> reference_db::find(raw_outpoint const& key, uint32_t height) const {
     if (!impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    auto r = impl_->compact_find_typed(key, height);
+    auto r = impl_->reference_find_typed(key, height);
     if (!r) return std::unexpected(error_code::not_found);
     return std::move(*r);
 }
 
-result<std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>>>
-compact_db::process_pending_lookups() {
+result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>>
+reference_db::process_pending_lookups() {
     if ( ! impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    return impl_->compact_process_pending_lookups();
+    return impl_->reference_process_pending_lookups();
 }
 
-result<> compact_db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const {
+result<> reference_db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    return impl_->compact_for_each_entry_typed(cb, ctx);
+    return impl_->reference_for_each_entry_typed(cb, ctx);
 }
 
 } // namespace utxoz

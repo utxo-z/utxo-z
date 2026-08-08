@@ -448,16 +448,16 @@ TEST_CASE("lookups must be processed before deletions within a batch",
 }
 
 // =============================================================================
-// Compact mode — same contract
+// Reference mode — same contract
 // =============================================================================
 
-TEST_CASE("compact find(): after rotation it defers, process_pending_lookups() is definitive",
-          "[database][compact][rotation][deferred][contract]") {
-    auto const path = make_unique_path("compact");
+TEST_CASE("reference find(): after rotation it defers, process_pending_lookups() is definitive",
+          "[database][reference][rotation][deferred][contract]") {
+    auto const path = make_unique_path("reference");
     std::filesystem::remove_all(path);
 
     {
-        auto r = utxoz::compact_db::open_for_testing(path, true);
+        auto r = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(r.has_value());
         auto db = std::move(*r);
 
@@ -523,7 +523,7 @@ TEST_CASE("compact find(): after rotation it defers, process_pending_lookups() i
  */
 TEST_CASE("compact_all() keeps the deferred paths consistent",
           "[database][compaction][cache]") {
-    auto const path = make_unique_path("compactall");
+    auto const path = make_unique_path("referenceall");
     std::filesystem::remove_all(path);
 
     {
