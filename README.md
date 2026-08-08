@@ -10,8 +10,8 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 
 ## Features
 
-- **Two storage modes**: Full mode (variable-size values) and Compact mode (fixed-size file references)
-- **Type-safe API**: `full_db` and `compact_db` with compile-time mode safety — no runtime dispatch
+- **Two storage modes**: Full mode (variable-size values) and Reference mode (fixed-size file references)
+- **Type-safe API**: `full_db` and `reference_db` with compile-time mode safety — no runtime dispatch
 - **Multi-container architecture**: 5 size-optimized containers (48B, 94B, 128B, 256B, 10KB) in full mode
 - **Memory-mapped files**: Automatic file rotation and OS-managed I/O
 - **Deferred lookups and deletions**: Reads and deletes that miss the mapped version are batched — see [Deferred lookups and deletions](#deferred-lookups-and-deletions)
@@ -94,15 +94,15 @@ int main() {
 }
 ```
 
-### Compact mode
+### Reference mode
 
-Stores only a fixed-size reference (file_number + offset) per UTXO. Use `utxoz::compact_db`.
+Stores only a fixed-size reference (file_number + offset) per UTXO. Use `utxoz::reference_db`.
 
 ```cpp
 #include <utxoz/utxoz.hpp>
 
 int main() {
-    auto r = utxoz::compact_db::open("./utxo_data", true);
+    auto r = utxoz::reference_db::open("./utxo_data", true);
     if (!r) return 1;
     auto& db = *r;
 
@@ -111,7 +111,7 @@ int main() {
     // Insert with typed fields — no byte serialization needed
     db.insert(key, file_number, offset, block_height);
 
-    // Find — returns compact_find_result {block_height, file_number, offset}
+    // Find — returns reference_find_result {block_height, file_number, offset}
     auto result = db.find(key, current_height);
     if (result) {
         auto height = result->block_height;   // uint32_t
@@ -210,9 +210,9 @@ db.for_each_entry([](utxoz::raw_outpoint const& key,
     // ...
 });
 
-// utxoz::compact_db: iterate entries with typed fields
-// (assuming cdb is an open compact_db instance)
-cdb.for_each_entry([](utxoz::raw_outpoint const& key,
+// utxoz::reference_db: iterate entries with typed fields
+// (assuming rdb is an open reference_db instance)
+rdb.for_each_entry([](utxoz::raw_outpoint const& key,
                           uint32_t height,
                           uint32_t file_number,
                           uint32_t offset) {
@@ -257,7 +257,7 @@ utxoz::set_log_prefix("utxoz");  // Messages will show as "[utxoz] ..."
 ```text
 db_base                    — shared methods (close, size, erase, statistics, ...)
   ├── full_db  (= db)      — variable-size byte values
-  └── compact_db            — typed file_number + offset fields
+  └── reference_db          — typed file_number + offset fields
 ```
 
 ### `db_base` (shared by both modes)
@@ -289,15 +289,15 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `process_pending_lookups()` | Definitive answer for deferred lookups: `(flat_map<key, full_find_result>, failed)` |
 | `for_each_entry(callback)` | Callback: `(key, height, span<uint8_t const>)` |
 
-### `compact_db`
+### `reference_db`
 
 | Method | Description |
 |--------|-------------|
-| `open(path, remove_existing)` | Static: open database, returns `result<compact_db>` |
+| `open(path, remove_existing)` | Static: open database, returns `result<reference_db>` |
 | `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, file_number, offset, height)` | Insert UTXO with typed fields |
-| `find(key, height)` | Returns `result<compact_find_result>` (`block_height`, `file_number`, `offset`). `not_found` means deferred — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
-| `process_pending_lookups()` | Definitive answer for deferred lookups: `(flat_map<key, compact_find_result>, failed)` |
+| `find(key, height)` | Returns `result<reference_find_result>` (`block_height`, `file_number`, `offset`). `not_found` means deferred — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `process_pending_lookups()` | Definitive answer for deferred lookups: `(flat_map<key, reference_find_result>, failed)` |
 | `for_each_entry(callback)` | Callback: `(key, height, file_number, offset)` |
 
 ### `utxoz::raw_outpoint`

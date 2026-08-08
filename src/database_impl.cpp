@@ -442,9 +442,9 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         must_write_config = true;
         // No config file — check for pre-existing data files from the other mode
         if (!remove_existing) {
-            auto const other_mode_file = mode == storage_mode::compact
+            auto const other_mode_file = mode == storage_mode::reference
                 ? fmt::format(data_file_format, db_path_.string(), 0, 0)
-                : fmt::format(compact_data_file_format, db_path_.string(), 0);
+                : fmt::format(reference_data_file_format, db_path_.string(), 0);
 
             auto const other_exists = path_exists(other_mode_file);
             if ( ! other_exists) return std::unexpected(other_exists.error());
@@ -467,13 +467,13 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         return std::unexpected(recovered.error());
     }
 
-    if (mode_ == storage_mode::compact) {
-        // Compact mode: single container
-        compact_active_file_size_ = (active_file_sizes_[0] == file_sizes[0])
-            ? compact_file_size : compact_test_file_size;
+    if (mode_ == storage_mode::reference) {
+        // Reference mode: single container
+        reference_active_file_size_ = (active_file_sizes_[0] == file_sizes[0])
+            ? reference_file_size : reference_test_file_size;
 
         auto path_str = db_path_.string();
-        compact_min_buckets_ok_ = find_optimal_buckets_compact(path_str, compact_active_file_size_, 7864304);
+        reference_min_buckets_ok_ = find_optimal_buckets_reference(path_str, reference_active_file_size_, 7864304);
 
         // Build the catalogue before anything is opened. A directory we cannot
         // read is not an empty directory: opening on that assumption would
@@ -481,30 +481,30 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         auto listed = enumerate_versions(db_path_, "compact_v");
         if ( ! listed) return std::unexpected(listed.error());
 
-        compact_catalog_.clear();
-        for (auto const v : *listed) compact_catalog_.add(v);
+        reference_catalog_.clear();
+        for (auto const v : *listed) reference_catalog_.add(v);
 
-        size_t const latest_version = compact_catalog_.active();
-        compact_open_or_create(latest_version);
-        compact_catalog_.add(latest_version);   // a fresh database has just created it
-        entries_count_ += compact_map().size();
+        size_t const latest_version = reference_catalog_.active();
+        reference_open_or_create(latest_version);
+        reference_catalog_.add(latest_version);   // a fresh database has just created it
+        entries_count_ += reference_map().size();
 
         // Count entries in previous versions (still searchable/deletable)
-        for (auto const v : compact_catalog_.below(latest_version)) {
-            auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+        for (auto const v : reference_catalog_.below(latest_version)) {
+            auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
             try {
                 auto segment = open_existing_segment(file_name);
-                auto* map_ptr = segment->template find<compact_map_t>(map_object_name).first;
+                auto* map_ptr = segment->template find<reference_map_t>(map_object_name).first;
                 if (map_ptr) {
                     entries_count_ += map_ptr->size();
                 }
             } catch (std::exception const& e) {
-                log::error("configure: error counting compact entries v{}: {}", v, e.what());
+                log::error("configure: error counting reference entries v{}: {}", v, e.what());
             }
         }
 
-        for (auto const v : compact_catalog_.versions()) {
-            compact_load_metadata(v);
+        for (auto const v : reference_catalog_.versions()) {
+            reference_load_metadata(v);
         }
     } else {
         // Full mode: 5 containers
@@ -565,8 +565,8 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
 }
 
 void database_impl::close() {
-    if (mode_ == storage_mode::compact) {
-        compact_close_container();
+    if (mode_ == storage_mode::reference) {
+        reference_close_container();
     } else {
         for_each_index<container_count>([&](auto I) {
             close_container<I>();
@@ -583,8 +583,8 @@ size_t database_impl::size() const {
 // =============================================================================
 
 result<bool> database_impl::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
-    if (mode_ == storage_mode::compact) {
-        return compact_insert(key, value, height);
+    if (mode_ == storage_mode::reference) {
+        return reference_insert(key, value, height);
     }
 
     size_t const index = get_index_from_size(value.size());
@@ -658,8 +658,8 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
 // =============================================================================
 
 std::optional<find_result> database_impl::find(raw_outpoint const& key, uint32_t height) const {
-    if (mode_ == storage_mode::compact) {
-        return compact_find(key, height);
+    if (mode_ == storage_mode::reference) {
+        return reference_find(key, height);
     }
 
     // Try current version first
@@ -700,8 +700,8 @@ std::optional<find_result> database_impl::find_in_latest_version(raw_outpoint co
 // =============================================================================
 
 size_t database_impl::erase(raw_outpoint const& key, uint32_t height) {
-    if (mode_ == storage_mode::compact) {
-        return compact_erase(key, height);
+    if (mode_ == storage_mode::reference) {
+        return reference_erase(key, height);
     }
 
     size_t search_depth = 0;
@@ -880,22 +880,22 @@ std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process
 
     // Phase 2: Process remaining files
     if (!deferred_deletions_.empty()) {
-        if (mode_ == storage_mode::compact) {
-            std::set<size_t> processed_versions_compact;
+        if (mode_ == storage_mode::reference) {
+            std::set<size_t> processed_versions_reference;
             for (auto const& [ci, version] : cached_files) {
-                if (ci == compact_sentinel_index) {
-                    processed_versions_compact.insert(version);
+                if (ci == reference_sentinel_index) {
+                    processed_versions_reference.insert(version);
                 }
             }
 
             // Nearest generation first, over the versions that exist. Walking
             // a range down from the active one would visit every number ever
             // rotated through, and those never come back.
-            for (auto const v : compact_catalog_.below(compact_current_version_)) {
+            for (auto const v : reference_catalog_.below(reference_current_version_)) {
                 if (deferred_deletions_.empty()) break;
-                if (processed_versions_compact.contains(v)) continue;
+                if (processed_versions_reference.contains(v)) continue;
 
-                successful_deletions += process_deferred_deletions_in_file(compact_sentinel_index, v, false);
+                successful_deletions += process_deferred_deletions_in_file(reference_sentinel_index, v, false);
             }
         } else {
             std::array<std::set<size_t>, container_count> processed_versions;
@@ -986,21 +986,21 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
         }
     };
 
-    if (container_index == compact_sentinel_index) {
-        // Compact mode deferred deletions
+    if (container_index == reference_sentinel_index) {
+        // Reference mode deferred deletions
         try {
-            auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+            auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
 
             auto it = deferred_deletions_.begin();
             while (it != deferred_deletions_.end()) {
                 auto erased_count = map.erase(it->key);
                 if (erased_count > 0) {
-                    note_dirty(compact_sentinel_index, version);
-                    if (auto* meta = compact_catalog_.find_metadata(version)) {
+                    note_dirty(reference_sentinel_index, version);
+                    if (auto* meta = reference_catalog_.find_metadata(version)) {
                         meta->update_on_delete();
                     }
 #ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(compact_current_version_ - version);
+                    auto depth = static_cast<uint32_t>(reference_current_version_ - version);
                     ++deferred_stats_.deletions_by_depth[depth];
                     --container_stats_[0].deferred_deletes;
                     --container_stats_[0].current_size;
@@ -1015,7 +1015,7 @@ size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
             }
             return successful_deletions;
         } catch (std::exception const& e) {
-            log::error("Error processing compact file v{}: {}", version, e.what());
+            log::error("Error processing reference file v{}: {}", version, e.what());
             return 0;
         }
     }
@@ -1071,19 +1071,19 @@ std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> dat
 
     // Phase 2: Process remaining files
     if (!deferred_lookups_.empty()) {
-        if (mode_ == storage_mode::compact) {
-            std::set<size_t> processed_versions_compact;
+        if (mode_ == storage_mode::reference) {
+            std::set<size_t> processed_versions_reference;
             for (auto const& [ci, version] : cached_files) {
-                if (ci == compact_sentinel_index) {
-                    processed_versions_compact.insert(version);
+                if (ci == reference_sentinel_index) {
+                    processed_versions_reference.insert(version);
                 }
             }
 
-            for (auto const v : compact_catalog_.below(compact_current_version_)) {
+            for (auto const v : reference_catalog_.below(reference_current_version_)) {
                 if (deferred_lookups_.empty()) break;
-                if (processed_versions_compact.contains(v)) continue;
+                if (processed_versions_reference.contains(v)) continue;
 
-                process_deferred_lookups_in_file(compact_sentinel_index, v, false, successful_lookups);
+                process_deferred_lookups_in_file(reference_sentinel_index, v, false, successful_lookups);
             }
         } else {
             std::array<std::set<size_t>, container_count> processed_versions;
@@ -1165,9 +1165,9 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
         }
     };
 
-    if (container_index == compact_sentinel_index) {
+    if (container_index == reference_sentinel_index) {
         try {
-            auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+            auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
 
             resolution_stats_.record_file_visited(cache_hit);
 
@@ -1176,7 +1176,7 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(compact_current_version_ - version);
+                    auto depth = static_cast<uint32_t>(reference_current_version_ - version);
                     ++deferred_stats_.lookups_by_depth[depth];
                     resolution_stats_.record_resolved(depth);
 #endif
@@ -1189,7 +1189,7 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
                 return false;
             });
         } catch (std::exception const& e) {
-            log::error("Error processing compact lookups v{}: {}", version, e.what());
+            log::error("Error processing reference lookups v{}: {}", version, e.what());
         }
         return;
     }
@@ -1222,8 +1222,8 @@ void database_impl::process_deferred_lookups_in_file(size_t container_index,
 // nothing recording that the sources are superseded.
 
 std::string database_impl::data_path(size_t index, size_t version) const {
-    if (index == compact_sentinel_index) {
-        return fmt::format(compact_data_file_format, db_path_.string(), version);
+    if (index == reference_sentinel_index) {
+        return fmt::format(reference_data_file_format, db_path_.string(), version);
     }
     return fmt::format(data_file_format, db_path_.string(), index, version);
 }
@@ -1233,14 +1233,14 @@ std::string database_impl::building_path(size_t index, size_t version) const {
 }
 
 std::string database_impl::sidecar_path(size_t index, size_t version) const {
-    if (index == compact_sentinel_index) {
+    if (index == reference_sentinel_index) {
         return fmt::format("{}/compact_v{:05}.merge", db_path_.string(), version);
     }
     return fmt::format("{}/cont_{}_v{:05}.merge", db_path_.string(), index, version);
 }
 
 std::string database_impl::metadata_path(size_t index, size_t version) const {
-    if (index == compact_sentinel_index) {
+    if (index == reference_sentinel_index) {
         return fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
     }
     return fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
@@ -1375,8 +1375,8 @@ result<> database_impl::recover_one(merge_plan const& plan, std::string const& s
 result<> database_impl::recover_pending_merges() {
     struct scope { size_t index; std::string prefix; };
     std::vector<scope> scopes;
-    if (mode_ == storage_mode::compact) {
-        scopes.push_back({compact_sentinel_index, "compact_v"});
+    if (mode_ == storage_mode::reference) {
+        scopes.push_back({reference_sentinel_index, "compact_v"});
     } else {
         for (size_t i = 0; i < container_count; ++i) {
             scopes.push_back({i, fmt::format("cont_{}_v", i)});
@@ -1455,15 +1455,15 @@ std::string full_merge_policy<Index>::describe(size_t version) const {
     return fmt::format("container {} v{}", Index, version);
 }
 
-size_t compact_merge_policy::index() const { return compact_sentinel_index; }
-size_t compact_merge_policy::file_size() const { return db.compact_active_file_size_; }
-size_t compact_merge_policy::min_buckets() const { return db.compact_min_buckets_ok_; }
-version_catalog& compact_merge_policy::catalogue() const { return db.compact_catalog_; }
-void compact_merge_policy::save_metadata(size_t version) const {
-    db.compact_save_metadata(version);
+size_t reference_merge_policy::index() const { return reference_sentinel_index; }
+size_t reference_merge_policy::file_size() const { return db.reference_active_file_size_; }
+size_t reference_merge_policy::min_buckets() const { return db.reference_min_buckets_ok_; }
+version_catalog& reference_merge_policy::catalogue() const { return db.reference_catalog_; }
+void reference_merge_policy::save_metadata(size_t version) const {
+    db.reference_save_metadata(version);
 }
-std::string compact_merge_policy::describe(size_t version) const {
-    return fmt::format("compact v{}", version);
+std::string reference_merge_policy::describe(size_t version) const {
+    return fmt::format("reference v{}", version);
 }
 
 template<typename Policy>
@@ -1882,8 +1882,8 @@ result<> database_impl::merge_groups(Policy policy) {
 }
 
 result<> database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
-    if (mode_ == storage_mode::compact) {
-        return compact_for_each_key(cb, ctx);
+    if (mode_ == storage_mode::reference) {
+        return reference_for_each_key(cb, ctx);
     }
 
     // A version that cannot be opened is not an empty version. Logging it and
@@ -1922,8 +1922,8 @@ result<> database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&),
 }
 
 result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
-    if (mode_ == storage_mode::compact) {
-        return compact_for_each_entry(cb, ctx);
+    if (mode_ == storage_mode::reference) {
+        return reference_for_each_entry(cb, ctx);
     }
 
     // See for_each_key_impl(): a partial scan is never reported as a whole one.
@@ -2000,15 +2000,15 @@ result<> database_impl::sync() {
         return outcome;
     };
 
-    if (mode_ == storage_mode::compact) {
-        if (compact_segment_) {
-            if (auto const r = barrier(sync_mapped_region(compact_segment_->get_address(),
-                                                          compact_segment_->get_size()));
+    if (mode_ == storage_mode::reference) {
+        if (reference_segment_) {
+            if (auto const r = barrier(sync_mapped_region(reference_segment_->get_address(),
+                                                          reference_segment_->get_size()));
                 ! r) {
                 return r;
             }
-            if (auto const r = barrier(sync_file(data_path(compact_sentinel_index,
-                                                           compact_current_version_)));
+            if (auto const r = barrier(sync_file(data_path(reference_sentinel_index,
+                                                           reference_current_version_)));
                 ! r) {
                 return r;
             }
@@ -2066,8 +2066,8 @@ result<> database_impl::compact_all() {
 
     result<> outcome;
 
-    if (mode_ == storage_mode::compact) {
-        outcome = compact_compact_container();
+    if (mode_ == storage_mode::reference) {
+        outcome = compact_reference_container();
     } else {
         for_each_index<container_count>([&](auto I) {
             // Stop at the first failure. Carrying on would mutate more of the
@@ -2149,12 +2149,12 @@ database_statistics database_impl::get_statistics() {
     stats.total_inserts = 0;
     stats.total_deletes = 0;
 
-    if (mode_ == storage_mode::compact) {
+    if (mode_ == storage_mode::reference) {
         stats.containers[0] = container_stats_[0];
         stats.total_inserts = container_stats_[0].total_inserts;
         stats.total_deletes = container_stats_[0].total_deletes;
-        stats.rotations_per_container[0] = compact_current_version_;
-        stats.memory_usage_per_container[0] = compact_active_file_size_;
+        stats.rotations_per_container[0] = reference_current_version_;
+        stats.memory_usage_per_container[0] = reference_active_file_size_;
     } else {
         for (size_t i = 0; i < container_count; ++i) {
             stats.containers[i] = container_stats_[i];
@@ -2177,14 +2177,14 @@ void database_impl::print_statistics() {
     auto stats = get_statistics();
 
     log::info("=== UTXO Database Statistics ===");
-    log::info("Storage mode: {}", stats.mode == storage_mode::compact ? "compact" : "full");
+    log::info("Storage mode: {}", stats.mode == storage_mode::reference ? "reference" : "full");
     log::info("Total entries: {}", stats.total_entries);
     log::info("Total inserts: {}", stats.total_inserts);
     log::info("Total deletes: {}", stats.total_deletes);
 
     log::info("--- Container Statistics ---");
-    if (stats.mode == storage_mode::compact) {
-        log::info("Compact container ({} bytes per entry):", sizeof(compact_value));
+    if (stats.mode == storage_mode::reference) {
+        log::info("Reference container ({} bytes per entry):", sizeof(reference_value));
         log::info("  Current entries: {}", stats.containers[0].current_size);
         log::info("  Total inserts: {}", stats.containers[0].total_inserts);
         log::info("  Total deletes: {}", stats.containers[0].total_deletes);
@@ -2224,19 +2224,19 @@ void database_impl::print_statistics() {
 sizing_report database_impl::get_sizing_report() const {
     sizing_report report{};
 
-    if (mode_ == storage_mode::compact) {
+    if (mode_ == storage_mode::reference) {
         auto& info = report.containers[0];
-        info.container_size = sizeof(compact_value);
-        info.file_size_setting = compact_active_file_size_;
-        info.file_count = compact_catalog_.size();
+        info.container_size = sizeof(reference_value);
+        info.file_size_setting = reference_active_file_size_;
+        info.file_count = reference_catalog_.size();
         info.current_entries = container_stats_[0].current_size;
         info.historical_inserts = container_stats_[0].total_inserts;
         info.historical_deletes = container_stats_[0].total_deletes;
         info.total_wasted_bytes = 0;
 
         for (auto const& [value_size, count] : container_stats_[0].value_size_distribution) {
-            if (sizeof(compact_value) > value_size) {
-                info.total_wasted_bytes += (sizeof(compact_value) - value_size) * count;
+            if (sizeof(reference_value) > value_size) {
+                info.total_wasted_bytes += (sizeof(reference_value) - value_size) * count;
             }
             report.global_value_size_histogram[value_size] += count;
         }
@@ -2415,21 +2415,21 @@ std::vector<std::pair<size_t, size_t>> database_impl::get_cached_file_info() con
 }
 
 // =============================================================================
-// database_impl - Compact mode implementation
+// database_impl - Reference mode implementation
 // =============================================================================
 
-compact_map_t& database_impl::compact_map() {
-    return *static_cast<compact_map_t*>(compact_container_);
+reference_map_t& database_impl::reference_map() {
+    return *static_cast<reference_map_t*>(reference_container_);
 }
 
-compact_map_t const& database_impl::compact_map() const {
-    return *static_cast<compact_map_t const*>(compact_container_);
+reference_map_t const& database_impl::reference_map() const {
+    return *static_cast<reference_map_t const*>(reference_container_);
 }
 
-size_t database_impl::find_optimal_buckets_compact(std::string const& file_path,
+size_t database_impl::find_optimal_buckets_reference(std::string const& file_path,
                                                     size_t file_size,
                                                     size_t initial_buckets) {
-    log::debug("Finding optimal buckets for compact container (file size: {})...", file_size);
+    log::debug("Finding optimal buckets for reference container (file size: {})...", file_size);
 
     size_t left = 1;
     size_t right = initial_buckets;
@@ -2438,15 +2438,15 @@ size_t database_impl::find_optimal_buckets_compact(std::string const& file_path,
     while (left <= right) {
         size_t mid = left + (right - left) / 2;
 
-        std::string temp_file = fmt::format("{}/temp_compact_{}_{}.dat", file_path, file_size, mid);
+        std::string temp_file = fmt::format("{}/temp_reference_{}_{}.dat", file_path, file_size, mid);
         try {
             bip::managed_mapped_file segment(bip::open_or_create, temp_file.c_str(), file_size);
 
-            (void)segment.find_or_construct<compact_map_t>("temp_map")(
+            (void)segment.find_or_construct<reference_map_t>("temp_map")(
                 mid,
                 outpoint_hash{},
                 outpoint_equal{},
-                segment.get_allocator<std::pair<raw_outpoint const, compact_value>>()
+                segment.get_allocator<std::pair<raw_outpoint const, reference_value>>()
             );
 
             best_buckets = mid;
@@ -2459,54 +2459,54 @@ size_t database_impl::find_optimal_buckets_compact(std::string const& file_path,
         fs::remove(temp_file);
     }
 
-    log::debug("Optimal buckets for compact container: {}", best_buckets);
+    log::debug("Optimal buckets for reference container: {}", best_buckets);
     return best_buckets;
 }
 
-void database_impl::compact_open_or_create(size_t version) {
-    auto file_name = fmt::format(compact_data_file_format, db_path_.string(), version);
+void database_impl::reference_open_or_create(size_t version) {
+    auto file_name = fmt::format(reference_data_file_format, db_path_.string(), version);
 
-    compact_segment_ = std::make_unique<bip::managed_mapped_file>(
-        bip::open_or_create, file_name.c_str(), compact_active_file_size_);
+    reference_segment_ = std::make_unique<bip::managed_mapped_file>(
+        bip::open_or_create, file_name.c_str(), reference_active_file_size_);
 
-    compact_container_ = compact_segment_->find_or_construct<compact_map_t>(map_object_name)(
-        compact_min_buckets_ok_,
+    reference_container_ = reference_segment_->find_or_construct<reference_map_t>(map_object_name)(
+        reference_min_buckets_ok_,
         outpoint_hash{},
         outpoint_equal{},
-        compact_segment_->get_allocator<typename compact_map_t::value_type>()
+        reference_segment_->get_allocator<typename reference_map_t::value_type>()
     );
 
-    compact_current_version_ = version;
+    reference_current_version_ = version;
 }
 
-void database_impl::compact_close_container() {
-    if (compact_segment_) {
-        compact_save_metadata(compact_current_version_);
-        compact_segment_->flush();
-        compact_segment_.reset();
-        compact_container_ = nullptr;
+void database_impl::reference_close_container() {
+    if (reference_segment_) {
+        reference_save_metadata(reference_current_version_);
+        reference_segment_->flush();
+        reference_segment_.reset();
+        reference_container_ = nullptr;
     }
 }
 
-void database_impl::compact_new_version() {
+void database_impl::reference_new_version() {
     // See new_version(): the retiring version stops being covered as an active
     // container the moment it stops being one, and closing it only schedules
     // writeback.
-    note_dirty(compact_sentinel_index, compact_current_version_);
+    note_dirty(reference_sentinel_index, reference_current_version_);
 
-    compact_close_container();
+    reference_close_container();
 
     // The file first, the catalogue after: see new_version().
-    auto const next = compact_catalog_.next_version();
-    compact_open_or_create(next);   // sets compact_current_version_ once it maps
+    auto const next = reference_catalog_.next_version();
+    reference_open_or_create(next);   // sets reference_current_version_ once it maps
 
-    compact_catalog_.add(next);
-    compact_catalog_.metadata(next) = file_metadata{};
-    log::debug("Compact container rotated to version {}", compact_current_version_);
+    reference_catalog_.add(next);
+    reference_catalog_.metadata(next) = file_metadata{};
+    log::debug("Reference container rotated to version {}", reference_current_version_);
 }
 
-bool database_impl::compact_can_insert_safely() const {
-    auto const& map = compact_map();
+bool database_impl::reference_can_insert_safely() const {
+    auto const& map = reference_map();
 
     if (map.bucket_count() > 0) {
         float next_load = float(map.size() + 1) / float(map.bucket_count());
@@ -2515,10 +2515,10 @@ bool database_impl::compact_can_insert_safely() const {
         }
     }
 
-    if (compact_segment_) {
+    if (reference_segment_) {
         try {
-            size_t free_memory = compact_segment_->get_free_memory();
-            size_t entry_size = sizeof(typename compact_map_t::value_type);
+            size_t free_memory = reference_segment_->get_free_memory();
+            size_t entry_size = sizeof(typename reference_map_t::value_type);
             size_t buffer_size = entry_size * 10;
             return free_memory > buffer_size;
         } catch (...) {
@@ -2529,7 +2529,7 @@ bool database_impl::compact_can_insert_safely() const {
     return true;
 }
 
-result<bool> database_impl::compact_insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
+result<bool> database_impl::reference_insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     if (value.size() != sizeof(uint32_t) * 2) {
         return std::unexpected(error_code::value_too_large);
     }
@@ -2539,11 +2539,11 @@ result<bool> database_impl::compact_insert(raw_outpoint const& key, output_data_
     std::memcpy(&file_number, value.data(), sizeof(uint32_t));
     std::memcpy(&offset, value.data() + sizeof(uint32_t), sizeof(uint32_t));
 
-    return compact_insert_typed(key, height, file_number, offset);
+    return reference_insert_typed(key, height, file_number, offset);
 }
 
-std::optional<find_result> database_impl::compact_find(raw_outpoint const& key, uint32_t height) const {
-    if (auto res = compact_find_in_latest(key, height); res) {
+std::optional<find_result> database_impl::reference_find(raw_outpoint const& key, uint32_t height) const {
+    if (auto res = reference_find_in_latest(key, height); res) {
         return res;
     }
 
@@ -2554,8 +2554,8 @@ std::optional<find_result> database_impl::compact_find(raw_outpoint const& key, 
     return std::nullopt;
 }
 
-std::optional<find_result> database_impl::compact_find_in_latest(raw_outpoint const& key, uint32_t height) const {
-    auto const& map = compact_map();
+std::optional<find_result> database_impl::reference_find_in_latest(raw_outpoint const& key, uint32_t height) const {
+    auto const& map = reference_map();
     if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
         probe_stats_.record_answered(height, it->second.height);
@@ -2568,9 +2568,9 @@ std::optional<find_result> database_impl::compact_find_in_latest(raw_outpoint co
     return std::nullopt;
 }
 
-size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
+size_t database_impl::reference_erase(raw_outpoint const& key, uint32_t height) {
     // Try current version first
-    if (auto res = compact_erase_in_latest(key, height); res > 0) {
+    if (auto res = reference_erase_in_latest(key, height); res > 0) {
         entries_count_ -= res;
         return res;
     }
@@ -2579,12 +2579,12 @@ size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
     size_t search_depth = 1;
     auto cached_files = file_cache_->get_cached_files();
     for (auto const& [ci, version] : cached_files) {
-        if (ci != compact_sentinel_index) continue;
+        if (ci != reference_sentinel_index) continue;
         ++search_depth;
 
-        if (file_cache_->is_cached(compact_sentinel_index, version)) {
+        if (file_cache_->is_cached(reference_sentinel_index, version)) {
             try {
-                auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+                auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
 
                 if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
@@ -2602,8 +2602,8 @@ size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
 #endif
                     map.erase(it);
 
-                    note_dirty(compact_sentinel_index, version);   // see the full-mode path
-                    if (auto* meta = compact_catalog_.find_metadata(version)) {
+                    note_dirty(reference_sentinel_index, version);   // see the full-mode path
+                    if (auto* meta = reference_catalog_.find_metadata(version)) {
                         meta->update_on_delete();
                     }
 
@@ -2611,7 +2611,7 @@ size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
                     return 1;
                 }
             } catch (std::exception const& e) {
-                log::error("Error accessing cached compact file v{}: {}", version, e.what());
+                log::error("Error accessing cached reference file v{}: {}", version, e.what());
             }
         }
     }
@@ -2627,8 +2627,8 @@ size_t database_impl::compact_erase(raw_outpoint const& key, uint32_t height) {
     return 0;
 }
 
-size_t database_impl::compact_erase_in_latest(raw_outpoint const& key, uint32_t height) {
-    auto& map = compact_map();
+size_t database_impl::reference_erase_in_latest(raw_outpoint const& key, uint32_t height) {
+    auto& map = reference_map();
     if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
         uint32_t age = height - it->second.height;
@@ -2649,27 +2649,27 @@ size_t database_impl::compact_erase_in_latest(raw_outpoint const& key, uint32_t 
     return 0;
 }
 
-result<> database_impl::compact_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
+result<> database_impl::reference_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
     // Current version
-    auto const& map = compact_map();
+    auto const& map = reference_map();
     for (auto const& [key, _] : map) {
         cb(ctx, key);
     }
 
     // Previous versions
-    for (auto const v : compact_catalog_.below(compact_current_version_)) {
-        auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+    for (auto const v : reference_catalog_.below(reference_current_version_)) {
+        auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
 
         try {
             auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<compact_map_t>(map_object_name).first;
+            auto* map_ptr = segment->find<reference_map_t>(map_object_name).first;
             if (!map_ptr) continue;
 
             for (auto const& [key, _] : *map_ptr) {
                 cb(ctx, key);
             }
         } catch (std::exception const& e) {
-            log::error("compact_for_each_key: error reading compact v{}: {}", v, e.what());
+            log::error("reference_for_each_key: error reading reference v{}: {}", v, e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }
@@ -2677,8 +2677,8 @@ result<> database_impl::compact_for_each_key(void(*cb)(void*, raw_outpoint const
     return {};
 }
 
-result<> database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
-    auto emit = [&](raw_outpoint const& key, compact_value const& val) {
+result<> database_impl::reference_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
+    auto emit = [&](raw_outpoint const& key, reference_value const& val) {
         std::array<uint8_t, sizeof(uint32_t) * 2> buf;
         std::memcpy(buf.data(), &val.file_number, sizeof(uint32_t));
         std::memcpy(buf.data() + sizeof(uint32_t), &val.offset, sizeof(uint32_t));
@@ -2686,25 +2686,25 @@ result<> database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint con
     };
 
     // Current version
-    auto const& map = compact_map();
+    auto const& map = reference_map();
     for (auto const& [key, val] : map) {
         emit(key, val);
     }
 
     // Previous versions
-    for (auto const v : compact_catalog_.below(compact_current_version_)) {
-        auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+    for (auto const v : reference_catalog_.below(reference_current_version_)) {
+        auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
 
         try {
             auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<compact_map_t>(map_object_name).first;
+            auto* map_ptr = segment->find<reference_map_t>(map_object_name).first;
             if (!map_ptr) continue;
 
             for (auto const& [key, val] : *map_ptr) {
                 emit(key, val);
             }
         } catch (std::exception const& e) {
-            log::error("compact_for_each_entry: error reading compact v{}: {}", v, e.what());
+            log::error("reference_for_each_entry: error reading reference v{}: {}", v, e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }
@@ -2712,75 +2712,75 @@ result<> database_impl::compact_for_each_entry(void(*cb)(void*, raw_outpoint con
     return {};
 }
 
-result<> database_impl::reopen_active_compact_container() {
-    auto const active = compact_catalog_.active();
+result<> database_impl::reopen_active_reference_container() {
+    auto const active = reference_catalog_.active();
     try {
         if (failpoints::fail_container_open.load(std::memory_order_relaxed)) {
             throw std::runtime_error("failpoint");
         }
-        compact_open_or_create(active);
-        compact_catalog_.add(active);
+        reference_open_or_create(active);
+        reference_catalog_.add(active);
         return {};
     } catch (std::exception const& e) {
-        log::error("compaction: the compact container could not be reopened at v{}: {}",
+        log::error("compaction: the reference container could not be reopened at v{}: {}",
                    active, e.what());
         cleanup_pending_ = true;
         return std::unexpected(error_code::file_open_failed);
     }
 }
 
-result<> database_impl::compact_compact_container() {
-    log::debug("Starting compaction for compact container...");
+result<> database_impl::compact_reference_container() {
+    log::debug("Starting compaction for reference container...");
 
-    compact_close_container();
+    reference_close_container();
 
     // See compact_container(): the reopen reports rather than happening in a
     // destructor that cannot.
     auto outcome = [&]() -> result<> {
         try {
-            return merge_groups(compact_merge_policy{*this});
+            return merge_groups(reference_merge_policy{*this});
         } catch (std::exception const& e) {
-            log::error("compaction: the compact container failed: {}", e.what());
+            log::error("compaction: the reference container failed: {}", e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }();
 
-    auto const reopened = reopen_active_compact_container();
+    auto const reopened = reopen_active_reference_container();
     if ( ! outcome) return outcome;
     return reopened;
 }
 
 
 // =============================================================================
-// database_impl - Compact metadata helpers
+// database_impl - Reference metadata helpers
 // =============================================================================
 
-void database_impl::compact_save_metadata(size_t version) noexcept {
-    auto const* meta_ptr = compact_catalog_.find_metadata(version);
+void database_impl::reference_save_metadata(size_t version) noexcept {
+    auto const* meta_ptr = reference_catalog_.find_metadata(version);
     if ( ! meta_ptr) return;
 
     // Same boundary as save_metadata_to_disk().
     try {
         auto const path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
         if (auto const written = write_metadata_file(path, *meta_ptr); ! written) {
-            log::warn("Could not publish compact metadata for v{}", version);
+            log::warn("Could not publish reference metadata for v{}", version);
         }
     } catch (...) {
     }
 }
 
-void database_impl::compact_load_metadata(size_t version) {
+void database_impl::reference_load_metadata(size_t version) {
     auto const path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
 
     auto record = read_metadata_file(path);
     if ( ! record) {
-        report_metadata_read_error(record.error(), "the compact container", version);
+        report_metadata_read_error(record.error(), "the reference container", version);
         return;
     }
 
-    auto& meta = compact_catalog_.metadata(version);
+    auto& meta = reference_catalog_.metadata(version);
     meta = *record;
-    meta.container_index = compact_sentinel_index;
+    meta.container_index = reference_sentinel_index;
     meta.version = version;
 }
 
@@ -2793,7 +2793,7 @@ result<> database_impl::save_config_to_disk() {
     auto const temp_path = fs::path(config_path).concat(".tmp");
 
     // Published, not written in place. This file says whether a database is
-    // full or compact, and a reader that finds half of it reads the wrong
+    // full or reference, and a reader that finds half of it reads the wrong
     // answer about the whole store — the same reasoning as the metadata
     // records, and a stronger case, because this one is authoritative.
     {
@@ -2882,7 +2882,7 @@ result<> database_impl::load_config_from_disk() {
         return std::unexpected(error_code::config_file_corrupt);
     }
     if (mode_byte != static_cast<uint8_t>(storage_mode::full) &&
-        mode_byte != static_cast<uint8_t>(storage_mode::compact)) {
+        mode_byte != static_cast<uint8_t>(storage_mode::reference)) {
         return std::unexpected(error_code::config_file_corrupt);
     }
     mode_ = static_cast<storage_mode>(mode_byte);
@@ -2971,7 +2971,7 @@ database_impl::full_process_pending_lookups() {
 
         for (auto const& [container_index, version] : cached_files) {
             if (deferred_lookups_.empty()) break;
-            if (container_index == compact_sentinel_index) continue;
+            if (container_index == reference_sentinel_index) continue;
             switch (container_index) {
                 case 0: process_full_file(std::integral_constant<size_t, 0>{}, version); break;
                 case 1: process_full_file(std::integral_constant<size_t, 1>{}, version); break;
@@ -3029,17 +3029,17 @@ database_impl::full_process_pending_lookups() {
 }
 
 // =============================================================================
-// database_impl - Typed compact-mode methods
+// database_impl - Typed reference-mode methods
 // =============================================================================
 
-result<bool> database_impl::compact_insert_typed(raw_outpoint const& key, uint32_t height,
+result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint32_t height,
                                                  uint32_t file_number, uint32_t offset) {
-    if (!compact_can_insert_safely()) {
-        log::debug("Rotating compact container due to safety constraints");
-        compact_new_version();
+    if (!reference_can_insert_safely()) {
+        log::debug("Rotating reference container due to safety constraints");
+        reference_new_version();
     }
 
-    compact_value val;
+    reference_value val;
     val.height = height;
     val.file_number = file_number;
     val.offset = offset;
@@ -3047,12 +3047,12 @@ result<bool> database_impl::compact_insert_typed(raw_outpoint const& key, uint32
     size_t max_retries = 3;
     while (max_retries > 0) {
         try {
-            auto& map = compact_map();
+            auto& map = reference_map();
             [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
 
             auto [it, inserted] = map.emplace(key, val);
             if (!inserted) {
-                log::warn("compact_insert_typed: duplicate key at height {}, outpoint={}",
+                log::warn("reference_insert_typed: duplicate key at height {}, outpoint={}",
                     height, outpoint_to_string(key));
             }
             if (inserted) {
@@ -3069,28 +3069,28 @@ result<bool> database_impl::compact_insert_typed(raw_outpoint const& key, uint32
                 }
 #endif
 
-                compact_catalog_.metadata(compact_current_version_).update_on_insert(key, height);
+                reference_catalog_.metadata(reference_current_version_).update_on_insert(key, height);
             }
             return inserted;
 
         } catch (boost::interprocess::bad_alloc const& e) {
-            log::error("Error inserting into compact container: {}", e.what());
-            compact_new_version();
+            log::error("Error inserting into reference container: {}", e.what());
+            reference_new_version();
         }
         --max_retries;
     }
 
-    log::error("Failed to insert into compact container after 3 retries");
+    log::error("Failed to insert into reference container after 3 retries");
     throw boost::interprocess::bad_alloc();
 }
 
-std::optional<compact_find_result> database_impl::compact_find_typed(raw_outpoint const& key, uint32_t height) const {
-    auto const& map = compact_map();
+std::optional<reference_find_result> database_impl::reference_find_typed(raw_outpoint const& key, uint32_t height) const {
+    auto const& map = reference_map();
     if (auto it = map.find(key); it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
         probe_stats_.record_answered(height, it->second.height);
 #endif
-        return compact_find_result{it->second.height, it->second.file_number, it->second.offset};
+        return reference_find_result{it->second.height, it->second.file_number, it->second.offset};
     }
 
     // A probe the active map could not answer. Recording it is what makes the
@@ -3100,11 +3100,11 @@ std::optional<compact_find_result> database_impl::compact_find_typed(raw_outpoin
     return std::nullopt;
 }
 
-std::pair<flat_map<raw_outpoint, compact_find_result>, std::vector<deferred_lookup_entry>>
-database_impl::compact_process_pending_lookups() {
+std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>
+database_impl::reference_process_pending_lookups() {
     if (deferred_lookups_.empty()) return {};
 
-    flat_map<raw_outpoint, compact_find_result> successful_lookups;
+    flat_map<raw_outpoint, reference_find_result> successful_lookups;
 
 #ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
@@ -3112,11 +3112,11 @@ database_impl::compact_process_pending_lookups() {
 #endif
 
     size_t initial_size = deferred_lookups_.size();
-    log::debug("Processing {} deferred compact lookups...", initial_size);
+    log::debug("Processing {} deferred reference lookups...", initial_size);
 
     auto process_compact_file = [&](size_t version, bool /*is_cached*/) {
         try {
-            auto [map, cache_hit] = file_cache_->get_or_open_compact_file(version);
+            auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
 
             resolution_stats_.record_file_visited(cache_hit);
 
@@ -3125,18 +3125,18 @@ database_impl::compact_process_pending_lookups() {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(compact_current_version_ - version);
+                    auto depth = static_cast<uint32_t>(reference_current_version_ - version);
                     ++deferred_stats_.lookups_by_depth[depth];
                     resolution_stats_.record_resolved(depth);
 #endif
                     successful_lookups.emplace(entry.key,
-                        compact_find_result{map_it->second.height, map_it->second.file_number, map_it->second.offset});
+                        reference_find_result{map_it->second.height, map_it->second.file_number, map_it->second.offset});
                     return true;
                 }
                 return false;
             });
         } catch (std::exception const& e) {
-            log::error("Error processing compact lookups v{}: {}", version, e.what());
+            log::error("Error processing reference lookups v{}: {}", version, e.what());
         }
     };
 
@@ -3150,7 +3150,7 @@ database_impl::compact_process_pending_lookups() {
 
         for (auto const& [ci, version] : cached_files) {
             if (deferred_lookups_.empty()) break;
-            if (ci == compact_sentinel_index) {
+            if (ci == reference_sentinel_index) {
                 process_compact_file(version, true);
             }
         }
@@ -3160,12 +3160,12 @@ database_impl::compact_process_pending_lookups() {
     if (!deferred_lookups_.empty()) {
         std::set<size_t> processed_versions;
         for (auto const& [ci, version] : cached_files) {
-            if (ci == compact_sentinel_index) {
+            if (ci == reference_sentinel_index) {
                 processed_versions.insert(version);
             }
         }
 
-        for (auto const v : compact_catalog_.below(compact_current_version_)) {
+        for (auto const v : reference_catalog_.below(reference_current_version_)) {
             if (deferred_lookups_.empty()) break;
             if (processed_versions.contains(v)) continue;
 
@@ -3192,35 +3192,35 @@ database_impl::compact_process_pending_lookups() {
     deferred_stats_.failed_to_delete += failed_lookups.size();
 #endif
 
-    log::debug("Deferred compact lookup complete: {} successful, {} failed",
+    log::debug("Deferred reference lookup complete: {} successful, {} failed",
               successful_lookups.size(), failed_lookups.size());
 
     return {std::move(successful_lookups), std::move(failed_lookups)};
 }
 
-result<> database_impl::compact_for_each_entry_typed(
+result<> database_impl::reference_for_each_entry_typed(
     void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const {
 
     // Current version
-    auto const& map = compact_map();
+    auto const& map = reference_map();
     for (auto const& [key, val] : map) {
         cb(ctx, key, val.height, val.file_number, val.offset);
     }
 
     // Previous versions
-    for (auto const v : compact_catalog_.below(compact_current_version_)) {
-        auto file_name = fmt::format(compact_data_file_format, db_path_.string(), v);
+    for (auto const v : reference_catalog_.below(reference_current_version_)) {
+        auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
 
         try {
             auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<compact_map_t>(map_object_name).first;
+            auto* map_ptr = segment->find<reference_map_t>(map_object_name).first;
             if (!map_ptr) continue;
 
             for (auto const& [key, val] : *map_ptr) {
                 cb(ctx, key, val.height, val.file_number, val.offset);
             }
         } catch (std::exception const& e) {
-            log::error("compact_for_each_entry_typed: error reading compact v{}: {}", v, e.what());
+            log::error("reference_for_each_entry_typed: error reading reference v{}: {}", v, e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }

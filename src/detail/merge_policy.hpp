@@ -14,7 +14,7 @@
  * the versions, and where the block height lives in a stored value.
  *
  * Two copies of a sequence whose correctness is entirely in its ordering is the
- * shape that drifts, and it already had: the compact twin was left on the
+ * shape that drifts, and it already had: the reference twin was left on the
  * previous protocol when the full one was rewritten, and every correction since
  * had to be applied twice by hand.
  *
@@ -83,9 +83,9 @@ struct full_merge_policy {
     [[nodiscard]] std::string describe(size_t version) const;
 };
 
-/// The single container of a compact-mode database.
-struct compact_merge_policy {
-    using map_type = compact_map_t;
+/// The single container of a reference-mode database.
+struct reference_merge_policy {
+    using map_type = reference_map_t;
 
     database_impl& db;
 

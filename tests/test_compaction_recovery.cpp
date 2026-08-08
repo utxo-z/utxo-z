@@ -199,7 +199,7 @@ std::vector<utxoz::raw_outpoint> build_mergeable(std::string const& path, size_t
 namespace {
 
 template <typename Db>
-void compact_and_die_as(std::string const& path, crash_point point) {
+void die_as(std::string const& path, crash_point point) {
     pid_t const child = ::fork();
     REQUIRE(child >= 0);
 
@@ -226,14 +226,14 @@ void compact_and_die_as(std::string const& path, crash_point point) {
     REQUIRE(WEXITSTATUS(status) == 99);
 }
 
-void compact_and_die(std::string const& path, crash_point point) {
-    compact_and_die_as<utxoz::full_db>(path, point);
+void die_in_full_mode(std::string const& path, crash_point point) {
+    die_as<utxoz::full_db>(path, point);
 }
 
-/// A compact-mode database with three versions and room to merge them.
-std::vector<utxoz::raw_outpoint> build_mergeable_compact(std::string const& path,
+/// A reference-mode database with three versions and room to merge them.
+std::vector<utxoz::raw_outpoint> build_mergeable_reference(std::string const& path,
                                                          size_t want_files) {
-    auto opened = utxoz::compact_db::open_for_testing(path, true);
+    auto opened = utxoz::reference_db::open_for_testing(path, true);
     REQUIRE(opened);
     auto db = std::move(*opened);
 
@@ -337,7 +337,7 @@ TEST_CASE("a crash at any barrier of a merge leaves a state reopening can settle
         auto const files_before = count_data_files(path);
         REQUIRE(files_before == 3);
 
-        compact_and_die(path, s.point);
+        die_in_full_mode(path, s.point);
 
         // What the crash left, before anything touches it.
         auto const sidecars = count_matching(path, ".merge");
@@ -552,13 +552,13 @@ TEST_CASE("a traversal that cannot read a version reports failure, not a short a
     db.close();
 }
 
-TEST_CASE("a compact-mode traversal that cannot read a version reports failure",
-          "[database][traversal][compact]") {
-    auto const path = unique_path("unreadable_compact");
+TEST_CASE("a reference-mode traversal that cannot read a version reports failure",
+          "[database][traversal][reference]") {
+    auto const path = unique_path("unreadable_reference");
     fs::remove_all(path);
 
     {
-        auto opened = utxoz::compact_db::open_for_testing(path, true);
+        auto opened = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(opened);
         auto db = std::move(*opened);
 
@@ -587,7 +587,7 @@ TEST_CASE("a compact-mode traversal that cannot read a version reports failure",
         fs::remove_all(path, ec);
     });
 
-    auto opened = utxoz::compact_db::open_for_testing(path);
+    auto opened = utxoz::reference_db::open_for_testing(path);
     REQUIRE(opened);
     auto db = std::move(*opened);
 
@@ -665,20 +665,20 @@ TEST_CASE("a barrier failing after the merge record is named latches the instanc
 #ifndef _WIN32
 
 /**
- * The same latch, on the compact API. Its insert() and find() are separate
+ * The same latch, on the reference API. Its insert() and find() are separate
  * entry points from the full ones and were missing the check — a latched
  * instance that still answers a find is exactly the state the latch exists to
  * prevent, whichever mode it is in.
  */
-TEST_CASE("a latched compact instance refuses its own operations too",
-          "[database][compaction][recovery][failpoint][compact]") {
-    auto const path = unique_path("compactlatch");
+TEST_CASE("a latched reference instance refuses its own operations too",
+          "[database][compaction][recovery][failpoint][reference]") {
+    auto const path = unique_path("referencelatch");
     fs::remove_all(path);
 
     utxoz::raw_outpoint const witness = make_key(1);
 
     {
-        auto opened = utxoz::compact_db::open_for_testing(path, true);
+        auto opened = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(opened);
         auto db = std::move(*opened);
 
@@ -697,7 +697,7 @@ TEST_CASE("a latched compact instance refuses its own operations too",
         db.close();
     }
 
-    auto opened = utxoz::compact_db::open_for_testing(path);
+    auto opened = utxoz::reference_db::open_for_testing(path);
     REQUIRE(opened);
     auto db = std::move(*opened);
 
@@ -720,7 +720,7 @@ TEST_CASE("a latched compact instance refuses its own operations too",
     db.close();
 
     // Reopening runs recovery and the database serves again.
-    auto again = utxoz::compact_db::open_for_testing(path);
+    auto again = utxoz::reference_db::open_for_testing(path);
     REQUIRE(again);
     auto db2 = std::move(*again);
     REQUIRE(count_reserved(path) == 0);
@@ -740,15 +740,15 @@ TEST_CASE("a latched compact instance refuses its own operations too",
  */
 TEST_CASE("an uncertain merge record stops before the target and does not undo itself",
           "[database][compaction][recovery][failpoint]") {
-    for (bool compact_mode : {false, true}) {
-        auto const path = unique_path(compact_mode ? "uncertain_compact" : "uncertain_full");
+    for (bool reference_mode : {false, true}) {
+        auto const path = unique_path(reference_mode ? "uncertain_reference" : "uncertain_full");
         fs::remove_all(path);
-        INFO(std::string(compact_mode ? "compact mode" : "full mode"));
+        INFO(std::string(reference_mode ? "reference mode" : "full mode"));
 
-        std::string const prefix = compact_mode ? "compact_v" : "cont_0_v";
+        std::string const prefix = reference_mode ? "compact_v" : "cont_0_v";
 
-        if (compact_mode) {
-            auto opened = utxoz::compact_db::open_for_testing(path, true);
+        if (reference_mode) {
+            auto opened = utxoz::reference_db::open_for_testing(path, true);
             REQUIRE(opened);
             auto db = std::move(*opened);
             uint64_t next = 0;
@@ -773,8 +773,8 @@ TEST_CASE("an uncertain merge record stops before the target and does not undo i
             scope_exit const disarm([] { failpoints::clear(); });
             failpoints::fail_sync_directory.store(true, std::memory_order_relaxed);
             utxoz::result<> outcome;
-            if (compact_mode) {
-                auto opened = utxoz::compact_db::open_for_testing(path);
+            if (reference_mode) {
+                auto opened = utxoz::reference_db::open_for_testing(path);
                 REQUIRE(opened);
                 auto db = std::move(*opened);
                 outcome = db.compact_all();
@@ -805,8 +805,8 @@ TEST_CASE("an uncertain merge record stops before the target and does not undo i
         // 2. Whatever the tidy-up managed, reopening settles it: sources intact,
         //    nothing reserved left behind, every key still reachable.
         auto reopened_files = size_t{0};
-        if (compact_mode) {
-            auto again = utxoz::compact_db::open_for_testing(path);
+        if (reference_mode) {
+            auto again = utxoz::reference_db::open_for_testing(path);
             REQUIRE(again);
             auto db = std::move(*again);
             reopened_files = count_matching_exact(path, prefix);
@@ -931,7 +931,7 @@ void create_squatter() {
 /// Leaves a real database mid-merge: the record is durable, the target has its
 /// canonical name and its marker, and the sources are still there.
 void leave_published_merge(std::string const& path) {
-    compact_and_die(path, crash_point::before_source_unlink);
+    die_in_full_mode(path, crash_point::before_source_unlink);
 }
 
 std::string sole_sidecar(std::string const& path) {
@@ -1245,15 +1245,15 @@ TEST_CASE("a target whose name is not durable retires nothing",
     // Contents durable, name not, sources unlinked, power cut — that sequence
     // loses the entries outright. The barrier failing has to stop the merge
     // before the first source goes.
-    for (bool compact_mode : {false, true}) {
-        auto const path = unique_path(compact_mode ? "namebarrier_compact" : "namebarrier_full");
+    for (bool reference_mode : {false, true}) {
+        auto const path = unique_path(reference_mode ? "namebarrier_reference" : "namebarrier_full");
         fs::remove_all(path);
-        INFO(std::string(compact_mode ? "compact mode" : "full mode"));
+        INFO(std::string(reference_mode ? "reference mode" : "full mode"));
 
-        std::string const prefix = compact_mode ? "compact_v" : "cont_0_v";
+        std::string const prefix = reference_mode ? "compact_v" : "cont_0_v";
 
-        if (compact_mode) {
-            auto opened = utxoz::compact_db::open_for_testing(path, true);
+        if (reference_mode) {
+            auto opened = utxoz::reference_db::open_for_testing(path, true);
             REQUIRE(opened);
             auto db = std::move(*opened);
             uint64_t next = 0;
@@ -1276,8 +1276,8 @@ TEST_CASE("a target whose name is not durable retires nothing",
             failpoints::dir_barrier::after_target, std::memory_order_relaxed);
 
         utxoz::result<> outcome;
-        if (compact_mode) {
-            auto opened = utxoz::compact_db::open_for_testing(path);
+        if (reference_mode) {
+            auto opened = utxoz::reference_db::open_for_testing(path);
             REQUIRE(opened);
             auto db = std::move(*opened);
             outcome = db.compact_all();
@@ -1304,8 +1304,8 @@ TEST_CASE("a target whose name is not durable retires nothing",
         // Reopening finishes it: the marker matches, so the sources are retired
         // now that the name is known to be there.
         size_t settled = 0;
-        if (compact_mode) {
-            auto again = utxoz::compact_db::open_for_testing(path);
+        if (reference_mode) {
+            auto again = utxoz::reference_db::open_for_testing(path);
             REQUIRE(again);
             auto db = std::move(*again);
             settled = count_matching_exact(path, prefix);
@@ -1321,8 +1321,8 @@ TEST_CASE("a target whose name is not durable retires nothing",
         CHECK(count_reserved(path) == 0);
 
         // And again, unchanged.
-        if (compact_mode) {
-            auto again = utxoz::compact_db::open_for_testing(path);
+        if (reference_mode) {
+            auto again = utxoz::reference_db::open_for_testing(path);
             REQUIRE(again);
             auto db = std::move(*again);
             CHECK(count_matching_exact(path, prefix) == settled);
@@ -1419,15 +1419,15 @@ TEST_CASE("identities that do not fit a size_t are refused, not truncated",
  */
 TEST_CASE("a compaction that cannot reopen its active container says so",
           "[database][compaction][failpoint]") {
-    for (bool compact_mode : {false, true}) {
-        auto const path = unique_path(compact_mode ? "reopenfail_compact" : "reopenfail_full");
+    for (bool reference_mode : {false, true}) {
+        auto const path = unique_path(reference_mode ? "reopenfail_reference" : "reopenfail_full");
         fs::remove_all(path);
-        INFO(std::string(compact_mode ? "compact mode" : "full mode"));
+        INFO(std::string(reference_mode ? "reference mode" : "full mode"));
 
-        std::string const prefix = compact_mode ? "compact_v" : "cont_0_v";
+        std::string const prefix = reference_mode ? "compact_v" : "cont_0_v";
 
-        if (compact_mode) {
-            auto opened = utxoz::compact_db::open_for_testing(path, true);
+        if (reference_mode) {
+            auto opened = utxoz::reference_db::open_for_testing(path, true);
             REQUIRE(opened);
             auto db = std::move(*opened);
             uint64_t next = 0;
@@ -1445,8 +1445,8 @@ TEST_CASE("a compaction that cannot reopen its active container says so",
 
         scope_exit const disarm([] { failpoints::clear(); });
 
-        if (compact_mode) {
-            auto opened = utxoz::compact_db::open_for_testing(path);
+        if (reference_mode) {
+            auto opened = utxoz::reference_db::open_for_testing(path);
             REQUIRE(opened);
             auto db = std::move(*opened);
 
@@ -1486,8 +1486,8 @@ TEST_CASE("a compaction that cannot reopen its active container says so",
         }
 
         // Closing and reopening is the way out, and it works.
-        if (compact_mode) {
-            auto again = utxoz::compact_db::open_for_testing(path);
+        if (reference_mode) {
+            auto again = utxoz::reference_db::open_for_testing(path);
             REQUIRE(again);
             auto db = std::move(*again);
             CHECK(count_reserved(path) == 0);
@@ -1644,15 +1644,15 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         db.close();
     }
 
-    SECTION("compact mode, through a deferred lookup") {
-        auto const path = unique_path("cachetrunc_compact");
+    SECTION("reference mode, through a deferred lookup") {
+        auto const path = unique_path("cachetrunc_reference");
         fs::remove_all(path);
         scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
 
         utxoz::raw_outpoint witness{};
 
         {
-            auto opened = utxoz::compact_db::open_for_testing(path, true);
+            auto opened = utxoz::reference_db::open_for_testing(path, true);
             REQUIRE(opened);
             auto db = std::move(*opened);
 
@@ -1679,7 +1679,7 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
             ofs << "far too small to be a segment";
         }
 
-        auto opened = utxoz::compact_db::open_for_testing(path);
+        auto opened = utxoz::reference_db::open_for_testing(path);
         REQUIRE(opened);
         auto db = std::move(*opened);
 
@@ -1785,7 +1785,7 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
 #ifndef _WIN32
 
 /**
- * The same eight barriers, in compact mode.
+ * The same eight barriers, in reference mode.
  *
  * The protocol is written twice — once per storage mode — and only the full
  * one was covered here. Two copies of a sequence whose correctness is entirely
@@ -1796,8 +1796,8 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
  * exercise it, and a barrier moved in the shared version fails on both sides
  * rather than silently in the mode nobody watched.
  */
-TEST_CASE("a crash at any barrier of a compact merge leaves a state reopening can settle",
-          "[database][compaction][recovery][crash][compact]") {
+TEST_CASE("a crash at any barrier of a reference-mode merge leaves a state reopening can settle",
+          "[database][compaction][recovery][crash][reference]") {
     struct step {
         crash_point point;
         char const* name;
@@ -1816,17 +1816,17 @@ TEST_CASE("a crash at any barrier of a compact merge leaves a state reopening ca
     };
 
     for (auto const& s : steps) {
-        auto const path = unique_path(fmt::format("compactcrash_{}", s.name));
+        auto const path = unique_path(fmt::format("referencecrash_{}", s.name));
         fs::remove_all(path);
         INFO("crash point: " << s.name);
         scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
 
-        auto const expected = build_mergeable_compact(path, 3);
+        auto const expected = build_mergeable_reference(path, 3);
         REQUIRE_FALSE(expected.empty());
         auto const files_before = count_matching_exact(path, "compact_v");
         REQUIRE(files_before == 3);
 
-        compact_and_die_as<utxoz::compact_db>(path, s.point);
+        die_as<utxoz::reference_db>(path, s.point);
 
         std::vector<utxoz::raw_outpoint> expected_after;
 
@@ -1841,7 +1841,7 @@ TEST_CASE("a crash at any barrier of a compact merge leaves a state reopening ca
 
         // Recovery, then the row this crash belongs to.
         {
-            auto opened = utxoz::compact_db::open_for_testing(path);
+            auto opened = utxoz::reference_db::open_for_testing(path);
             REQUIRE(opened);
             auto db = std::move(*opened);
 
@@ -1887,7 +1887,7 @@ TEST_CASE("a crash at any barrier of a compact merge leaves a state reopening ca
 
         // And a second recovery changes nothing.
         auto const settled = count_matching_exact(path, "compact_v");
-        auto again = utxoz::compact_db::open_for_testing(path);
+        auto again = utxoz::reference_db::open_for_testing(path);
         REQUIRE(again);
         auto db2 = std::move(*again);
         REQUIRE(count_matching_exact(path, "compact_v") == settled);

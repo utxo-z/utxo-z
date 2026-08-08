@@ -163,13 +163,13 @@ TEST_CASE("compaction reports a duplicate key instead of dropping one",
     std::filesystem::remove_all(path);
 }
 
-TEST_CASE("compact-mode compaction reports a duplicate key too",
-          "[database][compact][compaction][invariant]") {
-    auto const path = make_unique_path("compact");
+TEST_CASE("reference-mode compaction reports a duplicate key too",
+          "[database][reference][compaction][invariant]") {
+    auto const path = make_unique_path("reference");
     std::filesystem::remove_all(path);
 
     {
-        auto r = utxoz::compact_db::open_for_testing(path, true);
+        auto r = utxoz::reference_db::open_for_testing(path, true);
         REQUIRE(r.has_value());
         auto db = std::move(*r);
 

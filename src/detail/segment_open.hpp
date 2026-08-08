@@ -47,8 +47,8 @@ namespace fs = std::filesystem;
 inline constexpr size_t smallest_configured_file = std::min({
     std::ranges::min(file_sizes),
     std::ranges::min(test_file_sizes),
-    compact_file_size,
-    compact_test_file_size,
+    reference_file_size,
+    reference_test_file_size,
 });
 
 /**

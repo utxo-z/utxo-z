@@ -303,8 +303,8 @@ TEST_CASE("a barrier that fails comes back as a value", "[database][sync][failpo
     db.close();
 }
 
-TEST_CASE("sync() works the same way in compact mode", "[database][sync][compact]") {
-    auto const path = unique_path("compact");
+TEST_CASE("sync() works the same way in reference mode", "[database][sync][reference]") {
+    auto const path = unique_path("reference");
     fs::remove_all(path);
     scope_exit const cleanup([&] {
         failpoints::clear();
@@ -312,7 +312,7 @@ TEST_CASE("sync() works the same way in compact mode", "[database][sync][compact
         fs::remove_all(path, ec);
     });
 
-    auto opened = utxoz::compact_db::open_for_testing(path, true);
+    auto opened = utxoz::reference_db::open_for_testing(path, true);
     REQUIRE(opened);
     auto db = std::move(*opened);
 
@@ -474,7 +474,7 @@ TEST_CASE("a barrier failing partway through keeps every obligation",
 TEST_CASE("a config that cannot be made durable stops the open", "[database][sync][failpoint]") {
     if (utxoz::platform_durability() == durability_level::none) return;
 
-    // The config says whether a database is full or compact, so sync() leaves
+    // The config says whether a database is full or reference, so sync() leaves
     // it out of its promise on the grounds that creation made it durable. If
     // that did not happen, creation is the only place anyone can be told.
     SECTION("the file barrier") {
