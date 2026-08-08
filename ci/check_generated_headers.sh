@@ -25,7 +25,7 @@ readonly VERSION="0.0.0-check"
 # build/<build_type>, and every path below says Release. The standard is not
 # cosmetic either — a runner whose detected profile is gnu17 fails to resolve the
 # dependencies at all.
-readonly CONAN_SETTINGS=(-s build_type=Release -s compiler.cppstd=23)
+readonly CONAN_SETTINGS=(-pr:h "${ROOT}/ci/conan-cpp23" -s build_type=Release)
 
 cd "${ROOT}"
 
