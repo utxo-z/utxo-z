@@ -193,6 +193,62 @@ jobs:
         run: |
           cmake --build --preset conan-release --parallel
 
+  generated-headers:
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    name: 🧬 Generated headers
+    # This job builds and runs code from the checked-out revision, which on a
+    # pull request is whatever the contributor pushed. It needs to read the
+    # repository and nothing else.
+    permissions:
+      contents: read
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v5
+        with:
+          # Otherwise the token is written into .git/config, where every build
+          # step that follows can read it.
+          persist-credentials: false
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan
+          conan --version
+
+      - name: 🔧 Configure Conan
+        run: |
+          conan profile detect --force
+
+      # Two build directories with opposite configurations, a stale header
+      # planted in the source tree, and an install inspected afterwards. Every
+      # check in here fails on the code that generated these headers into the
+      # source tree, which is the only reason the job is worth its minutes.
+      - name: 🧬 Generated headers belong to their build directory
+        run: |
+          ./ci/check_generated_headers.sh
+
+      # conan create builds the package; only a consumer proves it is usable. A
+      # header missing from the install is invisible here and fatal downstream.
+      #
+      # The version arrives through the environment rather than being expanded
+      # into the script text. determine-version derives it from the ref, and on a
+      # pull request the ref is the contributor's branch name — a branch called
+      # release/anything lands that "anything" here verbatim. Interpolated into
+      # the command line it would be shell source; as $UTXOZ_BUILD_VERSION it is
+      # a string, and the pattern below accepts only the shapes that action
+      # actually produces: X.Y.Z, and X.Y.Z with a -prerelease or +build suffix,
+      # which is the form the commit.<run-number> development versions take.
+      - name: 📦 Package is consumable
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+        run: |
+          if [[ ! "$UTXOZ_BUILD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "refusing to build a package for version '$UTXOZ_BUILD_VERSION'" >&2
+            exit 1
+          fi
+          conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -s build_type=Release -s compiler.cppstd=23 -o with_tests=False -o with_examples=False -o with_benchmarks=False
+
   benchmark:
     needs: [setup]
     runs-on: ubuntu-24.04

@@ -48,6 +48,9 @@ class UtxozConan(ConanFile):
     }
 
     # Sources are located in the same place as this recipe
+    # include/* carries the two .hpp.in templates, not the headers they generate:
+    # those live in the build tree now, so a package never depends on a generated
+    # header having been left behind in somebody's source directory.
     exports_sources = "CMakeLists.txt", "src/*", "include/*", "examples/*", "tests/*", "benchmarks/*", "LICENSE", "README.md"
 
     def validate(self):
