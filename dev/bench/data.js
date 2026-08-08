@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786190959308,
+  "lastUpdate": 1786197952558,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -11198,6 +11198,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.65,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "77a72e30ec006a5ef9307a116b93e9dda9eeece4",
+          "message": "fix: generate config.hpp and version.hpp into the build tree (#85)\n\n`configure_file` wrote both headers into `include/utxoz/`, which every build\ndirectory shares. That made them shared mutable state: configuring a second\nbuild overwrote the headers the first one was using, and the first then went on\ncompiling against options it had never been given. No error, no warning, no\nreconfiguration — its own `CMakeCache.txt` still said `statistics=True` while\nthe binary it produced had statistics compiled out.\n\nIt is not a hypothetical. Two directories, `-o statistics=True` then\n`-o statistics=False`, rebuild the first: `Reference: statistics` fails in a\nbuild configured with statistics enabled. And `cmake --install` from that same\nbuild directory shipped a `config.hpp` saying statistics was disabled — a wrong\npackage, produced by a successful install.\n\n`version.hpp` was worse, because it is tracked. Every build rewrote a file under\nversion control with whatever version that build happened to use, so it showed\nup as a modified file to be reverted by hand, or committed by accident.\n\nBoth headers now go to `${CMAKE_CURRENT_BINARY_DIR}/include/utxoz/`, and three\nthings follow from that:\n\n- The generated include directory precedes the source one. Working trees that\n  predate this change still hold the old files, ignored by git and regenerated\n  by nobody; searched first, the source tree would serve those instead.\n- `install()` takes them from the build tree, and the source-tree install\n  excludes both names so a leftover copy cannot ship. Without this the package\n  loses the headers entirely, which is not an error here — it is a broken\n  `#include` in whoever consumes it.\n- `version.hpp` is untracked, and both are ignored.\n\n`ci/check_generated_headers.sh` is the regression: two configurations that must\nnot disturb each other, a source tree that must stay clean, a stale header\nplanted mid-build that must not shadow the generated one, and an install that\nmust carry both with the right contents. Every check fails on the previous\ncode. A new CI job runs it.\n\n`conan create` gained a `test_package`. It only built the package before, which\ncannot tell whether the package is usable — a consumer that includes both\ngenerated headers and opens a database can. Removing the generated-header\ninstall makes it fail with `utxoz/config.hpp: No such file or directory`, which\nis the failure that used to reach Knuth instead of CI.\n\nCloses #84",
+          "timestamp": "2026-08-08T16:03:22+02:00",
+          "tree_id": "eb93e205a0fc411772f06f60dc662cbb9a15210e",
+          "url": "https://github.com/utxo-z/utxo-z/commit/77a72e30ec006a5ef9307a116b93e9dda9eeece4"
+        },
+        "date": 1786197952254,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 338254.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 449870.54,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 358585.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 653516.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 489.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 481.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12093011.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12948379.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12805303,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12254.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 15246159.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14813595.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 142071.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 13466.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2904.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3598.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2928.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 53.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 54.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 53.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 54.07,
             "unit": "ops/sec"
           }
         ]
