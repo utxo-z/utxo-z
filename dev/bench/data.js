@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786143651808,
+  "lastUpdate": 1786190959308,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -11059,6 +11059,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 52.78,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1894bb68501db9ea03c31b5703bc7130beb6d2ca",
+          "message": "refactor!: name the storage mode reference, not compact (#82)\n\nOne word meant two unrelated things. `compact` was the storage mode that\nkeeps a fixed-size pointer to where an output lives, and `compact` was\nalso the operation that merges version files and reclaims their space.\n\"Compact the compact database\" is not a joke about naming; it is what the\ncode said, and `compact_compact_container()` was a real function.\n\nThe mode is now `reference`, because a reference is what it stores: a\nfile number and an offset naming the output, not the output itself. The\noperation keeps its name — `compact_all()`, `compact_container()`,\ncompaction — and does exactly what it did before.\n\nNothing on disk changed, which is the part worth stating plainly. The\nfile names are the ones they always were (`compact_v00000.dat`,\n`meta_compact_v00000.dat`, `compact_v00000.merge`), and the mode byte in\n`utxoz_config.dat` is still 1. A database written before this commit\nopens after it, and one written after opens before. Renaming either would\nbreak that, silently in the second case, since that byte is what tells a\nreopen which kind of database it is looking at — so a test now asserts\nboth, and it fails if the enumerator is renumbered or the prefix moves.\n\nBREAKING CHANGE: `compact_db` is now `reference_db`,\n`compact_find_result` is `reference_find_result`, `storage_mode::compact`\nis `storage_mode::reference`, and `compact_file_size` and\n`compact_test_file_size` are `reference_file_size` and\n`reference_test_file_size`. Renaming at the call site is the whole\nmigration: the enumerator's value, the on-disk format and every semantic\nare unchanged. Targeted at 0.9.0.\n\nCloses #79",
+          "timestamp": "2026-08-08T14:07:01+02:00",
+          "tree_id": "640e3b67d46ddd86841249e481b646f829490a1c",
+          "url": "https://github.com/utxo-z/utxo-z/commit/1894bb68501db9ea03c31b5703bc7130beb6d2ca"
+        },
+        "date": 1786190958964,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 273393.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 316188.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 265861.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 541350.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 438.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 425.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12273530.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12438708.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11950461.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12349.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 12275229.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 15641551.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 136891.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 12200.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2526.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3088.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2865.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 57.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.65,
             "unit": "ops/sec"
           }
         ]
