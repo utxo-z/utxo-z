@@ -1,0 +1,22 @@
+# Copyright (c) 2016-present Knuth Project developers.
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+#
+# Line endings are part of the package identity, so they are pinned here.
+#
+# Conan hashes the exported sources to get the recipe revision. Without this
+# file the working tree gets whatever the platform's git defaults produce, and a
+# checkout that converts text to CRLF exports different bytes — so the same
+# commit yields a different recipe revision, and one release publishes several.
+# That is not hypothetical: `release/0.8.1` published 9fbdb476… from Linux and
+# macOS and cd1d5b96… from Windows.
+#
+# eol=lf normalises the working tree on every platform, not only the index, and
+# the working tree is what gets exported.
+
+* text=auto eol=lf
+
+# Binary, and must never be touched. `text=auto` detects these correctly on its
+# own; naming them is a guard against a future rule that is less careful.
+*.png binary
+*.pdf binary
