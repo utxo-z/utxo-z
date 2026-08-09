@@ -78,6 +78,27 @@ def configured_compiler(cache_path: Path, entries: dict[str, str]) -> tuple[str,
     raise RuntimeError("CMAKE_CXX_COMPILER is absent from CMake's configured state")
 
 
+def configured_version(cache_path: Path, entries: dict[str, str]) -> tuple[str, str]:
+    """The version CMake was configured with, and the one it generated.
+
+    Two readings rather than one. The cache says what the build was told; the
+    generated header says what will actually be compiled into the library, and
+    it is the header that ships. A build configured correctly whose header says
+    something else is still a broken package.
+    """
+    configured = entries.get("UTXOZ_VERSION")
+    if not configured:
+        raise RuntimeError("UTXOZ_VERSION is absent from CMakeCache.txt")
+
+    header = cache_path.parent / "include" / "utxoz" / "version.hpp"
+    if not header.is_file():
+        raise RuntimeError(f"the generated version header is absent: {header}")
+    match = re.search(r'version\s*=\s*"([^"]*)"', header.read_text(encoding="utf-8"))
+    if not match:
+        raise RuntimeError(f"no version string in {header}")
+    return configured, match.group(1)
+
+
 def configured_cppstd(entries: dict[str, str]) -> str:
     toolchain = entries.get("CMAKE_TOOLCHAIN_FILE")
     if not toolchain:
@@ -156,6 +177,36 @@ def main() -> int:
                 )
                 return 1
 
+    # The version the job was handed must be the version the build used.
+    #
+    # This exists because it did not hold: an expression in `run:` is expanded by
+    # Actions before the shell sees it, but $VAR is read by the shell — and on
+    # Windows the default shell is PowerShell, where $UTXOZ_BUILD_VERSION is an
+    # undefined PowerShell variable rather than the environment. The recipe
+    # resolved as `utxoz/None` and the library was built as 0.0.0-dev while every
+    # test passed, because nothing compared the two.
+    build_version = None
+    expected_build_version = os.environ.get("EXPECTED_BUILD_VERSION")
+    if expected_build_version:
+        if not configured:
+            raise RuntimeError("EXPECTED_BUILD_VERSION needs CMAKE_CACHE to check against")
+        cache_version, header_version = configured_version(cache, configured)
+        if cache_version != expected_build_version:
+            print(
+                f"expected build version {expected_build_version}, "
+                f"CMake configured {cache_version}",
+                file=sys.stderr,
+            )
+            return 1
+        if header_version != expected_build_version:
+            print(
+                f"expected build version {expected_build_version}, "
+                f"the generated header carries {header_version}",
+                file=sys.stderr,
+            )
+            return 1
+        build_version = expected_build_version
+
     expected_runner_os = os.environ.get("EXPECTED_RUNNER_OS")
     actual_runner_os = os.environ.get("RUNNER_OS", platform.system())
     if expected_runner_os and actual_runner_os != expected_runner_os:
@@ -217,6 +268,7 @@ def main() -> int:
         },
         "cmake": run("cmake", "--version").splitlines()[0],
         "cppstd": cppstd,
+        "build_version": build_version,
     }
     destination = Path(os.environ.get("TOOLCHAIN_MANIFEST", "toolchain-manifest.json"))
     destination.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
