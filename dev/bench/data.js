@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786264608976,
+  "lastUpdate": 1786275233878,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -11893,6 +11893,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 53.6,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e32eb0a2323947c951f653af6a2c1f4cbadf46ac",
+          "message": "fix: pin line endings, so the recipe hashes the same on every platform (#95)\n\nConan derives the recipe revision from the bytes of the exported sources,\nwhich makes line endings part of the package's identity. Nothing pinned\nthem: there is no .gitattributes, so the working tree got whatever each\nplatform's git defaults produced.\n\nThe result is that one release publishes several recipes. `release/0.8.1`\npublished `9fbdb476953e2efe5dcbe0038ce382a1` from Linux and macOS and\n`cd1d5b960d68182d36644a5cb5ef1005` from Windows, on the same commit; the\nversions still on the remote each carry exactly two revisions, one second\napart, which is the same split. A consumer resolves whichever the server\nconsiders latest, so which recipe Knuth gets depends on which publish job\nfinished last.\n\nReproduced before fixing: the same tree exported twice, differing only in\nline endings, gives two revisions, and converting the CRLF copy back to LF\nrestores the first one exactly. Ruled out as contributors — every exported\nfile is mode 100644, and #85 already moved the generated headers out of the\nsource tree, so what is exported is tracked source and two .in templates.\n\n`* text=auto eol=lf` normalises the working tree rather than only the index,\nand the working tree is what gets exported. Nothing in the repository has\nCRLF today, so this changes no file; it stops a checkout from introducing\none.\n\n`ci/check_recipe_reproducible.sh` runs on each operating system, because\nwhat it catches is invisible from any other. It refuses a working tree with\nCRLF in the exported sources — the state that produced the second revision —\nand then shows that line endings really do change the revision, so that if\nthat ever stops being true the first check is revisited rather than trusted.\nChecked against its negation: giving one exported file CRLF endings makes it\nfail and name the file.\n\nWhat this does not do is make the three platforms stop each exporting and\nuploading a recipe. Byte-identical sources mean they now agree, but the\nidentity of a release is still decided by whichever job wins rather than in\none place. Publishing the recipe once and having each platform upload only\nits binaries against that revision is the shape that fixes it, and it\nchanges the release path — which no pull request exercises until #89 lands,\nso it is not something to change blind.\n\nThe checker runs under `set -euo pipefail`, and refuses to answer when it\ncannot look. `git ls-files | xargs grep`\nreports the status of its last stage, so git failing left the result empty —\nwhich reads exactly like \"no CRLF anywhere\" and passed. Verified: outside a\nrepository that pipeline yields an empty result and would have reported the\ntree clean; the loop that replaces it fails with \"cannot list the recipe's\nfiles\". `conan export | grep` had the same shape and is checked the same way,\nand the revisions are assigned before being made readonly, since `readonly\nVAR=$(...)` reports the status of readonly rather than of the substitution.\n\nThe fixture converts exactly what the recipe is made of — conanfile.py, which\nis the recipe, and the paths it lists in exports_sources — listed by git rather\nthan matched by extension, so the fixture and the property cannot drift apart.\nConverting the whole tree also changed scripts/ and ci/, which are not part of\nthe recipe, and demonstrated \"changing many files changes the revision\": true,\nand not the claim. Verified in both directions: CRLF in src/database.cpp fails\nand names it, CRLF in scripts/benchmark_compare.py does not.\n\nWhat it matches is a carriage return at end of line, not any carriage return.\nA bare \\r inside a string literal, or a file using old Mac line endings, is\nneither CRLF nor the thing this guards against, and a check that fires on the\nwrong thing is a check nobody trusts. Verified with a lone \\r placed\nmid-line: not reported, while a genuinely CRLF file still is.\n\nEvery external command has its status inspected, and every three-way outcome\nstays three-way. grep's 0, 1 and 2 are matched, did not match, and could not\nread — the last is neither \"no match\" nor \"binary\". conan export's output is\nparsed in bash rather than piped through grep, and distinguishes exactly one\nrevision from none and from several different ones, since taking the first\nmatch would hide an output that named two. Each failure was induced and\nobserved: an unreadable file, a failing git archive, a failing conan export,\nan export naming no revision, and an export naming two.\n\nCloses #94",
+          "timestamp": "2026-08-09T13:30:37+02:00",
+          "tree_id": "685e4191f08ae542ad037e208a53a446444ac0a3",
+          "url": "https://github.com/utxo-z/utxo-z/commit/e32eb0a2323947c951f653af6a2c1f4cbadf46ac"
+        },
+        "date": 1786275233544,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 136627.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 323353.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 265283.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 269350.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 360.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 420.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12091977.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12687393.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11714519.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12272.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 8695559.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 13211940.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 126817.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 7034.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2003.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2905.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2752.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 56.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 55.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.17,
             "unit": "ops/sec"
           }
         ]
