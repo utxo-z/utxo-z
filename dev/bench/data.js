@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786300290565,
+  "lastUpdate": 1786302194465,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -12171,6 +12171,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 5.15,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "79668a949759610468b87e2073c44e096c09f6fd",
+          "message": "feat: exercise the publish path from pull requests, and check what it published (#98)\n\nThe publish job runs for tags and release branches only, so no pull request\nhas ever executed it. Its profile, its options, its consumer check and its\ncontrol flow reach a release untested — which is how a Windows publish came\nto build `utxoz/None` without anything noticing.\n\nTwo scripts, and both halves of the release now run somewhere a pull request\ncan see them.\n\n`ci/create_package.sh` is everything the real publish does before it touches\nthe network. The dry-run job and the publish job both call it, so the two\ncannot drift into separate implementations: whatever a release does there, a\npull request already did. It cannot upload — not by a flag that could be\npassed wrongly, but because the dry run gives it a cache with no publishing\nremote in it, which the job then asserts rather than assumes.\n\nIt also resolves the package again as an ordinary dependency with\n--build=never. That is not the same check as test_package: test_package runs\nagainst a package the command just built, while this one refuses to rebuild.\nA package that only works when it can be rebuilt from the recipe is not a\npackage.\n\n`ci/verify_published.sh` runs after the upload, because a successful upload\nis not evidence that anything can be retrieved — utxoz/0.8.1 was uploaded by\nthree jobs that each printed a complete summary and is not on the remote\ntoday (#92). It asks from an empty cache, so nothing can be answered by what\n`conan create` left behind, and it reads the remote anonymously, so what it\nverifies is what a consumer sees rather than what the session that just\nuploaded can reach. It requires the exact recipe revision that was created,\nwhich the create step reports, so \"something with that name is there\" does\nnot pass.\n\nSeparating \"it is not there\" from \"we could not ask\" needed its own program.\n`conan list` exits 0 whether the reference exists, is absent, or the remote\nis unreachable — the outcome is a field in its JSON. Reading that with\n`if ! conan list` turns a network failure into a missing package, which is\nthe same mistake as `git tag | head`. `ci/remote_revisions.py` exits 0, 3 and\n4 for the three cases, and claims absence only on the remote's own words:\nasked for a reference it does not have, this remote answers `Recipe 'x' not\nfound`, while asking for that reference's revisions answers with an empty\nerror, which proves nothing. Hence two queries rather than one.\n\ntest_package now opens a database in both storage modes and checks the typed\nfields come back, because a package whose full_db links while reference_db\ndoes not is broken for half its users, and that failure belonged downstream.\n\nVerified against the real remote, uploading and deleting nothing:\n\n    absent (0.8.1)          the upload reported success and utxoz/0.8.1 is not on kth-verify\n    unreachable             could not establish whether utxoz/0.8.0 is on kth-verify; that is not a pass\n    wrong revision          utxoz/0.8.0 is on kth-verify, but not the revision just built\n    correct revision        reaches the install\n\nThe second line is the one that matters most: not knowing is its own\noutcome, and it never becomes \"missing\".\n\nA query that never returns is not an answer either, so it is bounded. Without\na timeout a stalled Conan holds the publish job open until the workflow kills\nit, which reports a timed-out job rather than \"we could not establish whether\nthe package is there\" — and loses the distinction the whole program exists to\nmake. Verified against a conan that sleeps: refused after the bound, as\n\"could not determine\", not as absence.\n\nThe dry run also points that verification at a version the remote cannot\nhave and requires it to say so in those words. Asserting the message rather\nthan a non-zero exit is deliberate — an unreachable remote fails too, and a\ncontrol that accepted any failure would pass while proving nothing.\n\nBoth scripts follow the discipline #95 settled on: set -euo pipefail,\nassignment before readonly, every captured command's status inspected, and\noutcomes that are three-way kept three-way. Reading the created revision back\nno longer pipes `conan list` into python — a pipeline reports python's status,\nso a failed query arrived as an empty revision and could not be told apart from\na package that has none. The query and the parse are separate failures now, and\nci/one_revision.py requires exactly one revision: none and several are both\nrefused, since taking the first of several would pin the publish check to\nwhichever iteration order produced. Checking the revision against the remote's\nlist separates grep's three outcomes, and the consumer executable is found\nwithout `find | head`, which reported head's status and made a failed search\nlook like nothing was built.\n\nci/test_remote_revisions.sh is twelve cases against a conan that answers what\neach one needs: present with the exact revision, absent, an error that is not a\ndefinite answer, conan exiting non-zero, a reply that is not JSON, a reply\nnaming no remote, a query that never returns, a revisions query that fails after\nexistence is established, a reference listed with no revision, several revisions\nall of which must come out, and a remote answering about something else. Each is\nchecked on both its exit code and its message. A real remote cannot be asked to\nfail on cue, and these are the failures that decide whether a release is\nbelieved. Treating any error as absence turns exactly one case red; removing the\ntimeout makes one case never return.\n\njson.loads accepts any valid JSON, not only the shape Conan documents, and the\nwrong shape failed in ways that looked like answers rather than like errors.\n`{\"kth\": \"invalid\"}` made `\"error\" in reply` and `reference not in reply` two\nsubstring tests on a string, and the reply came back as *absence* — the one\nconclusion this program exists to never reach by accident. A string under\n\"revisions\" was worse: it yielded its characters as revisions and exited zero,\nso a malformed listing would have published a revision that never existed.\nEvery level is checked before it is read, in both programs.\n\nA reply that does not mention the reference is no longer absence either. Only\nthe remote's own \"not found\" proves that; a listing about something else proves\nnothing, and treating silence as denial is the same mistake one level up.\n\nci/test_one_revision.sh covers the other program the same way — one revision,\nnone, several, an error, invalid JSON, empty input, a missing reference, no\nLocal Cache, and four shapes that are JSON but not a listing.\n\nDepends on #97: the publish job now runs a shell script, which needs the\ndefault shell to be bash on Windows.\n\nCloses #89",
+          "timestamp": "2026-08-09T21:00:04+02:00",
+          "tree_id": "9429c051d7119b691c7b902c11ad5439edb07b86",
+          "url": "https://github.com/utxo-z/utxo-z/commit/79668a949759610468b87e2073c44e096c09f6fd"
+        },
+        "date": 1786302193793,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 873221.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 1108746.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 1166552.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 1530796.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 382.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 411.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11692642.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 9131152.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 10979428.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 11825.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 12647637.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 12376380.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 146934.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 13490.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2276.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3314.96,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2769.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 104.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 105.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 105.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 106.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 105.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 106.8,
             "unit": "ops/sec"
           }
         ]
