@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786303686231,
+  "lastUpdate": 1786315505443,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -12449,6 +12449,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 4.59,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f9b84ef3fb174253def56f2d60c3f48c9f06bf72",
+          "message": "fix: link bcrypt so consumers of the Windows package can link too (#103)\n\nThe v0.9.0 release failed on Windows before it could upload anything:\n\n    utxoz.lib(database_impl.cpp.obj) : error LNK2019: unresolved external\n      symbol BCryptGenRandom referenced in function generate_merge_id\n    test_package.exe : fatal error LNK1120: 1 unresolved externals\n\n`target_link_libraries(utxoz PRIVATE bcrypt)` resolves nothing for a static\nlibrary. Linking bcrypt while building utxoz does not put BCryptGenRandom into\nutxoz.lib; the symbol stays undefined and whoever links the archive has to\nsupply bcrypt themselves. PRIVATE says they do not have to.\n\nAnd nothing told them otherwise: package_info() declared system_libs for Linux\nand FreeBSD and never mentioned bcrypt, so a Conan consumer had no way to know.\nBoth are fixed, because they are two different audiences — PUBLIC covers anyone\nlinking the CMake target, system_libs covers anyone consuming the package.\n\nThis has been true since generate_merge_id was added. What is new is that a\nconsumer now exists to prove it: nobody had ever linked against the installed\nWindows library.\n\nThe reason it survived to a release is the second half of this change.\n`conan create` — and with it test_package, the only consumer there is — runs on\nall three platforms only inside `publish`, which no pull request executes. The\ndry run added in #98 was Linux-only, so it reported the package consumable\nwhile the Windows one could not link at all. It now runs the same three\nplatforms publish does, with the same compiler selection and the same\nverification, which is what makes this fix demonstrable rather than merely\nplausible: the Windows dry run is red without it.\n\nThe selftests that job runs stay on Linux. Both programs they exercise are\nPython with no platform-specific behaviour, so once is enough — and the harness\nis POSIX by construction: it replaces conan with an extensionless shell script\non PATH, which Windows does not resolve, so every case there asked the real\nremote and reported \"could not determine\". Found by running the job on Windows\nfor the first time.\n\nNothing was retried and nothing was published by hand. The Windows package was\nnever uploaded, which is the correct outcome — a package no consumer can link\ndid not reach the remote.",
+          "timestamp": "2026-08-10T00:41:55+02:00",
+          "tree_id": "4a6931c30e0dec2d4bfc7636e222aeb9e6af427f",
+          "url": "https://github.com/utxo-z/utxo-z/commit/f9b84ef3fb174253def56f2d60c3f48c9f06bf72"
+        },
+        "date": 1786315505123,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 266598.54,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 329976.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 338360.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 272257.01,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 378.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 429.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12106619.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12558336.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11832419.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12102.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 11240531.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14655741.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 140911.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 10940.96,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2443.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2958.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2768.66,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 56.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.89,
             "unit": "ops/sec"
           }
         ]
