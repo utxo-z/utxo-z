@@ -3,6 +3,22 @@ name: Build and Test
 permissions:
   contents: read
 
+# Every `run:` is bash, on every platform.
+#
+# The default on Windows runners is PowerShell, where $VAR is a PowerShell
+# variable and not the environment — so a step reading $UTXOZ_BUILD_VERSION got
+# an empty string there while working everywhere else. The recipe resolved as
+# `utxoz/None` and the library was built as 0.0.0-dev, with every Windows job
+# green, because a version nothing compares to is a version nothing notices.
+#
+# Audited before setting this: only `build` and `publish` run on Windows, and
+# every step in them that is genuinely PowerShell — locating MSVC, entering the
+# developer shell — already declares `shell: pwsh` and keeps it. The rest are
+# plain commands that behave the same under either shell.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   # Pull-request revisions supersede each other. Release and hotfix publishing
@@ -193,6 +209,7 @@ jobs:
           EXPECTED_RUNNER_OS: ${{ matrix.runner-os }}
           EXPECTED_RUNNER_ARCH: ${{ matrix.runner-arch }}
           EXPECTED_CPPSTD: 23
+          EXPECTED_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
           CMAKE_CACHE: build/build/${{ matrix.build-type }}/CMakeCache.txt
           CONAN_PROFILE: ci/conan-cpp23
           TOOLCHAIN_MANIFEST: toolchain-${{ runner.os }}-${{ matrix.build-type }}-${{ matrix.sanitizer }}.json
@@ -405,6 +422,7 @@ jobs:
           EXPECTED_RUNNER_OS: Linux
           EXPECTED_RUNNER_ARCH: X64
           EXPECTED_CPPSTD: 23
+          EXPECTED_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
           CMAKE_CACHE: build/build/Release/CMakeCache.txt
           CONAN_PROFILE: ems2
           TOOLCHAIN_MANIFEST: toolchain-Emscripten.json
@@ -543,6 +561,7 @@ jobs:
           EXPECTED_RUNNER_OS: Linux
           EXPECTED_RUNNER_ARCH: X64
           EXPECTED_CPPSTD: 23
+          EXPECTED_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
           CMAKE_CACHE: build/build/Release/CMakeCache.txt
           CONAN_PROFILE: ci/conan-cpp23
           TOOLCHAIN_MANIFEST: toolchain-statistics-disabled-Linux.json
@@ -621,6 +640,7 @@ jobs:
           EXPECTED_RUNNER_OS: Linux
           EXPECTED_RUNNER_ARCH: X64
           EXPECTED_CPPSTD: 23
+          EXPECTED_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
           CMAKE_CACHE: build/build/Release/CMakeCache.txt
           CONAN_PROFILE: ci/conan-cpp23
           TOOLCHAIN_MANIFEST: toolchain-benchmark-Linux.json
