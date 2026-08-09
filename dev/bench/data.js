@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786233330996,
+  "lastUpdate": 1786262074393,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -11615,6 +11615,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 53.24,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "29221b2ea3f83500179ed6b8e96d20558938350f",
+          "message": "test: keep the reference statistics test honest with counters compiled out (#91)\n\n`Reference: statistics` asserted\n\n    CHECK(stats.total_inserts >= 50);\n\nunconditionally, against a counter that does not exist when\nUTXOZ_STATISTICS_ENABLED is undefined. With `-o statistics=False` it read 0\nand the test failed — the only failure in that configuration, and one that\npredates this branch: it fails the same way on master.\n\nThe full-mode test in test_database.cpp already had the right shape and the\ncomment explaining it. This one was left behind when that convention was\napplied, so it gets the same split: the mode and the entry count are kept by\nthe database itself and are asserted either way; only the counter goes behind\nthe guard. Nothing is deleted — with statistics on, `total_inserts` is still\nchecked.\n\nNobody noticed because nobody built it. No job set the `statistics` option, so\nevery run used the default. A configuration the library supports, and offers as\na Conan option, had no coverage at all.\n\nSo there is a job for it now, and it runs the tests rather than only building.\nThat distinction is the whole point: `statistics=False` has always compiled\nclean, and what was broken only appeared when the suite ran. A job that stopped\nat compilation would have gone green over this exact failure. It also asserts\nthat the configuration under test is the one it meant to build, by reading the\ngenerated config.hpp — a job named \"statistics disabled\" that quietly built with\nthem enabled would prove nothing.\n\nVerified in both directions: with `-o statistics=False`, master fails\n`Reference: statistics` and this commit passes 102/102 — five test cases are\nthemselves compiled out. With statistics enabled, 107/107.\n\nCloses #83",
+          "timestamp": "2026-08-09T09:51:18+02:00",
+          "tree_id": "b5f3de190949825fb2ce81bfbdfdd5ce59ae02db",
+          "url": "https://github.com/utxo-z/utxo-z/commit/29221b2ea3f83500179ed6b8e96d20558938350f"
+        },
+        "date": 1786262074084,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 206119.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 268558.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 128542.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 330397.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 376.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 407.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11907377.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12938100.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11801718.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12075.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 7109256.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 15071337.17,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 81430.22,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 7036.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 1885.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2829.17,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2778.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 55.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 55.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 55.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 55.56,
             "unit": "ops/sec"
           }
         ]
