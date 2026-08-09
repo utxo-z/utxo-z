@@ -42,13 +42,40 @@ echo "Switching to master and pulling latest changes..."
 git checkout master
 git pull origin master
 
-# The tag must point at a master that actually contains the version bump.
-VERSION_FILE="include/utxoz/version.hpp"
-if ! grep -q "version = \"${VERSION}\"" "${VERSION_FILE}"; then
-    echo "master does not carry version ${VERSION} yet (${VERSION_FILE} still differs)."
-    echo "The release PR merge has not landed. Aborting before tagging."
+# The tag must point at a master that actually contains the release commit.
+#
+# This used to grep include/utxoz/version.hpp for the version, which cannot be
+# true any more: #85 moved that header into the build tree, so nothing in the
+# source tree carries the version. The check would have failed every release,
+# and its message — "master does not carry version X yet" — would have been
+# misleading rather than merely wrong.
+#
+# What it was really guarding is unchanged: do not tag a master that the release
+# PR has not landed on. So ask about the merge itself. `gh pr merge` above
+# returns before the merge is necessarily visible here, and `git pull` may have
+# raced it; both are covered by requiring the merge commit to be an ancestor of
+# what is checked out.
+echo "Confirming the release PR landed on master..."
+PR_STATE="$(gh pr view "release/${VERSION}" --json state -q .state)"
+if [ "${PR_STATE}" != "MERGED" ]; then
+    echo "The pull request for release/${VERSION} is ${PR_STATE}, not MERGED."
+    echo "Aborting before tagging."
     exit 1
 fi
+
+MERGE_COMMIT="$(gh pr view "release/${VERSION}" --json mergeCommit -q .mergeCommit.oid)"
+if [ -z "${MERGE_COMMIT}" ]; then
+    echo "The pull request for release/${VERSION} reports no merge commit."
+    echo "Aborting before tagging."
+    exit 1
+fi
+
+if ! git merge-base --is-ancestor "${MERGE_COMMIT}" HEAD; then
+    echo "Merge commit ${MERGE_COMMIT} is not an ancestor of the checked-out master."
+    echo "The tag would not point at the release. Aborting before tagging."
+    exit 1
+fi
+echo "Release commit ${MERGE_COMMIT} is on master."
 
 # Step 1: Create temporary release to generate notes
 echo "Creating temporary release to generate notes..."

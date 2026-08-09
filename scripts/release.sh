@@ -98,24 +98,21 @@ fi
 
 git checkout -b "release/${VERSION}"
 
-# Update version.hpp with the release version
-# Note: `sed -i` is not portable — GNU sed takes the suffix attached to the
-# flag, BSD/macOS sed takes it as a separate argument. Write to a temp file and
-# move it into place instead, which behaves the same everywhere.
-VERSION_FILE="include/utxoz/version.hpp"
-echo "Updating ${VERSION_FILE} to version ${VERSION}..."
-sed "s/inline constexpr std::string_view version = \".*\"/inline constexpr std::string_view version = \"${VERSION}\"/" \
-    "${VERSION_FILE}" > "${VERSION_FILE}.tmp"
-mv "${VERSION_FILE}.tmp" "${VERSION_FILE}"
-
-# Fail loudly if the substitution did not take effect
-if ! grep -q "version = \"${VERSION}\"" "${VERSION_FILE}"; then
-    echo "Failed to update ${VERSION_FILE} to ${VERSION}"
-    exit 1
-fi
-
-git add "${VERSION_FILE}"
-git commit -m "release: update version to ${VERSION}"
+# No version to bump. The version is not written down anywhere in the tree any
+# more: #85 moved include/utxoz/version.hpp into the build tree, because it was
+# generated into the source tree and tracked, so every build rewrote a file
+# under version control with whatever version that build happened to use.
+#
+# It comes from the ref instead. This branch is named release/${VERSION}, and
+# ci/determine_version.sh derives ${VERSION} from that name; CMake then requires
+# it and generates the header. Editing a file to say the version would be
+# recording a second copy that nothing reads.
+#
+# The commit is empty because the branch still needs one: without it there is
+# nothing between master and release/${VERSION}, and `gh pr create` has no pull
+# request to open. It marks the release point and is what post-release.sh later
+# confirms landed on master before tagging.
+git commit --allow-empty -m "release: ${VERSION}"
 
 git push origin "release/${VERSION}"
 
