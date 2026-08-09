@@ -125,6 +125,13 @@ class UtxozConan(ConanFile):
         if self.options.log == "spdlog":
             self.cpp_info.requires.append("spdlog::spdlog")
 
+        # The same reason as the PUBLIC link in CMakeLists.txt, said again where
+        # a package consumer can hear it: the archive references BCryptGenRandom
+        # and cannot resolve it on its own. Without this, `conan create` builds
+        # the package and any consumer of it fails to link.
+        if self.settings.os == "Windows":
+            self.cpp_info.system_libs.append("bcrypt")
+
         if self.settings.os in ["Linux", "FreeBSD"]:
             self.cpp_info.system_libs.extend(["pthread", "rt"])
 
