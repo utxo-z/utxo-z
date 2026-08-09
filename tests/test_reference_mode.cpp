@@ -285,7 +285,14 @@ TEST_CASE_METHOD(ReferenceFixture, "Reference: statistics", "[reference]") {
     auto stats = db_->get_statistics();
     CHECK(stats.mode == utxoz::storage_mode::reference);
     CHECK(stats.total_entries == 50);
+
+    // Counters only exist when recording is compiled in; the mode and the entry
+    // count above are kept by the database itself and hold either way. Same
+    // split as the full-mode test in test_database.cpp — this one was left
+    // behind when that convention was applied.
+#ifdef UTXOZ_STATISTICS_ENABLED
     CHECK(stats.total_inserts >= 50);
+#endif
 }
 
 TEST_CASE_METHOD(ReferenceFixture, "Reference: compaction", "[reference]") {

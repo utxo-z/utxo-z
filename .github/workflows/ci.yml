@@ -494,6 +494,84 @@ jobs:
         run: |
           conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
 
+  statistics-disabled:
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    name: 📉 Statistics disabled
+    # Builds and runs code from the checked-out revision; it needs to read the
+    # repository and nothing else.
+    permissions:
+      contents: read
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Select GCC 16
+        run: |
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes gcc-16 g++-16
+          echo "CC=gcc-16" >> "$GITHUB_ENV"
+          echo "CXX=g++-16" >> "$GITHUB_ENV"
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan==${{ env.CONAN_VERSION }}
+          conan --version
+
+      - name: 🔧 Configure Conan
+        run: |
+          conan profile detect --force
+
+      - name: 📦 Install dependencies
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+        run: |
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o statistics=False
+
+      - name: ⚙️ Configure CMake
+        run: |
+          cmake --preset conan-release
+
+      - name: 🧪 Verify configured toolchain
+        env:
+          EXPECTED_COMPILER_KIND: gcc
+          EXPECTED_COMPILER_MAJOR: 16
+          EXPECTED_RUNNER_OS: Linux
+          EXPECTED_RUNNER_ARCH: X64
+          EXPECTED_CPPSTD: 23
+          CMAKE_CACHE: build/build/Release/CMakeCache.txt
+          CONAN_PROFILE: ci/conan-cpp23
+          TOOLCHAIN_MANIFEST: toolchain-statistics-disabled-Linux.json
+        run: python3 scripts/ci_toolchain_manifest.py
+
+      - name: 📤 Upload toolchain manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-statistics-disabled-Linux
+          path: toolchain-statistics-disabled-Linux.json
+
+      # The build was never the problem: statistics=False has always compiled
+      # clean. What was broken only showed up when the tests ran, so a job that
+      # stopped at compilation would have gone green over it.
+      - name: 🧪 Verify statistics really are compiled out
+        run: |
+          if grep -q '^#define UTXOZ_STATISTICS_ENABLED' build/build/Release/include/utxoz/config.hpp; then
+            echo "this job is supposed to build with statistics disabled" >&2
+            exit 1
+          fi
+
+      - name: 🔨 Build
+        run: |
+          cmake --build --preset conan-release --parallel
+
+      - name: 🧪 Run tests
+        run: |
+          ctest --preset conan-release --output-on-failure
+
   benchmark:
     needs: [setup]
     runs-on: ubuntu-24.04
