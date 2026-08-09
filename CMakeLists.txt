@@ -123,8 +123,13 @@ target_link_libraries(utxoz
 # The merge identifier comes from the system CSPRNG, which on Windows lives in
 # bcrypt. std::random_device is deliberately not used: the standard allows it to
 # be deterministic.
+#
+# PUBLIC, not PRIVATE. utxoz is a static library, so linking bcrypt while
+# building it resolves nothing: BCryptGenRandom stays an undefined symbol in
+# utxoz.lib and whoever links the archive has to supply bcrypt themselves.
+# PRIVATE says they do not have to, and they find out at link time that they do.
 if(WIN32)
-    target_link_libraries(utxoz PRIVATE bcrypt)
+    target_link_libraries(utxoz PUBLIC bcrypt)
 endif()
 
 # Given a mapped file whose header does not read as initialised, Boost assumes

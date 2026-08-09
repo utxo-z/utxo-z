@@ -622,8 +622,37 @@ jobs:
 
   publish-dry-run:
     needs: [setup]
-    runs-on: ubuntu-24.04
-    name: 📦 Publish dry run
+    # The same platforms publish runs on, because the thing being rehearsed is
+    # platform-specific. A Linux-only dry run said the package was consumable
+    # while the Windows one could not link at all: `conan create` — and with it
+    # test_package, the only consumer that exists — ran on Windows exclusively
+    # inside publish, which no pull request executes. The gap was found by a
+    # release rather than by CI, which is the wrong order.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: 📦 Publish dry run Linux
+            compiler-kind: gcc
+            compiler-major: 16
+            runner-os: Linux
+            runner-arch: X64
+          - os: macos-26
+            name: 📦 Publish dry run macOS
+            compiler-kind: apple-clang
+            compiler-major: 21
+            runner-os: macOS
+            runner-arch: ARM64
+          - os: windows-2025
+            name: 📦 Publish dry run Windows
+            compiler-kind: msvc
+            compiler-major: 44
+            runner-os: Windows
+            runner-arch: X64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
     # Builds and runs code from the checked-out revision, which on a pull request
     # is whatever the contributor pushed. Read the repository and nothing else —
     # and note there are no secrets here at all.
@@ -636,13 +665,44 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 🔧 Select GCC 16
+      - name: 🔧 Select compiler
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install --yes gcc-16 g++-16
-          echo "CC=gcc-16" >> "$GITHUB_ENV"
-          echo "CXX=g++-16" >> "$GITHUB_ENV"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+            sudo apt-get update
+            sudo apt-get install --yes gcc-16 g++-16
+            echo "CC=gcc-16" >> "$GITHUB_ENV"
+            echo "CXX=g++-16" >> "$GITHUB_ENV"
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          fi
+
+      - name: 🔧 Locate MSVC
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'Visual Studio installation not found' }
+          $toolsetRoot = Join-Path $installation 'VC\Tools\MSVC'
+          $toolset = Get-ChildItem $toolsetRoot -Directory |
+            Where-Object Name -Like '14.44.*' |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $toolset) { throw "MSVC 14.44 is not installed under $toolsetRoot" }
+          $compiler = Join-Path $installation "VC\Tools\MSVC\$toolset\bin\Hostx64\x64\cl.exe"
+          if (-not (Test-Path $compiler)) { throw "MSVC x64 compiler not found at $compiler" }
+          $devShell = Join-Path $installation 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+          Import-Module $devShell
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -vcvars_ver=14.44'
+          @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCToolsInstallDir', 'VCINSTALLDIR', 'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion', 'UCRTVersion', 'UniversalCRTSdkDir') | ForEach-Object {
+            $value = [Environment]::GetEnvironmentVariable($_)
+            if ($value) { "$_=$value" >> $env:GITHUB_ENV }
+          }
+          "CXX=$compiler" >> $env:GITHUB_ENV
+          "VSWHERE=$vswhere" >> $env:GITHUB_ENV
 
       - name: 🐍 Install Conan
         run: |
@@ -659,30 +719,46 @@ jobs:
         run: |
           conan profile detect --force
 
+      - name: 🔧 Use selected MSVC with Ninja
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profile = Join-Path $env:CONAN_HOME 'profiles\default'
+          Add-Content $profile "`n[conf]`ntools.cmake.cmaketoolchain:generator=Ninja`ntools.microsoft.msbuild:vs_version=18"
+
       # The remote query's outcomes, against a conan that answers exactly what
       # each case needs. A real remote cannot be asked to fail on cue, and these
       # are the failures that decide whether a release is believed.
+      #
+      # Linux only, and deliberately. Both programs under test are Python with no
+      # platform-specific behaviour, so once is enough — while the harness is
+      # POSIX by construction: it replaces conan with an extensionless shell
+      # script on PATH, which Windows will not resolve, so every case there ends
+      # up asking the real remote and reporting "could not determine".
       - name: 🧪 The remote query tells absent from unreachable
+        if: runner.os == 'Linux'
         run: |
           ./ci/test_remote_revisions.sh
           ./ci/test_one_revision.sh
 
       - name: 🧪 Verify toolchain
         env:
-          EXPECTED_COMPILER_KIND: gcc
-          EXPECTED_COMPILER_MAJOR: 16
-          EXPECTED_RUNNER_OS: Linux
-          EXPECTED_RUNNER_ARCH: X64
+          EXPECTED_COMPILER_KIND: ${{ matrix.compiler-kind }}
+          EXPECTED_COMPILER_MAJOR: ${{ matrix.compiler-major }}
+          EXPECTED_XCODE: ${{ runner.os == 'macOS' && '26.6' || '' }}
+          EXPECTED_VISUAL_STUDIO: ${{ runner.os == 'Windows' && '18' || '' }}
+          EXPECTED_RUNNER_OS: ${{ matrix.runner-os }}
+          EXPECTED_RUNNER_ARCH: ${{ matrix.runner-arch }}
           EXPECTED_CPPSTD: 23
           CONAN_PROFILE: ci/conan-cpp23
-          TOOLCHAIN_MANIFEST: toolchain-publish-dry-run-Linux.json
+          TOOLCHAIN_MANIFEST: toolchain-publish-dry-run-${{ runner.os }}.json
         run: python3 scripts/ci_toolchain_manifest.py
 
       - name: 📤 Upload toolchain manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: toolchain-publish-dry-run-Linux
-          path: toolchain-publish-dry-run-Linux.json
+          name: toolchain-publish-dry-run-${{ runner.os }}
+          path: toolchain-publish-dry-run-${{ runner.os }}.json
 
       # Everything the real publish does before it touches the network. It cannot
       # upload: this cache has no `kth` remote to write to, which the next step
