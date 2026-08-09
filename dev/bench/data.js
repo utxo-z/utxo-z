@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786275233878,
+  "lastUpdate": 1786300290565,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -12032,6 +12032,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.17,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "be9844718347a040b8247c5155025dff42d6b518",
+          "message": "fix: publish the version a tag names (#96)\n\nPushing `v0.8.1` published `utxoz/0.8.1-commit.179`. The tag said one thing\nand the package said another.\n\n`refs/tags/*` fell through to the branch that derives a development version\nfrom the newest tag, so the earlier\n\n    [[ \"$GITHUB_REF\" == \"refs/tags/\"* ]] && VERSION=$(… 's/^v//')\n\nwas dead code: its result was always overwritten. The intent was written\ninto the derivation and the derivation did not do it. A tag now names its own\nversion, and only branches take the `<last-tag>-commit.<run>` form.\n\nTwo consequences worth stating, because they are the point rather than side\neffects.\n\nA tag that is not a version is now refused instead of laundered. Before this,\n`refs/tags/latest` produced `0.8.1-commit.42` — a green build publishing a\npackage named after a tag nobody pushed. It fails now, as do `v`, `v0.9`\nand a tag carrying a semicolon.\n\nAnd `LAST_TAG` stops deciding a tag's version. A tag ref names the version\noutright, so `refs/tags/v9.9.9` is `9.9.9` whatever the newest tag happens to\nbe; the test pins that with a deliberately unrelated `LAST_TAG=0.1.0`.\n\nRefs are hierarchical, so the version is the whole suffix after the prefix\nrather than the last path component. `archive/v0.9.0` is a different tag from\n`v0.9.0`, and taking the last component published both as 0.9.0 — two tags, one\npackage version, whichever built last winning. Keeping the slash makes the\npattern refuse it, and the same applies to release/foo/0.9.0.\n\nAnd a tag needs no tag list: reading the newest tag now happens only on the\nbranch that uses it. A tag names its own version outright, so a release must not\nstop because `git for-each-ref` failed on something it does not consult. Tested\nfrom a directory that is not a repository, with LAST_TAG unset — git would fail\nif it were asked, and refs/tags/v0.9.0 still yields 0.9.0.\n\nTen tag cases and six branch cases in ci/test_determine_version.sh, including\n`refs/heads/tags/v0.9.0` — a branch that merely looks like a tag ref is still\na branch. Removing the new case turns all ten tag cases red and leaves every\nbranch case green, so the two halves are pinned independently.\n\nCloses #93",
+          "timestamp": "2026-08-09T20:27:07+02:00",
+          "tree_id": "95ef83e2f677cb51ba67bfb2880aa308796d1fa3",
+          "url": "https://github.com/utxo-z/utxo-z/commit/be9844718347a040b8247c5155025dff42d6b518"
+        },
+        "date": 1786300290085,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 1227741.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 13514876.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 7444683.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 5667448.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 519.82,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 656.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 15015985.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 9462540.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 14059651.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 14818.05,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 16371751.39,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 13553676.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 194974.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 14602.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 3223.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 6083,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3177.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 5.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 5.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 5.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 5.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 5.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 5.15,
             "unit": "ops/sec"
           }
         ]
