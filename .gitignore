@@ -84,3 +84,4 @@ coverage/
 .boost-unordered-ref/
 test_storage_*/
 scripts/__pycache__/
+ci/__pycache__/

@@ -10,9 +10,10 @@
  * it. `version` is printed and `config.hpp` is read through a preprocessor
  * branch, so both files have to exist and have to have content.
  *
- * The database is opened as well: a package whose headers install but whose
- * library does not link is just as unusable, and that failure also belongs here
- * rather than downstream.
+ * A database is opened in each storage mode as well: a package whose headers
+ * install but whose library does not link is just as unusable, and a package
+ * whose full_db links while reference_db does not is broken for half its users.
+ * Both failures belong here rather than downstream.
  */
 
 #include <array>
@@ -44,33 +45,83 @@ int main() {
     // package in its own build tree, so this is already isolated; a fixed path
     // under /tmp is shared, and two `conan create` runs at once would open or
     // delete each other's database.
-    auto const path = std::filesystem::current_path() / "utxoz_test_package_db";
-    std::filesystem::remove_all(path);
+    auto const root = std::filesystem::current_path();
 
-    auto opened = utxoz::full_db::open_for_testing(path.string(), true);
-    if ( ! opened) {
-        fmt::println("open failed");
-        return EXIT_FAILURE;
+    // Both storage modes, because they are separate entry points in the
+    // installed library. A package whose full_db links while reference_db does
+    // not is still broken for anyone using the reference mode, and that failure
+    // would surface downstream rather than here.
+    {
+        auto const path = root / "utxoz_test_package_full";
+        std::filesystem::remove_all(path);
+
+        auto opened = utxoz::full_db::open_for_testing(path.string(), true);
+        if ( ! opened) {
+            fmt::println("full_db: open failed");
+            return EXIT_FAILURE;
+        }
+
+        auto db = std::move(*opened);
+        utxoz::raw_outpoint key{};
+        key[0] = 1;
+
+        std::array<uint8_t, 32> const value{};
+        if ( ! db.insert(key, utxoz::output_data_span{value}, 100)) {
+            fmt::println("full_db: insert failed");
+            return EXIT_FAILURE;
+        }
+
+        auto const found = db.find(key, 200);
+        if ( ! found) {
+            fmt::println("full_db: find failed");
+            return EXIT_FAILURE;
+        }
+        if (found->block_height != 100) {
+            fmt::println("full_db: find returned the wrong height");
+            return EXIT_FAILURE;
+        }
+
+        db.close();
+        std::filesystem::remove_all(path);
+        fmt::println("full_db: ok");
     }
 
-    auto db = std::move(*opened);
-    utxoz::raw_outpoint key{};
-    key[0] = 1;
+    {
+        auto const path = root / "utxoz_test_package_reference";
+        std::filesystem::remove_all(path);
 
-    std::array<uint8_t, 32> const value{};
-    if ( ! db.insert(key, utxoz::output_data_span{value}, 100)) {
-        fmt::println("insert failed");
-        return EXIT_FAILURE;
+        auto opened = utxoz::reference_db::open_for_testing(path.string(), true);
+        if ( ! opened) {
+            fmt::println("reference_db: open failed");
+            return EXIT_FAILURE;
+        }
+
+        auto db = std::move(*opened);
+        utxoz::raw_outpoint key{};
+        key[0] = 2;
+
+        if ( ! db.insert(key, 7, 42, 100)) {
+            fmt::println("reference_db: insert failed");
+            return EXIT_FAILURE;
+        }
+
+        auto const found = db.find(key, 200);
+        if ( ! found) {
+            fmt::println("reference_db: find failed");
+            return EXIT_FAILURE;
+        }
+        // The typed fields come back, which is the whole point of this mode and
+        // the part that would break if reference_find_result ever stopped being
+        // installed.
+        if (found->file_number != 7 || found->offset != 42) {
+            fmt::println("reference_db: find returned the wrong fields");
+            return EXIT_FAILURE;
+        }
+
+        db.close();
+        std::filesystem::remove_all(path);
+        fmt::println("reference_db: ok");
     }
-
-    auto const found = db.find(key, 200);
-    if ( ! found) {
-        fmt::println("find failed");
-        return EXIT_FAILURE;
-    }
-
-    db.close();
-    std::filesystem::remove_all(path);
 
     fmt::println("ok");
     return EXIT_SUCCESS;

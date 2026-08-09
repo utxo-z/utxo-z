@@ -358,17 +358,37 @@ jobs:
           name: toolchain-publish-${{ runner.os }}
           path: toolchain-publish-${{ runner.os }}.json
 
+      # The same script the dry-run job runs on every pull request, so the
+      # profile, the options and the consumer check cannot drift between what is
+      # tested and what is released.
       - name: 📦 Create package
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
-        run: |
-          conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
+        run: ./ci/create_package.sh
 
       - name: 🚀 Upload to Conan remote
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
           conan upload "utxoz/$UTXOZ_BUILD_VERSION" -r kth -c
+
+      # An upload reporting success is not evidence that the package can be
+      # retrieved: utxoz/0.8.1 was uploaded on 2026-07-31 by three jobs that all
+      # printed a complete upload summary, and it is not on the remote (#92).
+      # This asks the remote from an empty cache, anonymously — so it sees what
+      # a consumer sees, not what an authenticated session can reach.
+      # UTXOZ_RECIPE_REVISION comes from the create step, which writes it to
+      # GITHUB_ENV: the check is that *this* revision reached the remote, not
+      # that something with the same name did.
+      #
+      # A separate remote name, anonymous: it reads what a consumer would get,
+      # not what the authenticated session that just uploaded can see.
+      - name: 🔍 The package is actually retrievable
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+          UTXOZ_REMOTE: kth-verify
+          UTXOZ_REMOTE_URL: https://packages.kth.cash/api/
+        run: ./ci/verify_published.sh
 
   build-wasm:
     needs: [setup]
@@ -599,6 +619,113 @@ jobs:
       - name: 🧪 Run tests
         run: |
           ctest --preset conan-release --output-on-failure
+
+  publish-dry-run:
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    name: 📦 Publish dry run
+    # Builds and runs code from the checked-out revision, which on a pull request
+    # is whatever the contributor pushed. Read the repository and nothing else —
+    # and note there are no secrets here at all.
+    permissions:
+      contents: read
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Select GCC 16
+        run: |
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes gcc-16 g++-16
+          echo "CC=gcc-16" >> "$GITHUB_ENV"
+          echo "CXX=g++-16" >> "$GITHUB_ENV"
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan==${{ env.CONAN_VERSION }}
+          conan --version
+
+      # A cache of its own, so nothing resolves out of a previous job's leftovers
+      # and the consumer check has to come from the package just built.
+      - name: 🔧 Configure Conan in an empty cache
+        run: |
+          echo "CONAN_HOME=$RUNNER_TEMP/dry-run-conan" >> "$GITHUB_ENV"
+
+      - name: 🔧 Detect the profile
+        run: |
+          conan profile detect --force
+
+      # The remote query's outcomes, against a conan that answers exactly what
+      # each case needs. A real remote cannot be asked to fail on cue, and these
+      # are the failures that decide whether a release is believed.
+      - name: 🧪 The remote query tells absent from unreachable
+        run: |
+          ./ci/test_remote_revisions.sh
+          ./ci/test_one_revision.sh
+
+      - name: 🧪 Verify toolchain
+        env:
+          EXPECTED_COMPILER_KIND: gcc
+          EXPECTED_COMPILER_MAJOR: 16
+          EXPECTED_RUNNER_OS: Linux
+          EXPECTED_RUNNER_ARCH: X64
+          EXPECTED_CPPSTD: 23
+          CONAN_PROFILE: ci/conan-cpp23
+          TOOLCHAIN_MANIFEST: toolchain-publish-dry-run-Linux.json
+        run: python3 scripts/ci_toolchain_manifest.py
+
+      - name: 📤 Upload toolchain manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-publish-dry-run-Linux
+          path: toolchain-publish-dry-run-Linux.json
+
+      # Everything the real publish does before it touches the network. It cannot
+      # upload: this cache has no `kth` remote to write to, which the next step
+      # asserts rather than assumes.
+      - name: 📦 Create the package and prove a consumer can use it
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+        run: ./ci/create_package.sh
+
+      - name: 🚫 Nothing was published
+        run: |
+          if conan remote list | grep -qi 'kth'; then
+            echo "the dry run has a publishing remote configured; it must not" >&2
+            conan remote list >&2
+            exit 1
+          fi
+          echo "ok: no publishing remote exists in this cache, so no upload was possible"
+
+      # The post-upload verification runs only during a release, so nothing would
+      # exercise it until the day it matters. Here it is pointed at a version the
+      # remote cannot have, and required to say so — in those words.
+      #
+      # Asserting the message rather than merely a non-zero exit is the point: an
+      # unreachable remote also fails, and a control that accepted any failure
+      # would pass while proving nothing.
+      - name: 🧪 The post-upload check can tell absent from unreachable
+        env:
+          UTXOZ_BUILD_VERSION: 0.0.0-never-published
+          UTXOZ_RECIPE_REVISION: 00000000000000000000000000000000
+          UTXOZ_REMOTE: kth-verify
+          UTXOZ_REMOTE_URL: https://packages.kth.cash/api/
+        run: |
+          if ./ci/verify_published.sh > verify.log 2>&1; then
+            echo "the check passed for a version that was never published" >&2
+            cat verify.log >&2
+            exit 1
+          fi
+          cat verify.log
+          if ! grep -q "is not on kth-verify" verify.log; then
+            echo "it failed, but not because the package is absent — so this proves nothing" >&2
+            exit 1
+          fi
+          echo "ok: absence is reported as absence"
 
   benchmark:
     needs: [setup]
