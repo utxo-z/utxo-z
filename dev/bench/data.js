@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786262074393,
+  "lastUpdate": 1786264608976,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -11754,6 +11754,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 55.56,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7c62f04a1eccc2f9cd320b78dca8f30c4f56ed39",
+          "message": "fix: run every step in bash, and check the version the build actually used (#97)\n\nSince #90, Windows built the library as 0.0.0-dev.\n\nThat change moved the build version out of `${{ }}` and into `$UTXOZ_BUILD_VERSION`,\nwhich is right — an expression in `run:` is substituted before the shell sees\nit, so it is shell source rather than an argument. What it missed is that the\ndefault shell on Windows runners is PowerShell, where `$UTXOZ_BUILD_VERSION` is\nan undefined PowerShell variable and not the environment. Conan therefore got\n`--version=\"\"`, resolved the recipe as `utxoz/None`, and the conanfile's own\nfallback turned that into 0.0.0-dev.\n\nCompare the same commit across two runs:\n\n    #86, before  Windows  conanfile.py (utxoz/0.8.1-commit.266)\n    #96, after   Windows  utxoz/None, \"utxoz version: 0.0.0-dev\"\n    #96, after   Linux    conanfile.py (utxoz/0.8.1-commit.274)\n\nEvery Windows job stayed green, because a version nothing compares against is a\nversion nothing notices: the conanfile falls back, the tests do not look at it,\nand the job that would really suffer — publish — runs for tags and release\nbranches only, so no pull request has ever executed it.\n\n`defaults.run.shell: bash` makes every step read the environment the same way\neverywhere. Audited before setting it rather than after: only `build` and\n`publish` run on Windows at all, and every step in them that is genuinely\nPowerShell — locating MSVC, entering the developer shell — already declares\n`shell: pwsh` and keeps it. What is left are plain commands that behave the\nsame under either shell.\n\nThe default alone would leave the same class of defect free to return, so the\ntoolchain verifier now compares the version the job was handed against the\nversion the build used, in two places: `UTXOZ_VERSION` in CMakeCache.txt, which\nis what CMake was configured with, and the generated version.hpp, which is what\ngets compiled into the library and shipped. A build configured correctly whose\nheader disagrees is still a broken package.\n\nIt runs wherever there is a configured build to compare against — build,\nbuild-wasm, statistics-disabled and benchmark — and it fails on exactly the\nmismatch above:\n\n    expected build version 0.8.1-commit.274, CMake configured 0.0.0-dev\n\nPublishing had the worse end of this. A release cut today would have had the\nWindows job run `conan create --version=\"\"` and `conan upload \"utxoz/\"`.",
+          "timestamp": "2026-08-09T10:33:33+02:00",
+          "tree_id": "d2345161f3c2c4df6ce86c30b54d7b83ef6f46f9",
+          "url": "https://github.com/utxo-z/utxo-z/commit/7c62f04a1eccc2f9cd320b78dca8f30c4f56ed39"
+        },
+        "date": 1786264608280,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 293319.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 694375.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 272129.67,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 483867.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 462.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 455.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 13407899.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 13571147.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12730690.96,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13193.05,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 12038424.67,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 9684245.22,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 138626.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 9967.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2711.24,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3322.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2773.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 54.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 53.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 53.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 53.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 53.73,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.6,
             "unit": "ops/sec"
           }
         ]
