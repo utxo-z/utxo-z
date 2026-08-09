@@ -37,31 +37,40 @@ readonly RUN="${RUN_NUMBER:?RUN_NUMBER is required}"
 # loose enough to admit them stops being a check.
 readonly VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'
 
-if [[ -n "${LAST_TAG:-}" ]]; then
-    last_tag="${LAST_TAG}"
-else
-    # One command whose status can be checked, rather than `git tag | head`.
-    # A pipeline reports the exit status of its last stage, so `head` succeeding
-    # would hide git failing — not a repository, an unreadable object store, a
-    # checkout that never happened — and leave last_tag empty. That empty then
-    # looks exactly like "this repository has no tags yet" and quietly becomes
-    # 0.0.0, so a failure to read the tags would publish 0.0.0-commit.<run> as
-    # though it were a considered answer.
-    #
-    # The two cases are not the same and are no longer treated the same:
-    # a successful query that finds nothing falls back to 0.0.0; a failed query
-    # stops here.
-    if ! last_tag="$(git for-each-ref --count=1 --sort=-creatordate \
-                         --format='%(refname:short)' refs/tags)"; then
-        printf 'cannot read the repository tags; refusing to guess a version\n' >&2
-        exit 1
+# The newest tag, and only for the refs that need it. Sets NEWEST_TAG.
+#
+# A tag names its own version, so deriving it must not depend on reading the
+# repository's tag list: a release would otherwise stop because of something it
+# does not use. This runs for development refs only.
+resolve_newest_tag() {
+    local tag
+    if [[ -n "${LAST_TAG:-}" ]]; then
+        tag="${LAST_TAG}"
+    else
+        # One command whose status can be checked, rather than `git tag | head`.
+        # A pipeline reports the exit status of its last stage, so `head`
+        # succeeding would hide git failing — not a repository, an unreadable
+        # object store, a checkout that never happened — and leave the tag empty.
+        # That empty then looks exactly like "this repository has no tags yet"
+        # and quietly becomes 0.0.0, so a failure to read the tags would publish
+        # 0.0.0-commit.<run> as though it were a considered answer.
+        #
+        # The two cases are not the same and are not treated the same: a
+        # successful query that finds nothing falls back to 0.0.0; a failed query
+        # stops here.
+        if ! tag="$(git for-each-ref --count=1 --sort=-creatordate \
+                        --format='%(refname:short)' refs/tags)"; then
+            printf 'cannot read the repository tags; refusing to guess a version\n' >&2
+            exit 1
+        fi
     fi
-fi
-last_tag="${last_tag#v}"
-if [[ -z "${last_tag}" ]]; then
-    # A real answer: a repository with no tags yet starts at zero.
-    last_tag="0.0.0"
-fi
+    tag="${tag#v}"
+    if [[ -z "${tag}" ]]; then
+        # A real answer: a repository with no tags yet starts at zero.
+        tag="0.0.0"
+    fi
+    NEWEST_TAG="${tag}"
+}
 
 ref="${REF_INPUT}"
 # A bare branch name is accepted; github.head_ref arrives without the prefix.
@@ -69,25 +78,32 @@ if [[ "${ref}" != refs/* ]]; then
     ref="refs/heads/${ref}"
 fi
 
-# The last path component, which for release/1.2.3 and hotfix/1.2.4 is the
-# version.
-version="${ref##*/}"
-
+# Everything after the prefix, not just the last path component. Refs are
+# hierarchical: the tag `archive/v0.9.0` is a different tag from `v0.9.0`, and
+# taking the last component would publish both as 0.9.0 — two tags, one package
+# version, and whichever built last wins. Keeping the whole suffix makes the
+# slash reach the pattern below, which refuses it.
 case "${ref}" in
-    refs/heads/release/*|refs/heads/hotfix/*)
-        : # the trailing component is the version
+    refs/tags/*)
+        # A tag names its own version. It used to fall through to the branch
+        # below and publish <last-tag>-commit.<run> instead — v0.8.1 really did
+        # publish utxoz/0.8.1-commit.179 — which made the tag say one thing and
+        # the package another.
+        version="${ref#refs/tags/}"
+        version="${version#v}"
+        ;;
+    refs/heads/release/*)
+        version="${ref#refs/heads/release/}"
+        ;;
+    refs/heads/hotfix/*)
+        version="${ref#refs/heads/hotfix/}"
         ;;
     *)
-        # Everything else — main, master, dev, feature branches, and tags —
-        # takes a development version derived from the newest tag rather than
-        # from the ref.
-        #
-        # Tags landing here is surprising, and it is deliberate that this change
-        # does not alter it: a tag push publishes <last-tag>-commit.<run>, not
-        # the tag's own version, and that is how every release so far was cut.
-        # Changing it would change what a release publishes, which is not what
-        # this script is for. It is worth its own issue.
-        version="${last_tag}-commit.${RUN}"
+        # Everything else — main, master, dev and feature branches — takes a
+        # development version derived from the newest tag rather than from the
+        # ref, because a branch name is not a version.
+        resolve_newest_tag
+        version="${NEWEST_TAG}-commit.${RUN}"
         ;;
 esac
 
