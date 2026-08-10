@@ -64,7 +64,6 @@ struct database_impl {
     std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
     size_t deferred_deletions_size() const;
 
-    std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
     size_t deferred_lookups_size() const;
 
     result<> compact_all();
@@ -129,8 +128,6 @@ private:
 
     // Deferred lookup helpers
     void add_to_deferred_lookups(raw_outpoint const& key, uint32_t height) const;
-    void process_deferred_lookups_in_file(size_t container_index, size_t version, bool is_cached,
-                                          flat_map<raw_outpoint, bytes>& successful_lookups);
 
     // File management
     template<size_t Index>

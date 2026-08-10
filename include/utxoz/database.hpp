@@ -338,8 +338,10 @@ struct full_db : db_base {
      * }
      * auto swept = db.process_pending_lookups();
      * if ( ! swept) {
-     *     // version_unreadable: the sweep could not read something it needed.
-     *     // Nothing was consumed; do not treat anything as missing.
+     *     // The sweep could not read something it needed. Nothing was
+     *     // consumed, so the queue is intact: come back to it later and do not
+     *     // treat anything as missing in the meantime.
+     *     return;                     // and never reach *swept below
      * }
      * auto& [found, absent] = *swept;
      * // `found` resolves the queued lookups; `absent` is proven absence.

@@ -108,17 +108,18 @@ struct failpoints {
     /// keys. A blanket unlink failure would stop the merge long before that.
     static inline std::atomic<bool> fail_source_unlink{false};
 
-    /// Fails the deferred-lookup sweep's attempt to open one specific version,
-    /// counting from one; zero fails none. A specific version and not a blanket
-    /// switch, because what has to be shown is a sweep that reads some files and
-    /// then cannot read one — the case where a partial result exists and must
-    /// not be handed back as absence. A blanket failure stops at the first file
-    /// and never reaches it.
-    static inline std::atomic<uint64_t> fail_lookup_open_version{~uint64_t{0}};
-
     /// Sentinel meaning "no version": versions are numbered from zero, so the
-    /// switch above cannot use zero to mean both "version 0" and "off".
+    /// switch below cannot use zero to mean both "version 0" and "off".
+    /// Declared first so it is the initialiser rather than a repeat of it — two
+    /// spellings of the same constant are two places to get it wrong.
     static constexpr uint64_t no_version = ~uint64_t{0};
+
+    /// Fails the deferred-lookup sweep's attempt to open one specific version.
+    /// A specific version and not a blanket switch, because what has to be shown
+    /// is a sweep that reads some files and then cannot read one — the case
+    /// where a partial result exists and must not be handed back as absence. A
+    /// blanket failure stops at the first file and never reaches it.
+    static inline std::atomic<uint64_t> fail_lookup_open_version{no_version};
 
     /// Fails the sweep's attempt to enumerate which versions exist. A different
     /// failure from a file that will not open, reported with a different code,
