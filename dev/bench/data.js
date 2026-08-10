@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786315505443,
+  "lastUpdate": 1786355954564,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -12588,6 +12588,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.89,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9db0c58271913059ad748d243b137bf5bf57ef75",
+          "message": "fix: wait for the remote to publish before deciding it did not (#105)\n\nThe publish job asked whether utxoz/0.9.0 was on the remote 1.3 seconds after\n`conan upload` returned, and failed the release when the answer was no. But an\nupload's 200 is not publication on that remote: the files land in a staging area\nand are published by a later, server-side step. The first answer to this\nquestion is routinely \"not found\" on a release that is perfectly healthy, so the\ncheck was failing for the delay rather than for the fault.\n\nci/await_published.sh now asks repeatedly, with a gap that doubles from 2s to a\ncap of 30s, until either the exact recipe revision appears or a 300s deadline\npasses. Four things make that deadline real rather than decorative:\n\nThe window covers the queries, not merely the gaps between them. Each attempt is\ngiven the smaller of remote_revisions.py's timeout and what is left, so a remote\nthat accepts connections and never answers cannot stretch 300s into 420s.\n\nThe window is never spent on a question it cannot afford. Clamping each query to\nwhat remains makes the last attempt the most starved one, and a query given a\nsecond times out against a remote that is answering perfectly well — a timeout\nthat reads as Unknown and, arriving last, discards every definite answer before\nit. So an attempt that cannot be given time to answer is not made: the run ends\non the last real answer instead, with the unusable remainder deliberately\nunspent.\n\nremote_revisions.py spends one budget on the whole answer. It runs two\n`conan list` calls — does the remote have it, which revisions — and they used to\nget the full timeout each, so a caller that allowed N seconds could wait nearly\n2N. It now takes a monotonic deadline once and hands each call only the\nremainder.\n\nThe clock is monotonic. `date +%s` is the civil clock and it steps: NTP\ncorrecting a drifting runner moves it in either direction, and a deadline built\nfrom two of its readings lengthens or ends early with no sign that it happened.\n\nEvery way the wait can end resolves to one of three outcomes, and the exit code\ncarries which: published, absent after the window, could-not-establish. A\nfailing `sleep` is one of those ways — under `set -e` it used to leave carrying\nits own status, 127 for a command that is not installed, and a fourth value is\nnot a worse answer than Unknown but an answer with no meaning.\n\nAbsence and not-knowing stay separate. A release blocked by the first has a\nfault to fix; one blocked by the second has a question to re-ask, and treating a\nnetwork error as a missing package is how the wrong one gets acted on.\n\nThe delay is not reproducible on demand, so the tests replace conan with one\nthat answers a scripted sequence and replace the clock and the sleep with\nshims — waiting still consumes the deadline, only the real seconds are skipped.\n38 assertions here and two more in test_remote_revisions.sh, each written so\nthat reverting its fix turns it red: two queries sharing one budget rather than\none each, a query that would outlast the window, a window too short to ask\nagain, a wait that fails, a clock that stops and a clock that runs backwards.\n\nThe settings that would disable a guard are refused rather than accepted as\nsmaller values. A floor of zero on the query time is not a shorter floor, it is\nthe starved final query back again; a gap of zero is a busy loop against\nsomebody else's server. Both exit as Unknown with a diagnosis.\n\nThe harness bounds its own runs with `kill -0` and a shell loop rather than with\n`timeout`, which is coreutils and is not present on every platform this has to\npass on. Environments are passed through env(1): assignments prefixed to a bash\nfunction persist after the call, so they would have leaked between cases.\n\nThe dry-run control now asserts the exit code rather than the wording, and runs\nwith a short window: at the release default it would have spent five minutes per\nplatform on every pull request waiting for a version that cannot arrive.\n\nRefs #92",
+          "timestamp": "2026-08-10T11:55:46+02:00",
+          "tree_id": "8d57040a2915e8660516441b83f840ef802ec8b2",
+          "url": "https://github.com/utxo-z/utxo-z/commit/9db0c58271913059ad748d243b137bf5bf57ef75"
+        },
+        "date": 1786355954050,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 268957.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 279991.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 291423.96,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 266954.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 371.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 397.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11812011.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 10784543.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11291461.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12003.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 9324847.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 13977477.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 73039.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 9610.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2176.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3108.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2720.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.48,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 56.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.49,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.27,
             "unit": "ops/sec"
           }
         ]
