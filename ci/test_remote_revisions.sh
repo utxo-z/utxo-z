@@ -50,6 +50,13 @@ esac
 if [[ "$(head -c 4 "${reply}")" == "hang" ]]; then
     sleep 120
 fi
+# `slow N` on the first line: answer, but only after spending N seconds of the
+# budget. A remote that is slow rather than stalled.
+if [[ "$(head -c 4 "${reply}")" == "slow" ]]; then
+    sleep "$(head -n 1 "${reply}" | cut -d' ' -f2)"
+    tail -n +2 "${reply}"
+    exit 0
+fi
 if [[ "$(head -c 4 "${reply}")" == "fail" ]]; then
     echo "simulated conan failure" >&2
     exit 1
@@ -158,6 +165,58 @@ check "reference entry is a string" ${EXIT_UNKNOWN} "not an object" \
       "${PRESENT}" '{"kth":{"utxoz/0.9.0":"x"}}'
 check "revisions is a string" ${EXIT_UNKNOWN} "not an object" \
       "${PRESENT}" '{"kth":{"utxoz/0.9.0":{"revisions":"aaaa"}}}'
+
+echo
+echo "== the timeout is a budget for the whole answer, not for each query =="
+
+# Answering takes two `conan list` calls, and they used to get the full timeout
+# each. So a caller that allowed N seconds could wait nearly 2N: the first query
+# answers just under the limit and the second stalls for the whole limit again.
+#
+# Here the first spends half the budget and answers, and the second never
+# returns. What is asserted is the wall clock: the pair has to fit inside the one
+# budget. Without the fix this takes 9 seconds instead of 6, which is the
+# difference between a deadline and a suggestion.
+budget_shared() {
+    local name="$1" budget="$2" spend="$3" allowed="$4"
+    local dir="${work}/case" status=0 out started elapsed
+    rm -rf "${dir}"; mkdir -p "${dir}"
+    printf '%s' "$(printf 'slow %s\n%s' "${spend}" "${PRESENT}")" > "${dir}/existence"
+    printf 'hang' > "${dir}/revisions"
+
+    started=${SECONDS}
+    out="$(FAKE_CONAN_REPLIES="${dir}" UTXOZ_REMOTE_QUERY_TIMEOUT="${budget}" \
+           "${SCRIPT}" kth utxoz/0.9.0 2>&1)" || status=$?
+    elapsed=$(( SECONDS - started ))
+
+    if (( status != EXIT_UNKNOWN )); then
+        printf 'FAIL  %-34s exited %d, expected %d\n' "${name}" "${status}" "${EXIT_UNKNOWN}"
+        printf '        %s\n' "${out}"
+        failures=$((failures + 1))
+        return
+    fi
+    if (( elapsed > allowed )); then
+        printf 'FAIL  %-34s took %ds, the %ds budget allowed at most %ds\n' \
+               "${name}" "${elapsed}" "${budget}" "${allowed}"
+        printf '        %s\n' "${out}"
+        failures=$((failures + 1))
+        return
+    fi
+    printf 'ok    %-34s rc=%d  took %ds on a %ds budget (%ds allowed)\n' \
+           "${name}" "${status}" "${elapsed}" "${budget}" "${allowed}"
+}
+
+# 6s of budget: the first query spends 3 and answers, the second gets the 3 that
+# are left. One second of slack for process startup.
+budget_shared "two queries share one budget" 6 3 7
+
+# The same with the remainder made thin: almost all of the budget is gone before
+# the second query starts, so it gets about a second rather than a fresh five.
+#
+# Deliberately not "the first query spends the whole budget": that makes the
+# first query's own timeout and its sleep expire together, and which of them
+# wins is a coin flip. The case would pass either way and assert nothing.
+budget_shared "the second query gets only the remainder" 5 4 6
 
 echo
 if (( failures != 0 )); then
