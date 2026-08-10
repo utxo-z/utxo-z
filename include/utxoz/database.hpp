@@ -381,11 +381,18 @@ struct full_db : db_base {
      * none of them, so it is a fact about the database and not about how the
      * sweep happened to go.
      *
-     * If any version that had to be consulted could not be read — the file, or
-     * the catalogue naming the files — this returns error_code::version_unreadable
-     * and no lists at all. Nothing is consumed on that path: the pending set is
-     * left exactly as it was, so the call can simply be made again once the
-     * storage fault is dealt with.
+     * If the sweep could not cover everything it needed to, this returns an
+     * error and no lists at all, and the cause is kept rather than flattened:
+     *
+     *   - error_code::version_unreadable — a version file that the catalogue
+     *     names could not be opened or read;
+     *   - error_code::catalog_unreadable — the set of version files could not be
+     *     enumerated, so which files exist is not known.
+     *
+     * They send an operator to different places, which is why they are not the
+     * same code. Nothing is consumed on either path: the pending set is left
+     * exactly as it was, so the call can simply be made again once the storage
+     * fault is dealt with.
      *
      * That distinction is the point. A caller that cannot tell "this outpoint
      * does not exist" from "this outpoint could not be looked up" turns a local
@@ -393,8 +400,8 @@ struct full_db : db_base {
      * perfectly valid.
      *
      * @return Pair of (resolved_lookups_map, keys proven absent), or
-     *         error_code::version_unreadable if the sweep could not cover
-     *         everything it needed to.
+     *         error_code::version_unreadable / error_code::catalog_unreadable if
+     *         the sweep could not cover everything it needed to.
      */
     [[nodiscard]]
     result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
@@ -489,11 +496,12 @@ struct reference_db : db_base {
      *
      * The second element is ABSENT, and only that: reached exactly when every
      * version below the current one was read and the key was in none of them.
-     * A version, or the catalogue naming the versions, that could not be read
-     * gives error_code::version_unreadable and no lists, consuming nothing.
+     * A version file that could not be read gives error_code::version_unreadable;
+     * a catalogue that could not be enumerated gives error_code::catalog_unreadable.
+     * Either way there are no lists and nothing is consumed.
      *
      * @return Pair of (resolved_lookups_map, keys proven absent), or
-     *         error_code::version_unreadable.
+     *         error_code::version_unreadable / error_code::catalog_unreadable.
      */
     [[nodiscard]]
     result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();

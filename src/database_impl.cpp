@@ -2928,7 +2928,6 @@ database_impl::full_process_pending_lookups() {
 
 #ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
-    ++deferred_stats_.processing_runs;
 #endif
 
     size_t initial_size = deferred_lookups_.size();
@@ -2948,6 +2947,22 @@ database_impl::full_process_pending_lookups() {
     // call that fails must consume nothing: the caller retries, and a retry
     // that had silently eaten the resolved keys would report them as neither
     // resolved nor pending.
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // Accumulated here and published only if the sweep completes.
+    //
+    // A failed sweep puts its queue back, so the retry does all of this work
+    // again. Publishing as it goes would count the abandoned attempt as well as
+    // the one that finished: every file visited twice, every lookup resolved
+    // twice, and a processing run that never produced a result. The numbers are
+    // reported to operators deciding whether the deferred path is behaving, so
+    // an attempt that was rolled back must not appear in them at all.
+    struct {
+        uint64_t cache_hits = 0;
+        uint64_t cache_misses = 0;
+        std::vector<uint32_t> resolved_depths;
+    } tally;
+#endif
+
     bool sweep_complete = true;
     // Which failure it was. A file that will not open and a catalogue that
     // cannot be listed are both fail-closed, and they send an operator to
@@ -2963,16 +2978,19 @@ database_impl::full_process_pending_lookups() {
             }
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
 
-            resolution_stats_.record_file_visited(cache_hit);
+#ifdef UTXOZ_STATISTICS_ENABLED
+            cache_hit ? ++tally.cache_hits : ++tally.cache_misses;
+#else
+            (void) cache_hit;
+#endif
 
 
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
-                    ++deferred_stats_.lookups_by_depth[depth];
-                    resolution_stats_.record_resolved(depth);
+                    tally.resolved_depths.push_back(
+                        static_cast<uint32_t>(current_versions_[Index] - version));
 #endif
                     auto data = map_it->second.get_data();
                     successful_lookups.emplace(entry.key,
@@ -3062,6 +3080,17 @@ database_impl::full_process_pending_lookups() {
 
     // Every version was read, so what is left was looked for everywhere it
     // could have been. Only now is absence a fact.
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // The sweep completed, so what it did is now a fact and can be published.
+    ++deferred_stats_.processing_runs;
+    for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
+    for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
+    for (auto const depth : tally.resolved_depths) {
+        ++deferred_stats_.lookups_by_depth[depth];
+        resolution_stats_.record_resolved(depth);
+    }
+#endif
+
     std::vector<deferred_lookup_entry> failed_lookups;
     failed_lookups.reserve(deferred_lookups_.size());
     resolution_stats_.record_unresolved(deferred_lookups_.size());
@@ -3166,7 +3195,6 @@ database_impl::reference_process_pending_lookups() {
 
 #ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
-    ++deferred_stats_.processing_runs;
 #endif
 
     size_t initial_size = deferred_lookups_.size();
@@ -3186,6 +3214,22 @@ database_impl::reference_process_pending_lookups() {
     // call that fails must consume nothing: the caller retries, and a retry
     // that had silently eaten the resolved keys would report them as neither
     // resolved nor pending.
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // Accumulated here and published only if the sweep completes.
+    //
+    // A failed sweep puts its queue back, so the retry does all of this work
+    // again. Publishing as it goes would count the abandoned attempt as well as
+    // the one that finished: every file visited twice, every lookup resolved
+    // twice, and a processing run that never produced a result. The numbers are
+    // reported to operators deciding whether the deferred path is behaving, so
+    // an attempt that was rolled back must not appear in them at all.
+    struct {
+        uint64_t cache_hits = 0;
+        uint64_t cache_misses = 0;
+        std::vector<uint32_t> resolved_depths;
+    } tally;
+#endif
+
     bool sweep_complete = true;
     // Which failure it was. A file that will not open and a catalogue that
     // cannot be listed are both fail-closed, and they send an operator to
@@ -3201,16 +3245,19 @@ database_impl::reference_process_pending_lookups() {
             }
             auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
 
-            resolution_stats_.record_file_visited(cache_hit);
+#ifdef UTXOZ_STATISTICS_ENABLED
+            cache_hit ? ++tally.cache_hits : ++tally.cache_misses;
+#else
+            (void) cache_hit;
+#endif
 
 
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(reference_current_version_ - version);
-                    ++deferred_stats_.lookups_by_depth[depth];
-                    resolution_stats_.record_resolved(depth);
+                    tally.resolved_depths.push_back(
+                        static_cast<uint32_t>(reference_current_version_ - version));
 #endif
                     successful_lookups.emplace(entry.key,
                         reference_find_result{map_it->second.height, map_it->second.file_number, map_it->second.offset});
@@ -3277,6 +3324,17 @@ database_impl::reference_process_pending_lookups() {
     }
 
     // Collect failed lookups
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // The sweep completed, so what it did is now a fact and can be published.
+    ++deferred_stats_.processing_runs;
+    for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
+    for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
+    for (auto const depth : tally.resolved_depths) {
+        ++deferred_stats_.lookups_by_depth[depth];
+        resolution_stats_.record_resolved(depth);
+    }
+#endif
+
     std::vector<deferred_lookup_entry> failed_lookups;
     failed_lookups.reserve(deferred_lookups_.size());
     resolution_stats_.record_unresolved(deferred_lookups_.size());

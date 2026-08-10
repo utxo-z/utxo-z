@@ -298,6 +298,60 @@ TEST_CASE("full: clearing the failpoint removes the failure", "[unresolved][full
     std::filesystem::remove_all(f.path);
 }
 
+// A sweep that is rolled back must not leave its work in the numbers. The retry
+// does it all again, so an attempt that was abandoned would be counted twice —
+// and these are what an operator reads to decide whether the deferred path is
+// behaving.
+TEST_CASE("full: a failed sweep publishes no statistics, and the retry counts once",
+          "[unresolved][full][statistics]") {
+    failpoint_guard guard;
+    auto const f = build_full_fixture("full_stats");
+    {
+        auto opened = utxoz::full_db::open_for_testing(f.path, false);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+
+        queue_all(db, f);
+
+        auto const before = db.get_statistics();
+
+        failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+        REQUIRE_FALSE(db.process_pending_lookups().has_value());
+
+        auto const after_failure = db.get_statistics();
+
+        // Exactly unchanged. The failed attempt read files and resolved entries,
+        // and none of it may be observable.
+        CHECK(after_failure.deferred.processing_runs == before.deferred.processing_runs);
+        CHECK(after_failure.deferred.successfully_processed == before.deferred.successfully_processed);
+        CHECK(after_failure.deferred.failed_to_delete == before.deferred.failed_to_delete);
+        CHECK(after_failure.resolution.files_visited == before.resolution.files_visited);
+        CHECK(after_failure.resolution.cache_hits == before.resolution.cache_hits);
+        CHECK(after_failure.resolution.resolved == before.resolution.resolved);
+        CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+
+        failpoints::clear();
+        check_complete_sweep(db, db.process_pending_lookups(), f);
+
+        auto const after_retry = db.get_statistics();
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+        // One run, two lookups resolved, one left unresolved — each counted once.
+        // Only meaningful where the counters exist; with statistics off they are
+        // all zero and the checks above still hold, which is the point of
+        // running this case in both builds.
+        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs + 1);
+        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 2);
+        CHECK(after_retry.resolution.unresolved == before.resolution.unresolved + 1);
+#else
+        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+#endif
+
+        db.close();
+    }
+    std::filesystem::remove_all(f.path);
+}
+
 // =============================================================================
 // reference mode — the same contract, exercised the same way
 // =============================================================================
@@ -428,6 +482,46 @@ TEST_CASE("reference: a catalogue that cannot be listed keeps its own cause",
 
         failpoints::clear();
         check_reference_sweep(db, db.process_pending_lookups(), f);
+
+        db.close();
+    }
+    std::filesystem::remove_all(f.path);
+}
+
+TEST_CASE("reference: a failed sweep publishes no statistics, and the retry counts once",
+          "[unresolved][reference][statistics]") {
+    failpoint_guard guard;
+    auto const f = build_reference_fixture("ref_stats");
+    {
+        auto opened = utxoz::reference_db::open_for_testing(f.path, false);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+
+        queue_reference(db, f);
+
+        auto const before = db.get_statistics();
+
+        failpoints::fail_lookup_open_version.store(0, std::memory_order_relaxed);
+        REQUIRE_FALSE(db.process_pending_lookups().has_value());
+
+        auto const after_failure = db.get_statistics();
+        CHECK(after_failure.deferred.processing_runs == before.deferred.processing_runs);
+        CHECK(after_failure.resolution.files_visited == before.resolution.files_visited);
+        CHECK(after_failure.resolution.cache_hits == before.resolution.cache_hits);
+        CHECK(after_failure.resolution.resolved == before.resolution.resolved);
+        CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+
+        failpoints::clear();
+        check_reference_sweep(db, db.process_pending_lookups(), f);
+
+        auto const after_retry = db.get_statistics();
+#ifdef UTXOZ_STATISTICS_ENABLED
+        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs + 1);
+        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 1);
+        CHECK(after_retry.resolution.unresolved == before.resolution.unresolved + 1);
+#else
+        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+#endif
 
         db.close();
     }
