@@ -22,8 +22,9 @@
 # upload some time after accepting it, so an immediate "not found" says nothing
 # about the release. ci/await_published.sh owns that wait and its outcomes.
 #
-#   3. it installs from the remote, pinned to that revision, with no permission
-#      to build;
+#   3. it installs the root from the publishing remote, pinned to that
+#      revision, while public dependencies come from ConanCenter, with no
+#      permission to build anything;
 #   4. a consumer compiles and runs against what came back.
 #
 # All of it against an empty cache, so nothing can be answered by what
@@ -78,7 +79,15 @@ export CONAN_HOME="${work}/conan"
 conan profile detect --force > /dev/null
 
 if [[ -n "${UTXOZ_REMOTE_URL:-}" ]]; then
-    conan remote add "${REMOTE}" "${UTXOZ_REMOTE_URL}" > /dev/null
+    # This server publishes Knuth packages; it is not a mirror of ConanCenter.
+    # Restricting `conan install` with `-r ${REMOTE}` made every transitive
+    # dependency use it too, so a correctly published utxoz failed verification
+    # when fmt was (correctly) absent there. Give the publishing remote priority
+    # and limit it to utxoz: the root can only come from the server under test,
+    # while fmt, Boost and the other public dependencies use ConanCenter.
+    conan remote add conancenter https://center2.conan.io --force > /dev/null
+    conan remote add "${REMOTE}" "${UTXOZ_REMOTE_URL}" --force --index=0 \
+        --allowed-packages="utxoz/*" > /dev/null
 fi
 
 # ---------------------------------------------------------------------------
@@ -107,13 +116,13 @@ esac
 # 3. It installs, pinned to that revision, with no permission to build.
 # ---------------------------------------------------------------------------
 echo
-echo "installing ${REFERENCE}#${REVISION} from ${REMOTE} with --build=never"
+echo "installing ${REFERENCE}#${REVISION} from ${REMOTE}, with public dependencies from ConanCenter and --build=never"
 readonly CONSUMER_BUILD="${work}/consumer"
 mkdir -p "${CONSUMER_BUILD}"
 # --lockfile-partial keeps the repository's pinned dependencies while admitting
 # utxoz itself as a new root; dropping the lockfile lets them float and changes
 # the package id, asking for a binary nobody built.
-conan install --requires="${REFERENCE}#${REVISION}" -r "${REMOTE}" --build=never --lockfile-partial \
+conan install --requires="${REFERENCE}#${REVISION}" --build=never --lockfile-partial \
     "${PACKAGE_OPTIONS[@]}" -g CMakeDeps -g CMakeToolchain -of "${CONSUMER_BUILD}"
 
 # ---------------------------------------------------------------------------
