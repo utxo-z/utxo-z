@@ -183,7 +183,7 @@ private:
     result<merge_marker> read_target_marker(size_t index, size_t version) const;
 
     result<> recover_pending_merges();
-    result<> recover_one(merge_plan const& plan, std::string const& sidecar);
+    result<> recover_one(merge_plan const& plan, fs::path const& sidecar);
 
     /// Builds one new version file holding everything in `sources`, publishes
     /// it, and retires them. One implementation; the policy names the six

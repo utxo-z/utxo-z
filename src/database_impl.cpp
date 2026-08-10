@@ -1133,7 +1133,7 @@ namespace {
 /// Removes a path, treating "it was not there" as success. Recovery has to be
 /// idempotent: a crash part way through it must leave a state it can finish.
 [[nodiscard]]
-result<> remove_if_present(std::string const& path) {
+result<> remove_if_present(fs::path const& path) {
     return remove_file(path);
 }
 
@@ -1145,7 +1145,7 @@ result<> remove_if_present(std::string const& path) {
  * Which of the two depends on a single question — did the target get its
  * canonical name — and the answer is on disk. Everything here is idempotent.
  */
-result<> database_impl::recover_one(merge_plan const& plan, std::string const& sidecar) {
+result<> database_impl::recover_one(merge_plan const& plan, fs::path const& sidecar) {
     auto const target_path = data_path(plan.container, plan.target);
 
     auto const target_exists = path_exists(target_path);
@@ -1558,7 +1558,7 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
     // attempted, but the operation does not report success while any of them
     // survives: until then several canonical files hold the same keys, and the
     // exclusion that keeps that unobservable ends when this call returns.
-    auto retire = [](std::string const& path) -> result<> {
+    auto retire = [](fs::path const& path) -> result<> {
         if (failpoints::fail_source_unlink.load(std::memory_order_relaxed)) {
             return std::unexpected(error_code::removal_failed);
         }
