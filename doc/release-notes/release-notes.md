@@ -1,3 +1,13 @@
+# version 0.9.1
+
+## What's Changed
+* fix: resolve public dependencies while verifying a published package by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/108
+* fix: generate the release notes once, before the release exists by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/107
+* fix: tell a proven absence from a lookup that could not be made by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/110
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.9.0...d45e55c8d4fb5458dc5900d305c40141a40def4b
+
 # version 0.9.0
 
 ## What's Changed
