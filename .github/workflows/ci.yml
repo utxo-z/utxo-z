@@ -55,6 +55,11 @@ jobs:
       - name: 🧪 Version derivation refuses what it should
         run: ./ci/test_determine_version.sh
 
+      # The release scripts are only ever run by hand, so nothing else would
+      # catch a regression in them until a release was already half-made.
+      - name: 🧪 Release notes are generated once and carried
+        run: ./scripts/test_release_lib.sh
+
       - name: 🔧 Determine version
         id: version
         uses: ./.github/actions/determine-version
@@ -173,6 +178,14 @@ jobs:
           }
           "CXX=$compiler" >> $env:GITHUB_ENV
           "VSWHERE=$vswhere" >> $env:GITHUB_ENV
+
+      # Fernando runs the release scripts by hand, from macOS. The Ubuntu copy of
+      # this suite proves the logic; this one proves it survives BSD grep, sed
+      # and wc, which differ from GNU in exactly the places these scripts touch:
+      # character classes, -o counting, and the padding wc puts around a number.
+      - name: 🧪 Release notes are generated once and carried (BSD tools)
+        if: runner.os == 'macOS'
+        run: ./scripts/test_release_lib.sh
 
       - name: 🐍 Install Conan
         run: |

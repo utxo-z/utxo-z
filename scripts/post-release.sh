@@ -16,6 +16,10 @@ fi
 
 VERSION="$1"
 
+RELEASE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release_lib.sh"
+# shellcheck source=scripts/release_lib.sh
+. "${RELEASE_LIB}"
+
 # Validate semver format
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Version must be in semver format (e.g., 0.1.0)"
@@ -29,6 +33,34 @@ if ! git ls-remote --heads origin "release/${VERSION}" | grep -q "release/${VERS
     echo "Release branch release/${VERSION} does not exist"
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# The notes: read back and validated before anything is merged.
+#
+# Before, and not after, because everything after the merge is irreversible by
+# this script. A pull request whose body lost its markers — edited, or opened by
+# hand instead of by release.sh — would otherwise be merged first and refused
+# second, leaving master with a release commit on it, no tag, no release, and a
+# release branch already half-consumed. Read first and the worst case is that
+# nothing happened.
+#
+# They were generated once by release.sh, against the master commit being
+# released, before the release branch or this pull request existed — which is
+# why this pull request does not appear in them, and why the commit that writes
+# the notes file below does not either.
+# ---------------------------------------------------------------------------
+echo "Reading the release notes from the release pull request..."
+PR_BODY="$(gh pr view "release/${VERSION}" --json body -q .body)"
+
+if ! RELEASE_NOTES="$(printf '%s' "${PR_BODY}" | extract_release_notes)"; then
+    echo ""
+    echo "The release notes cannot be read from the pull request for release/${VERSION}."
+    echo "Nothing has been merged, tagged or published. Fix the pull request body — it"
+    echo "must contain exactly one pair of release-notes markers with the notes between"
+    echo "them — and run this script again."
+    exit 1
+fi
+echo "Release notes recovered (${#RELEASE_NOTES} characters)."
 
 # Squash merge the PR, do not delete the branch yet.
 # Note: no --auto here. Auto-merge has to be enabled on the repository, and it
@@ -77,72 +109,44 @@ if ! git merge-base --is-ancestor "${MERGE_COMMIT}" HEAD; then
 fi
 echo "Release commit ${MERGE_COMMIT} is on master."
 
-# Step 1: Create temporary release to generate notes
-echo "Creating temporary release to generate notes..."
-TEMP_TAG="temp-v${VERSION}"
-git tag -a "${TEMP_TAG}" -m "Temporary tag for release notes generation"
-git push origin "${TEMP_TAG}"
-
-gh release create "${TEMP_TAG}" \
-    --title "temp-v${VERSION}" \
-    --generate-notes \
-    --prerelease
-
-# Step 2: Extract the generated notes
-echo "Extracting generated release notes..."
-RELEASE_NOTES=$(gh release view "${TEMP_TAG}" --json body -q '.body')
-
-if [ -z "$RELEASE_NOTES" ]; then
-    echo "Failed to extract release notes"
-    exit 1
-fi
-
-# Replace temporary tag references with final tag in the release notes
-echo "Fixing references in release notes..."
-RELEASE_NOTES=$(echo "$RELEASE_NOTES" | sed "s/temp-v${VERSION}/v${VERSION}/g")
-
-# Step 3: Update local release notes file
+# Step 1: Record the notes, if they are not recorded already.
+#
+# Conditional because this script is meant to be re-runnable. publish_release
+# below can fail after this commit is on master — it withdraws its tag so the
+# release can be attempted again — and a second run must not prepend the same
+# entry twice or make a second docs commit.
 echo "Updating local release notes file..."
 NOTES_FILE="doc/release-notes/release-notes.md"
 
-# Create a backup
-cp "$NOTES_FILE" "${NOTES_FILE}.backup"
+notes_status=0
+record_release_notes "${VERSION}" "${RELEASE_NOTES}" "${NOTES_FILE}" || notes_status=$?
 
-# Prepare the new release notes entry
-NEW_ENTRY="# version ${VERSION}
+case ${notes_status} in
+    0)
+        echo "Recorded v${VERSION} in ${NOTES_FILE}"
+        git add "${NOTES_FILE}"
+        git commit -m "docs: update release notes for v${VERSION}"
+        git push origin master
+        ;;
+    10)
+        echo "${NOTES_FILE} already carries an entry for v${VERSION}; leaving it alone."
+        ;;
+    *)
+        echo "Could not update ${NOTES_FILE}. Aborting before tagging."
+        exit 1
+        ;;
+esac
 
-${RELEASE_NOTES}
-
-"
-
-# Add the new entry at the top of the file
-{
-    echo "$NEW_ENTRY"
-    cat "$NOTES_FILE"
-} > "${NOTES_FILE}.tmp" && mv "${NOTES_FILE}.tmp" "$NOTES_FILE"
-
-echo "Updated release notes file"
-
-# Step 4: Commit the updated release notes
-git add "$NOTES_FILE"
-git commit -m "docs: update release notes for v${VERSION}"
-git push origin master
-
-# Step 5: Clean up temporary release and tag
-echo "Cleaning up temporary release..."
-gh release delete "${TEMP_TAG}" --yes
-git tag -d "${TEMP_TAG}"
-git push origin --delete "${TEMP_TAG}"
-
-# Step 6: Create the real release with auto-generated notes
 echo "Creating final release v${VERSION}..."
-git tag -a "v${VERSION}" -m "Release version ${VERSION}"
-git push origin "v${VERSION}"
 
-gh release create "v${VERSION}" \
-    --title "v${VERSION}" \
-    --generate-notes \
-    --latest
+RELEASE_NOTES_FILE="$(mktemp)"
+trap 'rm -f "${RELEASE_NOTES_FILE}"' EXIT
+printf '%s\n' "${RELEASE_NOTES}" > "${RELEASE_NOTES_FILE}"
+
+# Tags, pushes and creates the release — and removes the tag again if the
+# release cannot be created, so the remote never carries a v${VERSION} pointing
+# at something that was never published.
+publish_release "${VERSION}" "${RELEASE_NOTES_FILE}"
 
 echo "Release v${VERSION} created successfully!"
 echo "Release notes have been updated in $NOTES_FILE"
@@ -151,9 +155,6 @@ echo "Release notes have been updated in $NOTES_FILE"
 echo "Cleaning up release branch..."
 git push origin --delete "release/${VERSION}"
 git branch -D "release/${VERSION}" 2>/dev/null || true
-
-# Remove backup
-rm -f "${NOTES_FILE}.backup"
 
 echo ""
 echo "========================================"
