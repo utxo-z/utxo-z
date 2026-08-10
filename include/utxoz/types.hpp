@@ -135,6 +135,12 @@ enum class error_code : uint8_t {
     value_too_large,        ///< Value exceeds maximum container capacity
     duplicate_key,          ///< Two stored entries share a key: the database is locally inconsistent
     catalog_unreadable,     ///< The set of version files could not be read; absence cannot be assumed
+    /// A version file that had to be consulted could not be read, so the sweep
+    /// did not cover everything it needed to. The keys still unresolved are not
+    /// known to be absent — any of them could be in the file that would not
+    /// open. Distinct from catalog_unreadable, which is not knowing *which*
+    /// files exist; this is knowing and failing to read one of them.
+    version_unreadable,
     /// A drained version file, or its metadata, could not be removed. Two
     /// states reach here: the data file is still present and still catalogued,
     /// or the data file went and a stale metadata record was left behind.

@@ -76,12 +76,12 @@ struct database_impl {
 
     // Typed full-mode methods (no runtime dispatch)
     std::optional<full_find_result> full_find(raw_outpoint const& key, uint32_t height) const;
-    std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>> full_process_pending_lookups();
+    result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>> full_process_pending_lookups();
 
     // Typed reference-mode methods (no serialization)
     result<bool> reference_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
     std::optional<reference_find_result> reference_find_typed(raw_outpoint const& key, uint32_t height) const;
-    std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>> reference_process_pending_lookups();
+    result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>> reference_process_pending_lookups();
     result<> reference_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 
     database_statistics get_statistics();
