@@ -33,6 +33,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 EXIT_OK = 0
 EXIT_ABSENT = 3
@@ -43,7 +44,19 @@ EXIT_UNKNOWN = 4
 # it — which reports the job as timed out rather than as "we could not establish
 # whether the package is there", and loses the one distinction this program
 # exists to make. Generous, because a slow remote is not a stalled one.
+#
+# This is the budget for the whole operation, not for each `conan list` inside
+# it. Answering the question takes two of them — does the remote have it, and
+# which revisions — and a per-query bound lets a caller that allowed N seconds
+# wait nearly 2N: the first query answers just under the limit and the second
+# stalls for the full limit again. The caller's deadline is then not a deadline.
 QUERY_TIMEOUT_SECONDS = float(os.environ.get("UTXOZ_REMOTE_QUERY_TIMEOUT", "120"))
+
+# Monotonic, not wall clock. A clock that steps backwards — NTP correcting a
+# drifting machine, which is precisely what CI runners do — would extend the
+# budget by however far it stepped, and the bound this exists to enforce would
+# quietly stop enforcing anything.
+DEADLINE = time.monotonic() + QUERY_TIMEOUT_SECONDS
 
 
 class Unknown(Exception):
@@ -65,16 +78,28 @@ def as_object(value: object, what: str) -> dict:
 
 
 def query(remote: str, pattern: str) -> dict:
-    """The remote's reply, or Unknown. Never a guess."""
+    """The remote's reply, or Unknown. Never a guess.
+
+    Each query gets what is left of the budget rather than all of it, so two
+    queries cost one budget between them instead of one each.
+    """
+    remaining = DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise Unknown(
+            f"the {QUERY_TIMEOUT_SECONDS:g}s budget was spent before this query could be made"
+        )
     try:
         completed = subprocess.run(
             ["conan", "list", pattern, "-r", remote, "--format=json"],
             capture_output=True,
             text=True,
-            timeout=QUERY_TIMEOUT_SECONDS,
+            timeout=remaining,
         )
     except subprocess.TimeoutExpired:
-        raise Unknown(f"conan list did not return within {QUERY_TIMEOUT_SECONDS:g}s")
+        raise Unknown(
+            f"conan list did not return within {QUERY_TIMEOUT_SECONDS:g}s"
+            f" (this query was given the {remaining:.1f}s left of that budget)"
+        )
     except OSError as error:
         raise Unknown(f"could not run conan list: {error}")
     if completed.returncode != 0:

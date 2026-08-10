@@ -17,6 +17,11 @@
 #      outcome, never folded into "it is not there";
 #   2. the exact recipe revision just created is among the ones it holds, not
 #      merely something with the same name;
+#
+# The first two are waited for, not merely asked once: the remote publishes an
+# upload some time after accepting it, so an immediate "not found" says nothing
+# about the release. ci/await_published.sh owns that wait and its outcomes.
+#
 #   3. it installs from the remote, pinned to that revision, with no permission
 #      to build;
 #   4. a consumer compiles and runs against what came back.
@@ -78,35 +83,25 @@ fi
 
 # ---------------------------------------------------------------------------
 # 1 and 2. The remote holds it, and holds the revision just made.
+#
+# Waited for rather than asked once. The remote publishes an upload some time
+# after accepting it, so the first answer to this question is routinely "not
+# found" on a release that is perfectly healthy — and treating that first answer
+# as the verdict fails the release for the delay rather than for the fault.
+#
+# The three outcomes come back as three exit codes and are passed through as
+# three, because "it did not publish" and "we could not tell" call for different
+# things next: the first is a fault to fix, the second is a question to re-ask.
 # ---------------------------------------------------------------------------
-echo "asking ${REMOTE} for ${REFERENCE}"
-set +e
-"${ROOT}/ci/remote_revisions.py" "${REMOTE}" "${REFERENCE}" > "${work}/revisions" 2> "${work}/why"
-lookup=$?
-set -e
-cat "${work}/why" >&2 || true
+lookup=0
+"${ROOT}/ci/await_published.sh" "${REMOTE}" "${REFERENCE}" "${REVISION}" || lookup=$?
 
 case ${lookup} in
     0) ;;
-    3) fail "the upload reported success and ${REFERENCE} is not on ${REMOTE}" ;;
-    4) fail "could not establish whether ${REFERENCE} is on ${REMOTE}; that is not a pass" ;;
-    *) fail "the revision lookup failed in an unexpected way (${lookup})" ;;
+    3) exit 3 ;;
+    4) exit 4 ;;
+    *) fail "the publication wait failed in an unexpected way (${lookup})" ;;
 esac
-
-echo "recipe revisions on ${REMOTE}:"
-sed 's/^/  /' "${work}/revisions"
-
-# grep answers three things, and they are not interchangeable: 0 the revision is
-# listed, 1 it is not, anything else the list could not be read — which is not
-# "the revision is missing" and must not be reported as one.
-grep_status=0
-grep -qxF -- "${REVISION}" "${work}/revisions" || grep_status=$?
-case ${grep_status} in
-    0) ;;
-    1) fail "${REFERENCE} is on ${REMOTE}, but not the revision just built (${REVISION})" ;;
-    *) fail "cannot read the revision list back (grep exited ${grep_status}); this is not a pass" ;;
-esac
-echo "ok: ${REVISION} is there"
 
 # ---------------------------------------------------------------------------
 # 3. It installs, pinned to that revision, with no permission to build.

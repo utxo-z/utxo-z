@@ -740,6 +740,7 @@ jobs:
         run: |
           ./ci/test_remote_revisions.sh
           ./ci/test_one_revision.sh
+          ./ci/test_await_published.sh
 
       - name: 🧪 Verify toolchain
         env:
@@ -784,24 +785,36 @@ jobs:
       # Asserting the message rather than merely a non-zero exit is the point: an
       # unreachable remote also fails, and a control that accepted any failure
       # would pass while proving nothing.
+      # The window is seconds rather than the release default, because what is
+      # under test here is which answer comes back, not how long a real remote is
+      # given to publish. At the default this control would spend five minutes
+      # per platform, on every pull request, waiting for a version that cannot
+      # arrive.
       - name: 🧪 The post-upload check can tell absent from unreachable
         env:
           UTXOZ_BUILD_VERSION: 0.0.0-never-published
           UTXOZ_RECIPE_REVISION: 00000000000000000000000000000000
           UTXOZ_REMOTE: kth-verify
           UTXOZ_REMOTE_URL: https://packages.kth.cash/api/
+          UTXOZ_PUBLISH_TIMEOUT: 10
         run: |
-          if ./ci/verify_published.sh > verify.log 2>&1; then
-            echo "the check passed for a version that was never published" >&2
-            cat verify.log >&2
-            exit 1
-          fi
+          status=0
+          ./ci/verify_published.sh > verify.log 2>&1 || status=$?
           cat verify.log
-          if ! grep -q "is not on kth-verify" verify.log; then
-            echo "it failed, but not because the package is absent — so this proves nothing" >&2
+          # 3 is absence and 4 is not knowing; the exit code is asserted rather
+          # than the wording because it is the thing the release branches on, and
+          # a control that accepts any failure would pass on an unreachable
+          # remote while proving nothing.
+          case ${status} in
+            0) echo "the check passed for a version that was never published" >&2; exit 1 ;;
+            3) echo "ok: absence is reported as absence" ;;
+            4) echo "it could not reach the remote, so this proves nothing about absence" >&2; exit 1 ;;
+            *) echo "it failed for some other reason (${status}); this proves nothing" >&2; exit 1 ;;
+          esac
+          if ! grep -q "did not appear on kth-verify" verify.log; then
+            echo "it exited 3 without saying why; the message the release is read from is missing" >&2
             exit 1
           fi
-          echo "ok: absence is reported as absence"
 
   benchmark:
     needs: [setup]
