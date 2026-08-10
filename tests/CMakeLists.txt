@@ -16,6 +16,7 @@ add_executable(utxoz_tests
     test_reference_mode.cpp
     test_find_across_rotations.cpp
     test_statistics.cpp
+    test_unresolved_vs_absent.cpp
     test_compaction_invariant.cpp
     test_version_catalog.cpp
     test_file_metadata_io.cpp

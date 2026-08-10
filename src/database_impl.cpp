@@ -3027,6 +3027,9 @@ database_impl::full_process_pending_lookups() {
             // Enumerating the versions can fail too, and not knowing which files
             // exist is the same problem as not being able to read one.
             try {
+            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+                throw std::runtime_error("failpoint: catalogue refused to be listed");
+            }
             for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
                 if (deferred_lookups_.empty()) break;
                 if (processed_versions[I.value].contains(v)) continue;
@@ -3248,6 +3251,9 @@ database_impl::reference_process_pending_lookups() {
         }
 
         try {
+            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+                throw std::runtime_error("failpoint: catalogue refused to be listed");
+            }
             for (auto const v : reference_catalog_.below(reference_current_version_)) {
                 if (deferred_lookups_.empty()) break;
                 if (processed_versions.contains(v)) continue;

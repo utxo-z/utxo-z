@@ -120,6 +120,11 @@ struct failpoints {
     /// switch above cannot use zero to mean both "version 0" and "off".
     static constexpr uint64_t no_version = ~uint64_t{0};
 
+    /// Fails the sweep's attempt to enumerate which versions exist. A different
+    /// failure from a file that will not open, reported with a different code,
+    /// so the two cannot be shown to work by the same test.
+    static inline std::atomic<bool> fail_lookup_catalog{false};
+
 
     /// Where to stop the process dead, for the tests that check what a crash at
     /// each barrier leaves behind. Named after the step that has just finished.
@@ -188,6 +193,7 @@ struct failpoints {
         fail_unlink.store(false, std::memory_order_relaxed);
         fail_source_unlink.store(false, std::memory_order_relaxed);
         fail_lookup_open_version.store(no_version, std::memory_order_relaxed);
+        fail_lookup_catalog.store(false, std::memory_order_relaxed);
         crash_at.store(crash_point::none, std::memory_order_relaxed);
         fail_directory_barrier_at.store(dir_barrier::none, std::memory_order_relaxed);
         fail_container_open.store(false, std::memory_order_relaxed);
