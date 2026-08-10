@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786365784753,
+  "lastUpdate": 1786372589142,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -13283,6 +13283,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.81,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f8e1666178d290a43faf2665b332dc8201414079",
+          "message": "fix: generate the release notes once, before the release exists (#107)\n\nThe notes were generated twice and the two disagreed.\n\npost-release.sh created a `temp-v${VERSION}` tag, made a prerelease from it with\n`--generate-notes`, scraped the body back out, rewrote `temp-v` to `v` with sed,\nwrote that into doc/release-notes/release-notes.md, committed it — and then\ncreated the real release with `--generate-notes` a second time. By that second\ncall the release pull request had merged and the docs commit existed, so what\nGitHub produced was not what the file said. The release also cited itself: the\nmarker pull request was inside its own range, as was the commit that wrote the\nnotes.\n\nNow the notes are a photograph, taken once, before anything about the release\nexists. release.sh asks GitHub for them against the master commit it is about to\nrelease — via `releases/generate-notes`, which computes them without creating a\ntag, a draft or a prerelease — and embeds them in the pull request body between\nmarkers. post-release.sh reads them back out of that same body and uses them,\nbyte for byte, for both the file and the release.\n\nGenerating them first also means the release stops for free when it cannot be\ndone. Everything after that point creates something, so a GitHub failure now\naborts with no state to unwind. There is deliberately no fallback body, and a\npull request this run did not create aborts too: its body carries notes nobody\ngenerated for this commit. The notes are read and validated before\n`gh pr merge`, not after — a body whose markers were lost would otherwise be\nmerged first and refused second, leaving master with a release commit on it, no\ntag and no release.\n\nA failed release leaves nothing behind and can be re-run. The tag must be pushed\nbefore `gh release create` can reference it, so a failure there used to leave the\nremote carrying a v${VERSION} pointing at nothing published; the tag is now\nwithdrawn, and the status reported is gh's own. Withdrawing it only helps if the\nrun can be repeated, and by then the notes commit is already on master — so\nrecording the notes is conditional, and the condition is the text and not just\nthe heading. An entry for this version that says something else is a conflict and\nstops the release: publishing from the pull request while the file kept different\nwords is the divergence this change exists to remove. Identical is the retry\ncase and does nothing; duplicated or truncated headings refuse rather than guess.\n\nprevious_stable_tag distinguishes a repository with no tags from a git that could\nnot answer — returning success with no output for the second would generate notes\nover the whole history and present every version this project ever shipped as the\ncontents of this one. It also no longer pipes git into a `while` that breaks:\nonce the tag list outgrows the pipe buffer git takes SIGPIPE and a caller under\n`pipefail` aborts on the one path that found what it was looking for. Only\n`vMAJOR.MINOR.PATCH` counts as a previous release.\n\nThe markers tell unset from set: unset is defined and frozen, the expected value\nis frozen too rather than merely accepted, and anything else is refused — the\nbody would be written with one marker and read back with another.\n\nGitHub's Full Changelog link points at the tag it was asked about, which does not\nexist while the pull request is open; those links are pointed at the commit\ninstead. `gh api`'s stdout and stderr are kept apart. Markers are counted by\noccurrence rather than by line. Tags are synced from origin before the previous\nrelease is chosen, without --force.\n\nThe existing guarantees are unchanged: no tagging unless the pull request is\nMERGED and its merge commit is an ancestor of the checked-out master, no deleting\nthe branch until the release exists, and nothing touches Conan packages.\n\n99 assertions in scripts/test_release_lib.sh, run on Ubuntu and again on macOS.\nEach fix was checked by reverting it, and four of those checks had to be\nsharpened before they discriminated at all: comparing only the heading, a\nduplicate heading that failed for the wrong reason, a SIGPIPE that needs nine\nthousand tags to appear, and the suite's own line lookups, which recorded misses\nin a counter incremented inside a command substitution and therefore in a\nsubshell that discarded it. The retry cycle runs against a real repository with a\nreal remote and checks that the persisted entry is exactly the text handed to\npublish_release.\n\nRefs #92",
+          "timestamp": "2026-08-10T16:33:09+02:00",
+          "tree_id": "64b6f7550dfef7d25aed3443c78daad492b5f126",
+          "url": "https://github.com/utxo-z/utxo-z/commit/f8e1666178d290a43faf2665b332dc8201414079"
+        },
+        "date": 1786372588744,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 289435.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 325811.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 135687.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 397282.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 371.28,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 429.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12147174.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12576084.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11894781.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12395.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 12709494.72,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14582856.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 148887.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 14210.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2576.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3319.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2764.17,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.01,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 55.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 55.97,
             "unit": "ops/sec"
           }
         ]
