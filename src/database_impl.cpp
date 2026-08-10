@@ -1042,167 +1042,6 @@ size_t database_impl::deferred_lookups_size() const {
     return deferred_lookups_.size();
 }
 
-std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> database_impl::process_pending_lookups() {
-    if (deferred_lookups_.empty()) return {};
-
-    flat_map<raw_outpoint, bytes> successful_lookups;
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    auto const start_time = std::chrono::steady_clock::now();
-    ++deferred_stats_.processing_runs;
-#endif
-
-    size_t initial_size = deferred_lookups_.size();
-    log::debug("Processing {} deferred lookups...", initial_size);
-
-    // Phase 1: Process cached files first
-    auto cached_files = file_cache_->get_cached_files();
-    if (!cached_files.empty()) {
-        std::ranges::sort(cached_files, [](auto const& a, auto const& b) {
-            if (a.first != b.first) return a.first < b.first;
-            return a.second > b.second; // Most recent version first
-        });
-
-        for (auto const& [container_index, version] : cached_files) {
-            if (deferred_lookups_.empty()) break;
-            process_deferred_lookups_in_file(container_index, version, true, successful_lookups);
-        }
-    }
-
-    // Phase 2: Process remaining files
-    if (!deferred_lookups_.empty()) {
-        if (mode_ == storage_mode::reference) {
-            std::set<size_t> processed_versions_reference;
-            for (auto const& [ci, version] : cached_files) {
-                if (ci == reference_sentinel_index) {
-                    processed_versions_reference.insert(version);
-                }
-            }
-
-            for (auto const v : reference_catalog_.below(reference_current_version_)) {
-                if (deferred_lookups_.empty()) break;
-                if (processed_versions_reference.contains(v)) continue;
-
-                process_deferred_lookups_in_file(reference_sentinel_index, v, false, successful_lookups);
-            }
-        } else {
-            std::array<std::set<size_t>, container_count> processed_versions;
-            for (auto const& [container_index, version] : cached_files) {
-                processed_versions[container_index].insert(version);
-            }
-
-            for_each_index<container_count>([&](auto I) {
-                if (deferred_lookups_.empty()) return;
-
-                for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
-                    if (deferred_lookups_.empty()) break;
-                    if (processed_versions[I.value].contains(v)) continue;
-
-                    process_deferred_lookups_in_file(I.value, v, false, successful_lookups);
-                }
-            });
-        }
-    }
-
-    // Collect failed lookups (includes key and block height)
-    std::vector<deferred_lookup_entry> failed_lookups;
-    failed_lookups.reserve(deferred_lookups_.size());
-    resolution_stats_.record_unresolved(deferred_lookups_.size());
-    deferred_lookups_.visit_all([&](auto const& entry) {
-        failed_lookups.push_back(entry);
-    });
-
-    deferred_lookups_.clear();
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    auto const end_time = std::chrono::steady_clock::now();
-    deferred_stats_.total_processing_time +=
-        std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-
-    deferred_stats_.successfully_processed += successful_lookups.size();
-    deferred_stats_.failed_to_delete += failed_lookups.size();
-#endif
-
-    log::debug("Deferred lookup complete: {} successful, {} failed",
-              successful_lookups.size(), failed_lookups.size());
-
-    return {std::move(successful_lookups), std::move(failed_lookups)};
-}
-
-void database_impl::process_deferred_lookups_in_file(size_t container_index,
-                                                      size_t version,
-                                                      [[maybe_unused]] bool is_cached,
-                                                      flat_map<raw_outpoint, bytes>& successful_lookups) {
-    if (deferred_lookups_.empty()) return;
-
-    auto process_with_container = [&]<size_t Index>(std::integral_constant<size_t, Index>) {
-        try {
-            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(container_index, version);
-
-            resolution_stats_.record_file_visited(cache_hit);
-
-
-            deferred_lookups_.erase_if([&](auto const& entry) {
-                auto map_it = map.find(entry.key);
-                if (map_it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
-
-                    ++deferred_stats_.lookups_by_depth[depth];
-                    resolution_stats_.record_resolved(depth);
-#endif
-
-                    auto data = map_it->second.get_data();
-                    successful_lookups.emplace(entry.key, bytes(data.begin(), data.end()));
-
-                    return true;  // Remove this entry
-                }
-                return false;  // Keep this entry
-            });
-
-        } catch (std::exception const& e) {
-            log::error("Error processing lookups in file ({}, v{}): {}", container_index, version, e.what());
-        }
-    };
-
-    if (container_index == reference_sentinel_index) {
-        try {
-            auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
-
-            resolution_stats_.record_file_visited(cache_hit);
-
-
-            deferred_lookups_.erase_if([&](auto const& entry) {
-                auto map_it = map.find(entry.key);
-                if (map_it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(reference_current_version_ - version);
-                    ++deferred_stats_.lookups_by_depth[depth];
-                    resolution_stats_.record_resolved(depth);
-#endif
-                    bytes data(sizeof(uint32_t) * 2);
-                    std::memcpy(data.data(), &map_it->second.file_number, sizeof(uint32_t));
-                    std::memcpy(data.data() + sizeof(uint32_t), &map_it->second.offset, sizeof(uint32_t));
-                    successful_lookups.emplace(entry.key, std::move(data));
-                    return true;
-                }
-                return false;
-            });
-        } catch (std::exception const& e) {
-            log::error("Error processing reference lookups v{}: {}", version, e.what());
-        }
-        return;
-    }
-
-    switch (container_index) {
-        case 0: process_with_container(std::integral_constant<size_t, 0>{}); break;
-        case 1: process_with_container(std::integral_constant<size_t, 1>{}); break;
-        case 2: process_with_container(std::integral_constant<size_t, 2>{}); break;
-        case 3: process_with_container(std::integral_constant<size_t, 3>{}); break;
-        case 4: process_with_container(std::integral_constant<size_t, 4>{}); break;
-    }
-}
-
 // =============================================================================
 // database_impl - Compaction
 // =============================================================================
@@ -2920,7 +2759,7 @@ std::optional<full_find_result> database_impl::full_find(raw_outpoint const& key
     return std::nullopt;
 }
 
-std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>
+result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>>
 database_impl::full_process_pending_lookups() {
     if (deferred_lookups_.empty()) return {};
 
@@ -2928,36 +2767,84 @@ database_impl::full_process_pending_lookups() {
 
 #ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
-    ++deferred_stats_.processing_runs;
 #endif
 
     size_t initial_size = deferred_lookups_.size();
     log::debug("Processing {} deferred full lookups...", initial_size);
 
+    // A sweep either covers everything it needed to, or it says so.
+    //
+    // Every version below the current one can hold a pending key, so one that
+    // cannot be read makes absence unprovable for *every* key still unresolved
+    // — not only for the ones that happened to live in it. The old code logged
+    // the failure and carried on, and those keys came back in the second list
+    // alongside genuinely missing ones. A caller reading that list as "these
+    // outpoints do not exist" turns a local storage fault into a rejected
+    // block.
+    //
+    // The consumed entries are kept so the failure path can put them back. A
+    // call that fails must consume nothing: the caller retries, and a retry
+    // that had silently eaten the resolved keys would report them as neither
+    // resolved nor pending.
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // Accumulated here and published only if the sweep completes.
+    //
+    // A failed sweep puts its queue back, so the retry does all of this work
+    // again. Publishing as it goes would count the abandoned attempt as well as
+    // the one that finished: every file visited twice, every lookup resolved
+    // twice, and a processing run that never produced a result. The numbers are
+    // reported to operators deciding whether the deferred path is behaving, so
+    // an attempt that was rolled back must not appear in them at all.
+    struct {
+        uint64_t cache_hits = 0;
+        uint64_t cache_misses = 0;
+        std::vector<uint32_t> resolved_depths;
+    } tally;
+#endif
+
+    bool sweep_complete = true;
+    // Which failure it was. A file that will not open and a catalogue that
+    // cannot be listed are both fail-closed, and they send an operator to
+    // different places, so the cause is carried rather than flattened.
+    error_code sweep_error = error_code::version_unreadable;
+    std::vector<deferred_lookup_entry> consumed;
+
     auto process_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>, size_t version) {
         try {
+            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+                    == static_cast<uint64_t>(version)) {
+                throw std::runtime_error("failpoint: version file refused to open");
+            }
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
 
-            resolution_stats_.record_file_visited(cache_hit);
+#ifdef UTXOZ_STATISTICS_ENABLED
+            cache_hit ? ++tally.cache_hits : ++tally.cache_misses;
+#else
+            (void) cache_hit;
+#endif
 
 
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
-                    ++deferred_stats_.lookups_by_depth[depth];
-                    resolution_stats_.record_resolved(depth);
+                    tally.resolved_depths.push_back(
+                        static_cast<uint32_t>(current_versions_[Index] - version));
 #endif
                     auto data = map_it->second.get_data();
                     successful_lookups.emplace(entry.key,
                         full_find_result{bytes(data.begin(), data.end()), map_it->second.block_height});
+                    consumed.push_back(entry);
                     return true;
                 }
                 return false;
             });
         } catch (std::exception const& e) {
-            log::error("Error processing full lookups (container {}, v{}): {}", Index, version, e.what());
+            // Not recoverable by carrying on: this file might hold any of the
+            // keys still pending, so nothing that remains can be called absent.
+            log::error("Could not read full container {} v{}: {}. The sweep is incomplete.",
+                       Index, version, e.what());
+            sweep_complete = false;
         }
     };
 
@@ -2994,16 +2881,55 @@ database_impl::full_process_pending_lookups() {
         for_each_index<container_count>([&](auto I) {
             if (deferred_lookups_.empty()) return;
 
+            // Enumerating the versions can fail too, and not knowing which files
+            // exist is the same problem as not being able to read one.
+            try {
+            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+                throw std::runtime_error("failpoint: catalogue refused to be listed");
+            }
             for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
                 if (deferred_lookups_.empty()) break;
                 if (processed_versions[I.value].contains(v)) continue;
 
                 process_full_file(I, v);
             }
+            } catch (std::exception const& e) {
+                // Not knowing which files exist is its own failure, and there is
+                // already a code that says exactly that. Reporting it as
+                // version_unreadable would send somebody looking at a file when
+                // the problem is the catalogue.
+                log::error("Could not enumerate versions of container {}: {}. The sweep is incomplete.",
+                           I.value, e.what());
+                sweep_complete = false;
+                sweep_error = error_code::catalog_unreadable;
+            }
         });
     }
 
-    // Collect failed lookups
+    if ( ! sweep_complete) {
+        // Put back everything this call took, so it consumed nothing and the
+        // caller can retry once the storage fault is dealt with.
+        for (auto const& entry : consumed) {
+            deferred_lookups_.emplace(entry.key, entry.height);
+        }
+        log::error("Deferred full lookups incomplete: {} keys remain unresolved and none of them "
+                   "can be reported as absent", deferred_lookups_.size());
+        return std::unexpected(sweep_error);
+    }
+
+    // Every version was read, so what is left was looked for everywhere it
+    // could have been. Only now is absence a fact.
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // The sweep completed, so what it did is now a fact and can be published.
+    ++deferred_stats_.processing_runs;
+    for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
+    for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
+    for (auto const depth : tally.resolved_depths) {
+        ++deferred_stats_.lookups_by_depth[depth];
+        resolution_stats_.record_resolved(depth);
+    }
+#endif
+
     std::vector<deferred_lookup_entry> failed_lookups;
     failed_lookups.reserve(deferred_lookups_.size());
     resolution_stats_.record_unresolved(deferred_lookups_.size());
@@ -3025,7 +2951,7 @@ database_impl::full_process_pending_lookups() {
     log::debug("Deferred full lookups complete: {} found, {} not found",
                successful_lookups.size(), failed_lookups.size());
 
-    return {std::move(successful_lookups), std::move(failed_lookups)};
+    return std::pair{std::move(successful_lookups), std::move(failed_lookups)};
 }
 
 // =============================================================================
@@ -3100,7 +3026,7 @@ std::optional<reference_find_result> database_impl::reference_find_typed(raw_out
     return std::nullopt;
 }
 
-std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>
+result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>>
 database_impl::reference_process_pending_lookups() {
     if (deferred_lookups_.empty()) return {};
 
@@ -3108,35 +3034,80 @@ database_impl::reference_process_pending_lookups() {
 
 #ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
-    ++deferred_stats_.processing_runs;
 #endif
 
     size_t initial_size = deferred_lookups_.size();
     log::debug("Processing {} deferred reference lookups...", initial_size);
 
+    // A sweep either covers everything it needed to, or it says so.
+    //
+    // Every version below the current one can hold a pending key, so one that
+    // cannot be read makes absence unprovable for *every* key still unresolved
+    // — not only for the ones that happened to live in it. The old code logged
+    // the failure and carried on, and those keys came back in the second list
+    // alongside genuinely missing ones. A caller reading that list as "these
+    // outpoints do not exist" turns a local storage fault into a rejected
+    // block.
+    //
+    // The consumed entries are kept so the failure path can put them back. A
+    // call that fails must consume nothing: the caller retries, and a retry
+    // that had silently eaten the resolved keys would report them as neither
+    // resolved nor pending.
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // Accumulated here and published only if the sweep completes.
+    //
+    // A failed sweep puts its queue back, so the retry does all of this work
+    // again. Publishing as it goes would count the abandoned attempt as well as
+    // the one that finished: every file visited twice, every lookup resolved
+    // twice, and a processing run that never produced a result. The numbers are
+    // reported to operators deciding whether the deferred path is behaving, so
+    // an attempt that was rolled back must not appear in them at all.
+    struct {
+        uint64_t cache_hits = 0;
+        uint64_t cache_misses = 0;
+        std::vector<uint32_t> resolved_depths;
+    } tally;
+#endif
+
+    bool sweep_complete = true;
+    // Which failure it was. A file that will not open and a catalogue that
+    // cannot be listed are both fail-closed, and they send an operator to
+    // different places, so the cause is carried rather than flattened.
+    error_code sweep_error = error_code::version_unreadable;
+    std::vector<deferred_lookup_entry> consumed;
+
     auto process_compact_file = [&](size_t version, bool /*is_cached*/) {
         try {
+            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+                    == static_cast<uint64_t>(version)) {
+                throw std::runtime_error("failpoint: version file refused to open");
+            }
             auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
 
-            resolution_stats_.record_file_visited(cache_hit);
+#ifdef UTXOZ_STATISTICS_ENABLED
+            cache_hit ? ++tally.cache_hits : ++tally.cache_misses;
+#else
+            (void) cache_hit;
+#endif
 
 
             deferred_lookups_.erase_if([&](auto const& entry) {
                 auto map_it = map.find(entry.key);
                 if (map_it != map.end()) {
 #ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(reference_current_version_ - version);
-                    ++deferred_stats_.lookups_by_depth[depth];
-                    resolution_stats_.record_resolved(depth);
+                    tally.resolved_depths.push_back(
+                        static_cast<uint32_t>(reference_current_version_ - version));
 #endif
                     successful_lookups.emplace(entry.key,
                         reference_find_result{map_it->second.height, map_it->second.file_number, map_it->second.offset});
+                    consumed.push_back(entry);
                     return true;
                 }
                 return false;
             });
         } catch (std::exception const& e) {
-            log::error("Error processing reference lookups v{}: {}", version, e.what());
+            log::error("Could not read reference v{}: {}. The sweep is incomplete.", version, e.what());
+            sweep_complete = false;
         }
     };
 
@@ -3165,15 +3136,44 @@ database_impl::reference_process_pending_lookups() {
             }
         }
 
-        for (auto const v : reference_catalog_.below(reference_current_version_)) {
-            if (deferred_lookups_.empty()) break;
-            if (processed_versions.contains(v)) continue;
+        try {
+            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+                throw std::runtime_error("failpoint: catalogue refused to be listed");
+            }
+            for (auto const v : reference_catalog_.below(reference_current_version_)) {
+                if (deferred_lookups_.empty()) break;
+                if (processed_versions.contains(v)) continue;
 
-            process_compact_file(v, false);
+                process_compact_file(v, false);
+            }
+        } catch (std::exception const& e) {
+            log::error("Could not enumerate reference versions: {}. The sweep is incomplete.", e.what());
+            sweep_complete = false;
+            sweep_error = error_code::catalog_unreadable;
         }
     }
 
+    if ( ! sweep_complete) {
+        for (auto const& entry : consumed) {
+            deferred_lookups_.emplace(entry.key, entry.height);
+        }
+        log::error("Deferred reference lookups incomplete: {} keys remain unresolved and none of "
+                   "them can be reported as absent", deferred_lookups_.size());
+        return std::unexpected(sweep_error);
+    }
+
     // Collect failed lookups
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // The sweep completed, so what it did is now a fact and can be published.
+    ++deferred_stats_.processing_runs;
+    for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
+    for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
+    for (auto const depth : tally.resolved_depths) {
+        ++deferred_stats_.lookups_by_depth[depth];
+        resolution_stats_.record_resolved(depth);
+    }
+#endif
+
     std::vector<deferred_lookup_entry> failed_lookups;
     failed_lookups.reserve(deferred_lookups_.size());
     resolution_stats_.record_unresolved(deferred_lookups_.size());
@@ -3195,7 +3195,7 @@ database_impl::reference_process_pending_lookups() {
     log::debug("Deferred reference lookup complete: {} successful, {} failed",
               successful_lookups.size(), failed_lookups.size());
 
-    return {std::move(successful_lookups), std::move(failed_lookups)};
+    return std::pair{std::move(successful_lookups), std::move(failed_lookups)};
 }
 
 result<> database_impl::reference_for_each_entry_typed(

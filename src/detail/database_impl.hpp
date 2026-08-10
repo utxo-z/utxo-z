@@ -64,7 +64,6 @@ struct database_impl {
     std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
     size_t deferred_deletions_size() const;
 
-    std::pair<flat_map<raw_outpoint, bytes>, std::vector<deferred_lookup_entry>> process_pending_lookups();
     size_t deferred_lookups_size() const;
 
     result<> compact_all();
@@ -76,12 +75,12 @@ struct database_impl {
 
     // Typed full-mode methods (no runtime dispatch)
     std::optional<full_find_result> full_find(raw_outpoint const& key, uint32_t height) const;
-    std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>> full_process_pending_lookups();
+    result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>> full_process_pending_lookups();
 
     // Typed reference-mode methods (no serialization)
     result<bool> reference_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
     std::optional<reference_find_result> reference_find_typed(raw_outpoint const& key, uint32_t height) const;
-    std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>> reference_process_pending_lookups();
+    result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>> reference_process_pending_lookups();
     result<> reference_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 
     database_statistics get_statistics();
@@ -129,8 +128,6 @@ private:
 
     // Deferred lookup helpers
     void add_to_deferred_lookups(raw_outpoint const& key, uint32_t height) const;
-    void process_deferred_lookups_in_file(size_t container_index, size_t version, bool is_cached,
-                                          flat_map<raw_outpoint, bytes>& successful_lookups);
 
     // File management
     template<size_t Index>

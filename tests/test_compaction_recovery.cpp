@@ -1629,13 +1629,20 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
 
         // Semantics before timing. A sweep that returned an error immediately —
         // before it ever reached the cache — would also be fast, and the
-        // stopwatch alone would call that a pass.
-        REQUIRE(resolved);
-        auto const& [found, unresolved] = *resolved;
+        // stopwatch alone would call that a pass. version_unreadable is only
+        // produced by the open path, so getting it is itself evidence the cache
+        // was reached.
+        //
+        // This used to require the sweep to succeed and hand the witness back in
+        // the unresolved list. That is the ambiguity the second list no longer
+        // carries: a truncated version is a failure to look up, not a proof of
+        // absence, and a caller that read it as absence would reject a valid
+        // block over a local storage fault.
+        REQUIRE_FALSE(resolved);
+        CHECK(resolved.error() == utxoz::error_code::version_unreadable);
 
-        CHECK_FALSE(found.contains(witness));
-        CHECK(std::ranges::any_of(unresolved,
-                                  [&](auto const& entry) { return entry.key == witness; }));
+        // Nothing was consumed, so the key is still queued rather than lost.
+        CHECK(db.deferred_lookups_size() == 1);
 
         auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
         INFO("the sweep took " << millis << " ms");
@@ -1690,13 +1697,10 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         auto const elapsed = std::chrono::steady_clock::now() - start;
 
         // See above: the sweep has to have reached that request, not merely
-        // returned quickly.
-        REQUIRE(resolved);
-        auto const& [found, unresolved] = *resolved;
-
-        CHECK_FALSE(found.contains(witness));
-        CHECK(std::ranges::any_of(unresolved,
-                                  [&](auto const& entry) { return entry.key == witness; }));
+        // returned quickly. version_unreadable comes only from the open path.
+        REQUIRE_FALSE(resolved);
+        CHECK(resolved.error() == utxoz::error_code::version_unreadable);
+        CHECK(db.deferred_lookups_size() == 1);
 
         auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
         INFO("the sweep took " << millis << " ms");

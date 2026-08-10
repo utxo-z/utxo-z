@@ -108,6 +108,25 @@ struct failpoints {
     /// keys. A blanket unlink failure would stop the merge long before that.
     static inline std::atomic<bool> fail_source_unlink{false};
 
+    /// Sentinel meaning "no version": versions are numbered from zero, so the
+    /// switch below cannot use zero to mean both "version 0" and "off".
+    /// Declared first so it is the initialiser rather than a repeat of it — two
+    /// spellings of the same constant are two places to get it wrong.
+    static constexpr uint64_t no_version = ~uint64_t{0};
+
+    /// Fails the deferred-lookup sweep's attempt to open one specific version.
+    /// A specific version and not a blanket switch, because what has to be shown
+    /// is a sweep that reads some files and then cannot read one — the case
+    /// where a partial result exists and must not be handed back as absence. A
+    /// blanket failure stops at the first file and never reaches it.
+    static inline std::atomic<uint64_t> fail_lookup_open_version{no_version};
+
+    /// Fails the sweep's attempt to enumerate which versions exist. A different
+    /// failure from a file that will not open, reported with a different code,
+    /// so the two cannot be shown to work by the same test.
+    static inline std::atomic<bool> fail_lookup_catalog{false};
+
+
     /// Where to stop the process dead, for the tests that check what a crash at
     /// each barrier leaves behind. Named after the step that has just finished.
     enum class crash_point : uint8_t {
@@ -174,6 +193,8 @@ struct failpoints {
         fail_replace.store(false, std::memory_order_relaxed);
         fail_unlink.store(false, std::memory_order_relaxed);
         fail_source_unlink.store(false, std::memory_order_relaxed);
+        fail_lookup_open_version.store(no_version, std::memory_order_relaxed);
+        fail_lookup_catalog.store(false, std::memory_order_relaxed);
         crash_at.store(crash_point::none, std::memory_order_relaxed);
         fail_directory_barrier_at.store(dir_barrier::none, std::memory_order_relaxed);
         fail_container_open.store(false, std::memory_order_relaxed);

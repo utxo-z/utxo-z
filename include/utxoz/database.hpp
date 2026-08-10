@@ -112,9 +112,9 @@ struct db_base {
      * process_pending_deletions() is what applies it.
      *
      * @warning The keys that call reports as failed are UNRESOLVED, not proven
-     * absent: a version file that could not be read is logged, skipped, and its
-     * keys land in the same list. Absence is only established when the sweep
-     * read every version, which today you can tell apart only from the log.
+     * absent: a version file that could not be read is logged and skipped, and
+     * its keys land in the same list. This is the deletion path, and it still
+     * carries that ambiguity — process_pending_lookups() no longer does.
      *
      * @param key UTXO key to erase
      * @param height Current block height
@@ -336,9 +336,15 @@ struct full_db : db_base {
      *     if (auto r = db.find(op, height)) { use(*r); }   // resolved right away
      *     // otherwise: queued, do NOT conclude "does not exist" yet
      * }
-     * auto [found, unresolved] = db.process_pending_lookups();
-     * // `found` resolves the queued lookups. `unresolved` is NOT proof of
-     * // absence: a version file that could not be read lands its keys here too.
+     * auto swept = db.process_pending_lookups();
+     * if ( ! swept) {
+     *     // The sweep could not read something it needed. Nothing was
+     *     // consumed, so the queue is intact: come back to it later and do not
+     *     // treat anything as missing in the meantime.
+     *     return;                     // and never reach *swept below
+     * }
+     * auto& [found, absent] = *swept;
+     * // `found` resolves the queued lookups; `absent` is proven absence.
      * @endcode
      *
      * Call process_pending_lookups() before process_pending_deletions(): the
@@ -372,13 +378,32 @@ struct full_db : db_base {
      * asked. (This is about ownership, not threads: per the class contract,
      * operations are serialised anyway.)
      *
-     * @warning The second element is UNRESOLVED, not absent. A version file that
-     * cannot be read is logged and skipped, and its keys come back in that same
-     * list, indistinguishable from keys that exist nowhere. Absence is only
-     * established if the sweep read every version — which today you can tell
-     * apart only from the log.
+     * The second element is ABSENT, and only that. It is reached exactly when
+     * the sweep read every version below the current one and the key was in
+     * none of them, so it is a fact about the database and not about how the
+     * sweep happened to go.
      *
-     * @return Pair of (resolved_lookups_map, unresolved_lookups).
+     * If the sweep could not cover everything it needed to, this returns an
+     * error and no lists at all, and the cause is kept rather than flattened:
+     *
+     *   - error_code::version_unreadable — a version file that the catalogue
+     *     names could not be opened or read;
+     *   - error_code::catalog_unreadable — the set of version files could not be
+     *     enumerated, so which files exist is not known.
+     *
+     * They send an operator to different places, which is why they are not the
+     * same code. Nothing is consumed on either path: the pending set is left
+     * exactly as it was, so the call can simply be made again once the storage
+     * fault is dealt with.
+     *
+     * That distinction is the point. A caller that cannot tell "this outpoint
+     * does not exist" from "this outpoint could not be looked up" turns a local
+     * storage fault into a missing input, and rejects a block that may be
+     * perfectly valid.
+     *
+     * @return Pair of (resolved_lookups_map, keys proven absent), or
+     *         error_code::version_unreadable / error_code::catalog_unreadable if
+     *         the sweep could not cover everything it needed to.
      */
     [[nodiscard]]
     result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
@@ -471,10 +496,14 @@ struct reference_db : db_base {
      * full_db::process_pending_lookups() for the full contract: single owner,
      * drains the queue, and must run before process_pending_deletions().
      *
-     * @warning The second element is UNRESOLVED, not absent: a version file that
-     * could not be read lands its keys there too.
+     * The second element is ABSENT, and only that: reached exactly when every
+     * version below the current one was read and the key was in none of them.
+     * A version file that could not be read gives error_code::version_unreadable;
+     * a catalogue that could not be enumerated gives error_code::catalog_unreadable.
+     * Either way there are no lists and nothing is consumed.
      *
-     * @return Pair of (resolved_lookups_map, unresolved_lookups).
+     * @return Pair of (resolved_lookups_map, keys proven absent), or
+     *         error_code::version_unreadable / error_code::catalog_unreadable.
      */
     [[nodiscard]]
     result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
