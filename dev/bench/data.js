@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786372589142,
+  "lastUpdate": 1786378093026,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -13422,6 +13422,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 55.97,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d45e55c8d4fb5458dc5900d305c40141a40def4b",
+          "message": "fix: tell a proven absence from a lookup that could not be made (#110)\n\n* fix: tell a proven absence from a lookup that could not be made\n\nprocess_pending_lookups() returned two lists, and the second one mixed keys that\nexist nowhere with keys nobody managed to look up. A version file that would not\nopen was logged, skipped, and every key still pending came back in that list —\nindistinguishable from a genuine absence.\n\nA consumer decides whether a block is valid by asking whether its inputs exist.\nHanded that list, it reports missing_previous_output and rejects a block that may\nbe perfectly valid, and the cause is a local storage fault it never hears about.\n\nNow the sweep is fail-closed. Every version below the current one is read, or the\ncall returns an error and no lists at all. What survives into the second list was\nlooked for everywhere it could have been, so absence is a fact about the database\nrather than about how the sweep happened to go.\n\nThe cause is carried rather than flattened. A version file that will not open is\nversion_unreadable; a catalogue that cannot be listed is catalog_unreadable,\nwhich already existed and says exactly that. They send an operator to different\nplaces.\n\nNothing is consumed on the error path. The entries the sweep resolved before it\nfailed are kept and put back, so the pending set is left exactly as it was and\nthe call can simply be made again once the storage fault is dealt with. Without\nthat, a retry would have found those keys neither resolved nor pending.\n\nBoth modes, full and reference, get the same treatment: the same catch that\nswallowed the failure, the same unguarded catalogue enumeration.\n\nThe seam that makes this testable is one failpoint on the existing mechanism in\ndetail/durability.hpp, failing the sweep's attempt to open one specific version.\nA specific version and not a blanket switch, because what has to be shown is a\nsweep that reads some files and then cannot read one — the case where a partial\nresult exists and must not be handed back as absence. A blanket failure stops at\nthe first file and never reaches it.\n\nThe deterministic tests are not in this commit. They are written against this\nseam and they have not been run, so they are not here.\n\nRefs #92\n\n* test: pin the sweep's contract with a deterministic unreadable version\n\nEight cases across both modes, each with one outcome. The failure is injected\nthrough the existing failpoint mechanism rather than arranged on disk: a\ncorrupted file produces a test that passes for reasons nobody chose, while\nnaming one version fails exactly that open.\n\nThe fixture rotates container 0 twice and container 1 once, so the sweep has\nseveral previous versions to walk and the failed open lands after entries have\nalready been consumed. That position is not assumed — reverting the restore\nturns the retry red with `deferred_lookups_size() == 1` against an expected 3,\nwhich is the two consumed entries not coming back.\n\nThe retry is what carries the weight. It is not enough that the second sweep\nsucceeds: it has to return both resolvable keys and the one genuine absence,\nbecause that is the only thing that shows the whole pending set was restored and\nnot just the entries the failure never reached.\n\nA second failpoint covers the catalogue, so a version that will not open and a\ncatalogue that cannot be listed cannot be shown to work by the same test. They\ncarry different codes and different tests assert each.\n\nOne existing test changes with the contract. \"a truncated version reached\nthrough the file cache is refused promptly\" required the sweep to succeed and\nhand the witness back in the unresolved list — it was pinning the ambiguity\nitself. Its real subject is the timing, and that is kept: the error still has to\narrive in under five seconds, and version_unreadable is only produced by the\nopen path, so receiving it is itself evidence the cache was reached rather than\nthe call failing early.\n\nVerified against all three negations. Removing the incomplete-sweep marking\nfails 4 cases on false absences. Not restoring the consumed entries fails the\nretries. Returning the wrong code fails the two cause controls and nothing else.\n\nFull suite: 115 cases, 25920790 assertions, green.\n\nRefs #92\n\n* fix: do not publish statistics from a sweep that was rolled back\n\nA failed sweep restores its queue, so the retry does the same work again. The\ncounters were being written as the sweep went, so an abandoned attempt was\ncounted alongside the one that finished: files visited twice, lookups resolved\ntwice, and a processing run that never produced a result. These are what an\noperator reads to decide whether the deferred path is behaving.\n\nThey are now accumulated locally and published only once the sweep is known to\nhave covered everything. Nothing is reset and nothing is rolled back\napproximately: an attempt that did not complete simply never appears.\n\nThe header also promised the wrong thing. It said a version file and an\nunreadable catalogue both give version_unreadable; the code has told them apart\nsince the previous commit, and the two send an operator to different places. The\ncontract now names both codes, in full and in reference.\n\nTwo cases, one per mode: snapshot, fail after a partial resolution, check every\nobservable counter is unchanged, clear the failpoint, retry, and check the\ncompleted sweep counted each lookup exactly once. Both run with statistics\nenabled and disabled — with them off the counters are all zero, which is what\nmakes the unchanged-on-failure half meaningful in that build too.\n\nprocess_pending_deletions() was audited and deliberately left alone. Its second\nlist carries the same ambiguity, but no caller in this repository reads it as\nabsence or as a discharged obligation: basic_usage.cpp prints the count, and\nblockchain_processing.cpp prints it and logs an error when it is not empty.\nUnlike the lookup sweep, the entry comes back with its key and height, so the\nobligation is handed to the caller rather than disguised as a fact. Changing it\nfor symmetry would be changing a contract nothing has been shown to misread.\n\nVerified against four negations. Removing the incomplete-sweep marking fails 6\ncases; not restoring the consumed entries fails 3; the wrong cause code fails\nexactly 2; publishing statistics during the sweep fails exactly 2.\n\nFull suite, statistics on:  117 cases, 25920844 assertions.\nFull suite, statistics off: 112 cases, 25812438 assertions.\n\nRefs #92\n\n* refactor: remove the untyped sweep and tidy two loose ends\n\nThe untyped database_impl::process_pending_lookups() and its\nprocess_deferred_lookups_in_file() helper had no callers: the public entry\npoints go through the typed full_ and reference_ implementations. Dead code\nwould be reason enough, but this block was also the last copy of the contract\nthis branch removed — it logged an unreadable version, carried on, and returned\nthe keys it never resolved beside the ones that are genuinely absent. Left in\nplace it is a route back to the defect, and it kept catching stray edits during\nthis work for exactly that reason.\n\nDeclarations, definitions and every reference are gone; the full and reference\nAPIs are untouched.\n\nThe example in the header dereferenced its result after the error branch, with\nnothing to stop control reaching it. Copied as written that is undefined\nbehaviour, so it now returns before it gets there and says why.\n\nThe failpoint sentinel is declared before the atomic it initialises, so the\nvalue is written once instead of twice.\n\nStatistics-disabled expectations are deliberately unchanged. record_unresolved()\ncompiles to an empty body when UTXOZ_STATISTICS_ENABLED is not defined and\nget_summary() returns a zeroed struct, so the counters stay at zero even though\nthe call sits outside the #ifdef — verified by asserting it before reverting the\nassertion. Wrapping the call sites would be working around a no-op interface\nthat exists precisely so they do not have to.\n\n[unresolved], statistics on : 10 cases, 210 assertions.\n[unresolved], statistics off: 10 cases, 206 assertions.\nFull suite,   statistics on : 117 cases, 25920844 assertions.\nFull suite,   statistics off: 112 cases, 25812438 assertions.\n\nRefs #92",
+          "timestamp": "2026-08-10T18:04:30+02:00",
+          "tree_id": "644fed45cc850088c2ed531e3fed84f063f71c6b",
+          "url": "https://github.com/utxo-z/utxo-z/commit/d45e55c8d4fb5458dc5900d305c40141a40def4b"
+        },
+        "date": 1786378091936,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 285510.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 422291.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 253308.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 279211.28,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 398.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 452.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12699055.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 11875082.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11956780.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12676.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 10493371.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 12802142.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 106581.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 8622.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2227.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3212.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2731.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 57.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.05,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 53.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 53.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 53.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.66,
             "unit": "ops/sec"
           }
         ]
