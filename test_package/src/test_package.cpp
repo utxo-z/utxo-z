@@ -55,7 +55,7 @@ int main() {
         auto const path = root / "utxoz_test_package_full";
         std::filesystem::remove_all(path);
 
-        auto opened = utxoz::full_db::open_for_testing(path.string(), true);
+        auto opened = utxoz::full_db::open_for_testing(path, true);
         if ( ! opened) {
             fmt::println("full_db: open failed");
             return EXIT_FAILURE;
@@ -90,7 +90,7 @@ int main() {
         auto const path = root / "utxoz_test_package_reference";
         std::filesystem::remove_all(path);
 
-        auto opened = utxoz::reference_db::open_for_testing(path.string(), true);
+        auto opened = utxoz::reference_db::open_for_testing(path, true);
         if ( ! opened) {
             fmt::println("reference_db: open failed");
             return EXIT_FAILURE;

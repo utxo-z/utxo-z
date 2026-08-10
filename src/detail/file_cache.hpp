@@ -24,13 +24,14 @@
 #include <fmt/format.h>
 
 #include "durability.hpp"
+#include "path_display.hpp"
 #include "segment_open.hpp"
 #include "utxo_value.hpp"
 
 namespace utxoz::detail {
 
-inline constexpr std::string_view data_file_format = "{}/cont_{}_v{:05}.dat";
-inline constexpr std::string_view reference_data_file_format = "{}/compact_v{:05}.dat";
+inline constexpr std::string_view data_file_format = "cont_{}_v{:05}.dat";
+inline constexpr std::string_view reference_data_file_format = "compact_v{:05}.dat";
 inline constexpr size_t reference_sentinel_index = SIZE_MAX;
 
 /**
@@ -61,8 +62,8 @@ struct file_cache {
 
     using file_key_t = std::pair<size_t, size_t>; // (container_index, version)
 
-    explicit file_cache(std::string const& path, size_t max_size = 1)
-        : base_path_(path), max_cached_files_(max_size) {}
+    explicit file_cache(fs::path path, size_t max_size = 1)
+        : base_path_(std::move(path)), max_cached_files_(max_size) {}
 
     template<size_t Index>
     ret_t<Index> get_or_open_file(size_t container_index, size_t version) {
@@ -93,7 +94,7 @@ struct file_cache {
 
         auto* map = segment->find<utxo_map<container_sizes[Index]>>(map_object_name).first;
         if (!map) {
-            throw std::runtime_error("Map not found in file: " + file_path);
+            throw std::runtime_error("Map not found in file: " + path_display(file_path));
         }
 
         cache_[file_key] = cached_file{
@@ -130,7 +131,7 @@ struct file_cache {
 
         auto* map = segment->find<reference_map_t>(map_object_name).first;
         if (!map) {
-            throw std::runtime_error("Map not found in reference file: " + file_path);
+            throw std::runtime_error("Map not found in reference file: " + path_display(file_path));
         }
 
         cache_[file_key] = cached_file{
@@ -222,11 +223,11 @@ private:
         bool is_pinned = false;
     };
 
-    std::string make_file_path(size_t container_index, size_t version) const {
+    fs::path make_file_path(size_t container_index, size_t version) const {
         if (container_index == reference_sentinel_index) {
-            return fmt::format(reference_data_file_format, base_path_, version);
+            return base_path_ / fmt::format(reference_data_file_format, version);
         }
-        return fmt::format(data_file_format, base_path_, container_index, version);
+        return base_path_ / fmt::format(data_file_format, container_index, version);
     }
 
     void evict_lru() {
@@ -245,7 +246,7 @@ private:
 
     boost::unordered_flat_map<file_key_t, cached_file> cache_;
     boost::unordered_flat_map<file_key_t, size_t> access_frequency_;
-    std::string base_path_;
+    fs::path base_path_;
     size_t max_cached_files_;
     size_t gets_ = 0;
     size_t hits_ = 0;

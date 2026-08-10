@@ -129,18 +129,18 @@ full_db::~full_db() = default;
 full_db::full_db(full_db&&) noexcept = default;
 full_db& full_db::operator=(full_db&&) noexcept = default;
 
-result<full_db> full_db::open(std::string_view path, bool remove_existing) {
+result<full_db> full_db::open(std::filesystem::path path, bool remove_existing) {
     full_db db;
     db.impl_ = std::make_unique<detail::database_impl>();
-    auto r = db.impl_->configure(path, remove_existing, storage_mode::full);
+    auto r = db.impl_->configure(std::move(path), remove_existing, storage_mode::full);
     if (!r) return std::unexpected(r.error());
     return db;
 }
 
-result<full_db> full_db::open_for_testing(std::string_view path, bool remove_existing) {
+result<full_db> full_db::open_for_testing(std::filesystem::path path, bool remove_existing) {
     full_db db;
     db.impl_ = std::make_unique<detail::database_impl>();
-    auto r = db.impl_->configure_for_testing(path, remove_existing, storage_mode::full);
+    auto r = db.impl_->configure_for_testing(std::move(path), remove_existing, storage_mode::full);
     if (!r) return std::unexpected(r.error());
     return db;
 }
@@ -181,18 +181,18 @@ reference_db::~reference_db() = default;
 reference_db::reference_db(reference_db&&) noexcept = default;
 reference_db& reference_db::operator=(reference_db&&) noexcept = default;
 
-result<reference_db> reference_db::open(std::string_view path, bool remove_existing) {
+result<reference_db> reference_db::open(std::filesystem::path path, bool remove_existing) {
     reference_db db;
     db.impl_ = std::make_unique<detail::database_impl>();
-    auto r = db.impl_->configure(path, remove_existing, storage_mode::reference);
+    auto r = db.impl_->configure(std::move(path), remove_existing, storage_mode::reference);
     if (!r) return std::unexpected(r.error());
     return db;
 }
 
-result<reference_db> reference_db::open_for_testing(std::string_view path, bool remove_existing) {
+result<reference_db> reference_db::open_for_testing(std::filesystem::path path, bool remove_existing) {
     reference_db db;
     db.impl_ = std::make_unique<detail::database_impl>();
-    auto r = db.impl_->configure_for_testing(path, remove_existing, storage_mode::reference);
+    auto r = db.impl_->configure_for_testing(std::move(path), remove_existing, storage_mode::reference);
     if (!r) return std::unexpected(r.error());
     return db;
 }

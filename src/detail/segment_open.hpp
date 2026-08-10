@@ -37,6 +37,8 @@
 
 #include <utxoz/types.hpp>
 
+#include "path_display.hpp"
+
 namespace utxoz::detail {
 
 namespace bip = boost::interprocess;
@@ -59,11 +61,11 @@ inline constexpr size_t smallest_configured_file = std::min({
  *         this way needs no new path — it only makes the refusal immediate.
  */
 [[nodiscard]]
-inline std::unique_ptr<bip::managed_mapped_file> open_existing_segment(std::string const& path) {
+inline std::unique_ptr<bip::managed_mapped_file> open_existing_segment(fs::path const& path) {
     std::error_code ec;
     auto const size = fs::file_size(path, ec);
     if (ec) {
-        throw std::runtime_error(fmt::format("{}: cannot be sized", path));
+        throw std::runtime_error(fmt::format("{}: cannot be sized", path_display(path)));
     }
     if (size < smallest_configured_file) {
         // Too small to be a segment this build wrote. Saying so costs one stat;
@@ -71,7 +73,7 @@ inline std::unique_ptr<bip::managed_mapped_file> open_existing_segment(std::stri
         // that does not read as initialised is indistinguishable to it from one
         // another process is still writing.
         throw std::runtime_error(
-            fmt::format("{}: {} bytes is too small to be a version file", path, size));
+            fmt::format("{}: {} bytes is too small to be a version file", path_display(path), size));
     }
     return std::make_unique<bip::managed_mapped_file>(bip::open_only, path.c_str());
 }

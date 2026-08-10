@@ -52,8 +52,8 @@ struct database_impl {
     database_impl& operator=(database_impl&&) = delete;
 
     // Public interface implementation
-    result<> configure(std::string_view path, bool remove_existing, storage_mode mode = storage_mode::full);
-    result<> configure_for_testing(std::string_view path, bool remove_existing, storage_mode mode = storage_mode::full);
+    result<> configure(fs::path path, bool remove_existing, storage_mode mode = storage_mode::full);
+    result<> configure_for_testing(fs::path path, bool remove_existing, storage_mode mode = storage_mode::full);
     void close();
     size_t size() const;
 
@@ -163,10 +163,10 @@ private:
     /// Paths in the store's reserved namespace. Only `.dat` is canonical; the
     /// rest are invisible to discovery, which is what lets a merge be built
     /// without ever being half-visible.
-    std::string data_path(size_t index, size_t version) const;
-    std::string building_path(size_t index, size_t version) const;
-    std::string sidecar_path(size_t index, size_t version) const;
-    std::string metadata_path(size_t index, size_t version) const;
+    fs::path data_path(size_t index, size_t version) const;
+    fs::path building_path(size_t index, size_t version) const;
+    fs::path sidecar_path(size_t index, size_t version) const;
+    fs::path metadata_path(size_t index, size_t version) const;
 
     /// Mandatory phase of open(): finishes or abandons whatever a previous
     /// process left in flight, before any container is opened and therefore
@@ -250,7 +250,7 @@ private:
 
     // Optimal buckets finder
     template<size_t Index>
-    size_t find_optimal_buckets(std::string const& file_path, size_t file_size, size_t initial_buckets);
+    size_t find_optimal_buckets(fs::path const& file_path, size_t file_size, size_t initial_buckets);
 
     // Utilities
     size_t get_index_from_size(size_t size) const;
@@ -258,7 +258,7 @@ private:
     size_t estimate_memory_usage(size_t index) const;
 
     // Internal configuration
-    result<> configure_internal(std::string_view path, bool remove_existing, storage_mode mode);
+    result<> configure_internal(fs::path path, bool remove_existing, storage_mode mode);
 
     // Metadata management
     void update_metadata_on_insert(size_t index, size_t version, raw_outpoint const& key, uint32_t height);
@@ -284,7 +284,7 @@ private:
     result<> reference_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     result<> reference_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
-    size_t find_optimal_buckets_reference(std::string const& file_path, size_t file_size, size_t initial_buckets);
+    size_t find_optimal_buckets_reference(fs::path const& file_path, size_t file_size, size_t initial_buckets);
 
     reference_map_t& reference_map();
     reference_map_t const& reference_map() const;
