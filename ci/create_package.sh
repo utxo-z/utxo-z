@@ -45,12 +45,19 @@ readonly PROFILE="${ROOT}/ci/conan-cpp23"
 # part of the package id: asking for the package with different options asks for
 # a binary nobody built, and the resolve would fail for a reason that has nothing
 # to do with whether the package works.
+#
+# Scoped to `utxoz/*` rather than bare, and the same text as the one in
+# verify_published.sh. Bare options are unambiguous only while the root is the
+# recipe in this directory; the resolve below makes utxoz a requirement instead,
+# and there Conan warns that it cannot tell which package in the graph
+# `-o with_tests=False` is addressed to. Saying which one is meant costs nothing
+# here and removes the warning where it was earned (#113).
 readonly PACKAGE_OPTIONS=(
     -pr:h "${PROFILE}"
     -s build_type=Release
-    -o with_tests=False
-    -o with_examples=False
-    -o with_benchmarks=False
+    -o "utxoz/*:with_tests=False"
+    -o "utxoz/*:with_examples=False"
+    -o "utxoz/*:with_benchmarks=False"
 )
 
 echo "creating utxoz/${VERSION}"
