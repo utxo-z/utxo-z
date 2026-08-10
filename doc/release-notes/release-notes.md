@@ -1,3 +1,37 @@
+# version 0.9.0
+
+## What's Changed
+* docs: write down the threading invariants the library already relies on by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/55
+* feat!: shard search statistics into atomic counters, making find() concurrent by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/56
+* fix!: compaction reports a duplicate key instead of silently dropping one by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/58
+* feat!: split the search counters into probes and historical resolution by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/60
+* fix!: catalogue version files by identity, fail closed when it cannot be read by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/61
+* test: restore directory permissions from a guard in the catalogue test by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/67
+* fix!: publish metadata atomically and refuse a record that cannot be trusted by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/68
+* feat!: make compaction crash-atomic by building a new file and swapping it in by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/70
+* fix: refuse an unusable version file at once instead of waiting five minutes by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/76
+* feat!: claim a database exclusively while an instance holds it by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/77
+* test: run the crash matrix against compact mode as well by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/78
+* feat: add sync(), which puts what has been written on stable storage by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/80
+* refactor: write the merge protocol once instead of once per storage mode by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/81
+* refactor!: name the storage mode reference, not compact by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/82
+* fix: generate config.hpp and version.hpp into the build tree by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/85
+* ci: pin and verify build toolchains by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/86
+* fix: refuse a build version that is not a version by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/90
+* test: keep the reference statistics test honest with counters compiled out by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/91
+* fix: run every step in bash, and check the version the build actually used by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/97
+* fix: pin line endings, so the recipe hashes the same on every platform by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/95
+* fix: publish the version a tag names by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/96
+* feat: exercise the publish path from pull requests, and check what it published by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/98
+* fix: stop the release scripts editing a file that no longer exists by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/101
+* fix: link bcrypt so consumers of the Windows package can link too by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/103
+* fix: wait for the remote to publish before deciding it did not by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/105
+* release: 0.9.0 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/106
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.8.1...v0.9.0
+
+
 # version 0.8.1
 
 ## What's Changed
