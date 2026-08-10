@@ -71,7 +71,16 @@ if ! cmake -S "${CONSUMER_DIR}" -B "${BUILD_DIR}" \
 fi
 
 echo "building ${CONSUMER_DIR}"
-if ! cmake --build "${BUILD_DIR}" --parallel > "${work}/build.log" 2>&1; then
+# --config Release, not just CMAKE_BUILD_TYPE at configure time.
+#
+# On a multi-config generator — which is what CMake picks by default on Windows —
+# CMAKE_BUILD_TYPE is ignored and `cmake --build` with no --config builds Debug.
+# The package installed above has Release binaries only, so CMakeDeps has no data
+# file for the Debug config: the utxoz target comes out with no include
+# directories and the consumer fails on `utxoz/config.hpp`, which reads exactly
+# like a package that ships no headers. It ships them; this was asking for the
+# wrong configuration. Single-config generators ignore the flag.
+if ! cmake --build "${BUILD_DIR}" --config Release --parallel > "${work}/build.log" 2>&1; then
     cat "${work}/build.log" >&2
     echo "FAIL: the consumer does not compile or link against the installed package" >&2
     exit ${EXIT_COMPILE}
