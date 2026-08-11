@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786441926902,
+  "lastUpdate": 1786447494575,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -14395,6 +14395,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.35,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "923fc72752a348f40db6b701c5c3c4c169a56491",
+          "message": "feat!: the caller owns its lookups, and hands them to resolve() (#118)\n\n* feat!: the caller owns its lookups, and hands them to resolve()\n\nBREAKING CHANGE: process_pending_lookups() is replaced by resolve(span).\n\nfind() wrote every miss into a database-wide set and process_pending_lookups()\nemptied all of it, so the answer to a lookup went to whoever swept next rather\nthan to whoever asked. Nothing in the queue recorded who had asked, and nothing\ncould: the requester's identity was discarded at the point of entry.\n\nWith one component doing both, that is invisible. With two it is a time-of-check\nto time-of-use race across two calls that were never atomic with respect to each\nother. A sweeps, B sweeps first and clears the queue, and A gets back a result\nset that does not mention the key it asked about — neither found nor absent,\nsimply missing. The mirror case is worse, because it is confident rather than\nempty: A's sweep returns keys B queued, including, in the second list, absences\nproven on B's behalf. KTH confirmed the race. The fail-closed work in #110 does\nnot cover it — an absence proven correctly and delivered to the wrong caller is\nstill an absence delivered to the wrong caller.\n\nThe documented mitigation was that exactly one component may own the sweep and\nmust route results back. That is not a fix. It rebuilds outside the library the\nownership the library threw away; it contradicts a class contract that invites\nconcurrent find() calls from N threads; the lookups-before-deletions ordering it\ndepends on is a property of the whole process rather than of one batch; and\nnothing can check it, so both the correct and the broken deployment compile and\npass.\n\nSo the queue is gone rather than guarded. resolve() reads the caller's span,\nanswers exactly the requests in it, and keeps nothing. Two components can each\nhold a batch without agreeing which of them is allowed to sweep, and neither can\nreceive or consume the other's requests — not because a rule forbids it, but\nbecause there is no shared container for it to happen in.\n\nfind() searches the active versions and returns error_code::not_resolved, which\nis what it means: not answerable here. It is no longer spelled not_found, which\ninvited exactly the reading that made it dangerous, and it registers nothing.\n\nThe failure paths get simpler rather than more careful. A resolution that cannot\nread a version still returns version_unreadable or catalog_unreadable and no\nlists at all, but there is no rollback to get right any more: nothing was\nconsumed because nothing was taken, so the caller retries the same vector.\n\nDuplicate keys collapse, so a batch naming one outpoint twice asks one question\nand gets one answer. The working set is indices into the caller's span, not\ncopies of it — measured at ~6 ns per request, flat in batch size, against 35-163\nns for the resolution itself.\n\nRemoved: db_base::deferred_lookups_size(), full_db/reference_db\n::process_pending_lookups(), deferred_lookup_entry (now lookup_request),\nstd::hash<deferred_lookup_entry>, container_stats::deferred_lookups (which\ncounted a queue and was never written), and the internal deferred_lookups_,\nadd_to_deferred_lookups(), full/reference_process_pending_lookups().\n\nDeferred deletions are untouched here. erase()/process_pending_deletions() keep\nthe same global queue and the same single-owner caveat; that is the same defect\nin the write path and belongs in its own change.\n\ntests/test_lookup_ownership.cpp pins the properties that the argument is what\nbuys: a resolution returns only its own batch however many finds ran first, two\nbatches with disjoint keys do not leak into each other, two threads each owning\na batch neither steal nor lose requests, and a failure leaves both batches\nintact. Both storage modes, case for case.\n\n* fix: keep lookup statistics out of the deletion counters\n\ndeferred_stats belongs to deletions, and a resolution was writing into it:\nprocessing_runs, successfully_processed, failed_to_delete, total_processing_time\nand a per-depth histogram in lookups_by_depth. An operator reading\nfailed_to_delete saw deletions that failed plus outpoints that were looked up\nand are legitimately not stored — unrelated events summed into one number — and\nsuccessfully_processed moved for both paths too. Neither described anything.\n\nThe resolvers now write resolution_stats_ and nothing else. That is enforced\nrather than agreed: resolve() is const and deferred_stats_ is no longer mutable,\nso a write across the boundary does not compile. Checked by putting one back —\n\"increment of member 'processing_runs' in read-only object\", both resolvers.\n\nlookups_by_depth goes with it. Nothing else ever wrote it, and the resolution\ndepth story is already told by resolution_summary::avg_depth.\n\nresolution_summary::unresolved becomes absent. It is published only by a\nresolution that covered every version it had to, where every remaining key was\nlooked for everywhere it could have been — so it always counted proven absences\nwhile its name and its doc comment said \"could not settle\". CodeRabbit read the\nname and proposed moving the call to the failed branch; the name was the thing\nthat was wrong. Moving it would have published statistics from an attempt that\nwas abandoned, which is what the enclosing design exists to prevent. Renamed\nthrough the field, the recorder, the docs and the tests.\n\nThe header example is a complete function now, so its returns agree and it\ncompiles as written, and it shows results being matched back by key.\n\nDuplicate handling is stated where the types are defined: the batch is\ndeduplicated by key keeping the first occurrence, found.size() + absent.size()\nis the number of distinct keys rather than requests.size(), and the lists are\nnot positional. A caller that sent one outpoint at two heights gets one entry\nback, carrying the first height.\n\nAlso from review: direct includes for what the ownership test uses rather than\nrelying on database.hpp to pull them in, [[nodiscard]] on both impl resolvers,\nsize_t for the working-set indices instead of uint32_t, and the queue, consume\nand restore wording removed from test_unresolved_vs_absent.cpp — resolve()\nborrows the batch, so there is nothing to consume and nothing to give back.\n\nThe new controls are discriminating rather than incidental: a resolution that\nfinds one key and proves one absent must move only the resolution family; a\ndeletion must move only its own; and an incomplete resolution must move neither.\nPutting the absent count back on the failed path fails five of them.\n\n* test: build the deletion case its own database, and merge a stray doc block\n\nThe deletion counterpart erased one of the shared fixture's filler keys. The\nfile's own header says nothing here mutates the database, and the cases above\ndepend on that: a fixture that one case writes to makes their independence a\nproperty of the order Catch2 happens to run them in.\n\nSo the fill loop comes out of full_fixture() as fill_until_rotations(), used\nboth to build the shared fixture and to give this case a database of its own.\nOne rotation is enough here and costs half of what the shared two do. The\nassertions are unchanged, and both halves of the premise are still pinned: the\nerase returns 0, so it really was deferred, and the sweep reports one applied,\nso it really did the work whose counters the case then reads.\n\nThe header claim is corrected rather than left to be read charitably. It now\nsays the shared fixtures are untouched and names the one case that writes.\n\nAlso merges a standalone comment on deferred_stats into the Doxygen block above\nit, which had ended up with two adjacent comments after the statistics split.",
+          "timestamp": "2026-08-11T13:21:37+02:00",
+          "tree_id": "f022085a66545bc8c214cb65fb5be7f52dbaf490",
+          "url": "https://github.com/utxo-z/utxo-z/commit/923fc72752a348f40db6b701c5c3c4c169a56491"
+        },
+        "date": 1786447494236,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 267444.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 274843.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 263153.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 263047.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 409.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 439.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12146097.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 25913982.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11496046.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12099.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 12292401.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 14418406.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 130462.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 13248.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2413.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3169.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2759.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.67,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 56.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.41,
             "unit": "ops/sec"
           }
         ]
