@@ -781,6 +781,7 @@ jobs:
           ./ci/test_one_revision.sh
           ./ci/test_await_published.sh
           ./ci/test_verify_published.sh
+          ./ci/test_verify_consumer.sh
 
       - name: 🧪 Verify toolchain
         env:
@@ -845,7 +846,16 @@ jobs:
             -g CMakeDeps -g CMakeToolchain -of "$install_dir"
 
           echo "== the consumer as it ships must work =="
-          ./ci/verify_consumer.sh "$install_dir" test_package
+          # Captured rather than just run: the success line is what says the
+          # search identified one executable and ran that one. On Windows the
+          # name carries a .exe and the filesystem reports ordinary files as
+          # executable, so "it exited 0" is not by itself evidence that the thing
+          # it ran was the consumer.
+          ./ci/verify_consumer.sh "$install_dir" test_package | tee consumer.log
+          if ! grep -q "ok: the consumer configures, builds and runs" consumer.log; then
+            echo "the consumer check passed without reporting a run" >&2
+            exit 1
+          fi
 
           echo
           echo "== and the same consumer without utxoz must not =="

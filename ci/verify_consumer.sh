@@ -86,21 +86,52 @@ if ! cmake --build "${BUILD_DIR}" --config Release --parallel > "${work}/build.l
     exit ${EXIT_COMPILE}
 fi
 
-# `find | head` reports head's status, so a find that failed — an unreadable
-# directory, a bad predicate — would look exactly like "no executable was built".
-# The results are collected first and the status is checked on its own.
-candidates=()
-while IFS= read -r -d '' candidate; do
-    candidates+=("${candidate}")
-done < <(find "${BUILD_DIR}" -name 'test_package*' -type f -perm -u+x -print0; \
-         printf '%d' $? > "${work}/find-status")
-find_status="$(cat "${work}/find-status")"
+# A search that failed and a search that found nothing are different faults, and
+# only one of them is the package's. So the results go to a file, the status is
+# taken from `find` itself, and the two are read separately.
+#
+# Not a process substitution. The subshell inherits `set -e`, so a `find` that
+# exits non-zero — an unreadable directory, a bad predicate — kills the subshell
+# at that command and the status is never written. Reading the missing file then
+# fails, `set -e` exits 1, and the caller maps 1 to "does not configure": the
+# exact conflation this block exists to prevent, reintroduced by the machinery
+# meant to prevent it. Redirecting to a file keeps `find` in this shell, where
+# `|| find_status=$?` is what stops errexit rather than something that has to
+# survive it.
+#
+# The name is exact. `test_package*` also matches what the build leaves beside
+# the executable — `test_package.cpp.o`, `test_package.dir`, import libraries,
+# PDBs — and on a filesystem that reports every file as executable, which is what
+# Git Bash on Windows does, one of those is picked and run instead. The CMake
+# target is `test_package`; the only platform variation is the `.exe` suffix.
+find_status=0
+find "${BUILD_DIR}" \
+     \( -name 'test_package' -o -name 'test_package.exe' \) \
+     -type f -perm -u+x -print0 > "${work}/candidates" 2>"${work}/find-errors" \
+    || find_status=$?
+
 if (( find_status != 0 )); then
+    cat "${work}/find-errors" >&2
     echo "FAIL: cannot search the consumer build tree (find exited ${find_status})" >&2
     exit ${EXIT_NO_EXECUTABLE}
 fi
+
+candidates=()
+while IFS= read -r -d '' candidate; do
+    candidates+=("${candidate}")
+done < "${work}/candidates"
+
 if (( ${#candidates[@]} == 0 )); then
     echo "FAIL: the consumer built but produced no executable" >&2
+    exit ${EXIT_NO_EXECUTABLE}
+fi
+
+# More than one is not a worse version of one. A build tree holding two things
+# called `test_package` means the search is not identifying what it thinks it is,
+# and picking the first would hide that behind a pass.
+if (( ${#candidates[@]} > 1 )); then
+    echo "FAIL: the consumer build tree holds ${#candidates[@]} executables named test_package:" >&2
+    printf '  %s\n' "${candidates[@]}" >&2
     exit ${EXIT_NO_EXECUTABLE}
 fi
 
