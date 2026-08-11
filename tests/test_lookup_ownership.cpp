@@ -102,6 +102,11 @@ struct corpus {
     std::array<utxoz::raw_outpoint, group_size> a_absent{};
     std::array<utxoz::raw_outpoint, group_size> b_absent{};
 
+    /// Inserted after the fill loop, so it is in the ACTIVE version and find()
+    /// can answer it without touching a file. The find-vs-resolve cases need a
+    /// key that exercises find()'s hit path, not only its miss path.
+    utxoz::raw_outpoint active_witness{};
+
     static corpus make() {
         corpus c;
         for (size_t i = 0; i < group_size; ++i) {
@@ -110,6 +115,7 @@ struct corpus {
             c.a_absent[i] = outpoint_of(900'000'000ULL + i, 3);
             c.b_absent[i] = outpoint_of(950'000'000ULL + i, 4);
         }
+        c.active_witness = outpoint_of(3'000, 0);
         return c;
     }
 };
@@ -183,6 +189,9 @@ scoped_path const& full_fixture() {
         }
 
         fill_until_rotations(db, 2);
+
+        // Last, so it is in the active version.
+        REQUIRE(db.insert(c.active_witness, utxoz::output_data_span{value_of(33, 0xC3)}, 9'999).value());
 
         db.close();
         return p;
@@ -571,6 +580,8 @@ scoped_path const& reference_fixture() {
         }
         REQUIRE(db.get_statistics().rotations_per_container[0] >= 2);
 
+        REQUIRE(db.insert(c.active_witness, 777, 888, 9'999).value());
+
         db.close();
         return p;
     }();
@@ -884,6 +895,265 @@ TEST_CASE("reference: a resolution moves only the resolution counters",
     CHECK(after.deferred.successfully_processed == before.deferred.successfully_processed);
     CHECK(after.deferred.failed_to_delete == before.deferred.failed_to_delete);
     CHECK(after.deferred.total_processing_time == before.deferred.total_processing_time);
+
+    db.close();
+}
+
+// =============================================================================
+// Concurrency: resolve() may be called from two threads at once
+// =============================================================================
+
+/**
+ * Two owners, two threads, and nothing arranging that they do not overlap.
+ *
+ * This is the case the mutex in database_impl exists for, and the one the
+ * "[concurrency]" cases above cannot make: those hold a lock of their own, so
+ * they prove that batches stay separate and say nothing about whether the call
+ * is safe to enter twice at once. Before #120 this crashed — 90 ThreadSanitizer
+ * races in file_cache::get_or_open_file and exit 139 — because the cache hands
+ * out a reference into a mapping it destroys on eviction.
+ *
+ * Meant to be run under ThreadSanitizer as well as plain. The barrier is inside
+ * the round loop so the two threads enter resolve() together every time rather
+ * than drifting apart after the first one.
+ */
+TEST_CASE("full: resolve() may be called concurrently, with no lock of the caller's",
+          "[ownership][full][concurrency][unguarded]") {
+    failpoint_guard guard;
+    auto db = open_full();
+    auto const& c = keys();
+
+    auto const batch_a = batch_of(c.a_stored, 100'000);
+    auto const batch_b = batch_of(c.b_stored, 100'000);
+
+    constexpr int rounds = 40;
+    std::barrier sync(2);
+    std::atomic<int> mismatches{0};
+    std::atomic<int> failures{0};
+
+    auto worker = [&](std::vector<lookup_request> const& mine,
+                      std::array<utxoz::raw_outpoint, corpus::group_size> const& expected,
+                      std::array<utxoz::raw_outpoint, corpus::group_size> const& foreign) {
+        for (int round = 0; round < rounds; ++round) {
+            sync.arrive_and_wait();
+            auto const got = db.resolve(mine);   // no lock: that is the case
+            if ( ! got) { ++failures; continue; }
+            if (got->found.size() != corpus::group_size) ++mismatches;
+            if ( ! got->absent.empty()) ++mismatches;
+            for (auto const& k : expected) {
+                if ( ! got->found.contains(k)) ++mismatches;
+            }
+            for (auto const& k : foreign) {
+                if (got->found.contains(k)) ++mismatches;
+            }
+        }
+    };
+
+    std::thread ta(worker, std::cref(batch_a), std::cref(c.a_stored), std::cref(c.b_stored));
+    std::thread tb(worker, std::cref(batch_b), std::cref(c.b_stored), std::cref(c.a_stored));
+    ta.join();
+    tb.join();
+
+    CHECK(failures.load() == 0);
+    CHECK(mismatches.load() == 0);
+    CHECK(batch_a.size() == corpus::group_size);
+    CHECK(batch_b.size() == corpus::group_size);
+
+    db.close();
+}
+
+TEST_CASE("reference: resolve() may be called concurrently, with no lock of the caller's",
+          "[ownership][reference][concurrency][unguarded]") {
+    failpoint_guard guard;
+    auto db = open_reference();
+    auto const& c = keys();
+
+    auto const batch_a = batch_of(c.a_stored, 100'000);
+    auto const batch_b = batch_of(c.b_stored, 100'000);
+
+    constexpr int rounds = 40;
+    std::barrier sync(2);
+    std::atomic<int> mismatches{0};
+    std::atomic<int> failures{0};
+
+    auto worker = [&](std::vector<lookup_request> const& mine,
+                      std::array<utxoz::raw_outpoint, corpus::group_size> const& expected,
+                      std::array<utxoz::raw_outpoint, corpus::group_size> const& foreign) {
+        for (int round = 0; round < rounds; ++round) {
+            sync.arrive_and_wait();
+            auto const got = db.resolve(mine);
+            if ( ! got) { ++failures; continue; }
+            if (got->found.size() != corpus::group_size) ++mismatches;
+            for (auto const& k : expected) if ( ! got->found.contains(k)) ++mismatches;
+            for (auto const& k : foreign) if (got->found.contains(k)) ++mismatches;
+        }
+    };
+
+    std::thread ta(worker, std::cref(batch_a), std::cref(c.a_stored), std::cref(c.b_stored));
+    std::thread tb(worker, std::cref(batch_b), std::cref(c.b_stored), std::cref(c.a_stored));
+    ta.join();
+    tb.join();
+
+    CHECK(failures.load() == 0);
+    CHECK(mismatches.load() == 0);
+
+    db.close();
+}
+
+/**
+ * The positive control the concurrent cases are measured against.
+ *
+ * The same two batches, the same number of resolutions, on one thread. If this
+ * ever disagrees with the concurrent cases above, the disagreement is the
+ * concurrency and not the batches — which is the only way to read those results
+ * without wondering whether the fixture itself is flaky.
+ */
+TEST_CASE("full: the same batches resolved sequentially agree with the concurrent run",
+          "[ownership][full][concurrency]") {
+    failpoint_guard guard;
+    auto db = open_full();
+    auto const& c = keys();
+
+    auto const batch_a = batch_of(c.a_stored, 100'000);
+    auto const batch_b = batch_of(c.b_stored, 100'000);
+
+    constexpr int rounds = 40;
+    for (int round = 0; round < rounds; ++round) {
+        auto const a = db.resolve(batch_a);
+        auto const b = db.resolve(batch_b);
+        REQUIRE(a.has_value());
+        REQUIRE(b.has_value());
+        REQUIRE(a->found.size() == corpus::group_size);
+        REQUIRE(b->found.size() == corpus::group_size);
+        REQUIRE(a->absent.empty());
+        REQUIRE(b->absent.empty());
+        for (size_t i = 0; i < corpus::group_size; ++i) {
+            REQUIRE(a->found.contains(c.a_stored[i]));
+            REQUIRE_FALSE(a->found.contains(c.b_stored[i]));
+            REQUIRE(b->found.contains(c.b_stored[i]));
+            REQUIRE_FALSE(b->found.contains(c.a_stored[i]));
+        }
+    }
+
+    db.close();
+}
+
+/**
+ * The client's real shape: one thread reading, another resolving.
+ *
+ * resolve_mutex_ serialises resolutions against each other. It does nothing
+ * about find(), and the contract this replaces forbade exactly this pairing —
+ * "concurrent find() calls are permitted strictly while no ... sweep or cache
+ * operation can run". KTH has a lock-free path that calls find(), and it cannot
+ * be held off while another component resolves, so whether these two may
+ * overlap has to be demonstrated rather than reasoned about.
+ *
+ * The reader exercises both of find()'s paths: a key in the active version,
+ * which it must answer with the stored value every single time, and keys below
+ * it, which must always come back not_resolved. The resolver is given a batch
+ * spanning both size classes so it opens and evicts repeatedly — the cache holds
+ * one file by default, so eviction is not an edge case here, it is every round.
+ *
+ * Run under ThreadSanitizer. Nothing in this case takes a lock.
+ */
+TEST_CASE("full: find() and resolve() may run at the same time",
+          "[ownership][full][concurrency][unguarded]") {
+    failpoint_guard guard;
+    auto db = open_full();
+    auto const& c = keys();
+
+    // Establish, single-threaded, what the reader must keep seeing.
+    auto const baseline = db.find(c.active_witness, 100'000);
+    REQUIRE(baseline.has_value());
+    auto const expected_value = baseline->data;
+
+    auto const batch = batch_of(c.a_stored, 100'000);
+
+    constexpr int rounds = 200;
+    std::barrier sync(2);
+    std::atomic<int> reader_wrong{0};
+    std::atomic<int> resolver_wrong{0};
+    std::atomic<bool> stop{false};
+
+    auto const& const_db = db;
+    std::thread reader([&] {
+        for (int round = 0; round < rounds; ++round) {
+            sync.arrive_and_wait();
+            // The hit path: an active-version key, answered without any file.
+            auto const hit = const_db.find(c.active_witness, 100'000);
+            if ( ! hit || hit->data != expected_value) ++reader_wrong;
+            // The miss path: keys that live below the active version, which is
+            // where the resolver is working.
+            for (auto const& k : c.a_stored) {
+                auto const miss = const_db.find(k, 100'000);
+                if (miss || miss.error() != utxoz::error_code::not_resolved) ++reader_wrong;
+            }
+        }
+        stop = true;
+    });
+
+    std::thread resolver([&] {
+        for (int round = 0; round < rounds; ++round) {
+            sync.arrive_and_wait();
+            auto const got = db.resolve(batch);
+            if ( ! got || got->found.size() != corpus::group_size) ++resolver_wrong;
+        }
+    });
+
+    reader.join();
+    resolver.join();
+
+    CHECK(reader_wrong.load() == 0);
+    CHECK(resolver_wrong.load() == 0);
+    CHECK(stop.load());
+
+    db.close();
+}
+
+TEST_CASE("reference: find() and resolve() may run at the same time",
+          "[ownership][reference][concurrency][unguarded]") {
+    failpoint_guard guard;
+    auto db = open_reference();
+    auto const& c = keys();
+
+    auto const baseline = db.find(c.active_witness, 100'000);
+    REQUIRE(baseline.has_value());
+    CHECK(baseline->file_number == 777u);
+    CHECK(baseline->offset == 888u);
+
+    auto const batch = batch_of(c.a_stored, 100'000);
+
+    constexpr int rounds = 200;
+    std::barrier sync(2);
+    std::atomic<int> reader_wrong{0};
+    std::atomic<int> resolver_wrong{0};
+
+    auto const& const_db = db;
+    std::thread reader([&] {
+        for (int round = 0; round < rounds; ++round) {
+            sync.arrive_and_wait();
+            auto const hit = const_db.find(c.active_witness, 100'000);
+            if ( ! hit || hit->file_number != 777u || hit->offset != 888u) ++reader_wrong;
+            for (auto const& k : c.a_stored) {
+                auto const miss = const_db.find(k, 100'000);
+                if (miss || miss.error() != utxoz::error_code::not_resolved) ++reader_wrong;
+            }
+        }
+    });
+
+    std::thread resolver([&] {
+        for (int round = 0; round < rounds; ++round) {
+            sync.arrive_and_wait();
+            auto const got = db.resolve(batch);
+            if ( ! got || got->found.size() != corpus::group_size) ++resolver_wrong;
+        }
+    });
+
+    reader.join();
+    resolver.join();
+
+    CHECK(reader_wrong.load() == 0);
+    CHECK(resolver_wrong.load() == 0);
 
     db.close();
 }
