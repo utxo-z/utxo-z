@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786380278578,
+  "lastUpdate": 1786438804939,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -14117,6 +14117,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.5,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a127997d9417ffaa9d206b4a1bff1e2bee8628c4",
+          "message": "fix: carry the database path to the filesystem in its native form (#115)\n\n* fix: carry the database path to the filesystem in its native form\n\nopen() and open_for_testing() took std::string_view. On POSIX that was exact —\na path is bytes and path::string() hands those bytes back — but on Windows a\nstd::filesystem::path holds wchar_t, and path::string() converts through the\nactive code page. A directory named outside that page came back replaced, or\nthe conversion threw, and the user saw a path that did not exist rather than an\nencoding error. Knuth passes path.string() today because the API left it nothing\nbetter to pass (#109).\n\nThe parameter is now std::filesystem::path, taken by value. A caller holding a\npath passes the path:\n\n    db.open(dir.string());   // before\n    db.open(dir);            // after\n\nThere is one parameter type rather than an overload set, and that is the whole\ndesign. A std::string_view overload beside a std::filesystem::path one makes\nopen(\"literal\") ambiguous — const char[N] reaches both by a user-defined\nconversion of equal rank — so adding an overload would have broken the callers\nthis is trying not to break. A single path parameter accepts every form that\ncompiled before: literals, const char*, std::string and std::string_view all\nconvert implicitly. The test file asserts each of those, unevaluated, and pins\nthe exact signature, so a revert or an added overload fails to compile on every\nplatform rather than only where it would misbehave.\n\nChanging the signature alone would have fixed nothing. The path was narrowed\nagain inside: twenty-three sites built file names with\nfmt::format(\"{}/cont_{}...\", db_path_.string(), ...), and handed the resulting\nnarrow string to Boost.Interprocess. Names are now composed as db_path_ / an\nASCII filename, so only the filename is ever formatted and the directory is\nnever converted. Boost.Interprocess has const wchar_t* overloads under\nBOOST_WINDOWS, so path::c_str() — wchar_t const* on Windows, char const* on\nPOSIX — reaches it natively on both. file_cache holds an fs::path, and\nopen_existing_segment takes one.\n\nDiagnostics go through path_display(), which renders UTF-8 via u8string()\ninstead of string(). This is not tidiness: string() throws when a component will\nnot fit the code page, so the line meant to explain a failure would have thrown\nfrom inside the handler for it and lost the original error. Four pre-existing\n.string() calls in config-file error paths are converted for that reason.\n\nOne bug this found in itself: the file cache was constructed from the configure\nparameter after that parameter had been moved from. fs::path converts implicitly\nto its native string type, so it compiled and produced an empty base path, and\nevery historical version file was looked for in the working directory. Fourteen\nexisting tests caught it.\n\ntests/test_path_encoding.cpp opens, writes, closes and reopens a database under\na directory named with U+00F1, U+0434 and U+65E5, in both storage modes, and\nchecks the files landed in that directory rather than somewhere a conversion put\nthem. The name is built from universal character names inside a u8 literal, not\nfrom raw bytes, so a compiler invoked without /utf-8 exercises the same name as\none invoked with it — the alternative would have been the same class of bug as\nthe one under test.\n\nThe case that reports the old conversion says which of two things it observed\nrather than claiming a proof it does not have: on Windows outside the code page\nit records that path::string() threw or came back different, and that the\nnarrowed name does not name the database that was just created; on POSIX, and on\nWindows with a UTF-8 code page, it warns that the run proved no-regression only.\nPOSIX never had this bug and no test here can pretend it did.\n\n* fix: stop passing paths through parameters only POSIX can convert them to\n\nThe Windows job would not compile. Three helpers still took std::string const&\nand were being handed the fs::path the new *_path() accessors return —\nremove_if_present(), recover_one() and the retire lambda in the compaction path.\n\nOn POSIX that compiles silently: fs::path::string_type is std::string, so\noperator string_type() converts implicitly and exactly. On Windows string_type\nis std::wstring, there is no implicit conversion to std::string, and the call is\nill-formed. A Linux build could not have caught it, and a Linux build is what it\ngot. They take fs::path const& now, which also removes the last narrowing those\nthree call sites were performing on POSIX.\n\nenumerate_versions() had the same conversion in a place that fails at run time\nrather than at compile time: it narrowed every directory entry with\nfilename().string() before matching it. The names it recognises are ASCII, but\nthe directory it reads may hold anything, and string() throws for a name the\ncode page cannot spell. Thrown from there it would leave a fail-closed,\nresult-typed enumeration by exception — over a file it was about to ignore. It\nmatches on path_display() now; the prefixes and suffixes are ASCII, so comparing\nUTF-8 answers the same question.\n\nNo .string() remains on a filesystem path anywhere in src/.",
+          "timestamp": "2026-08-11T10:55:57+02:00",
+          "tree_id": "0e8ff414224d9cdf743beea9f4f78d80e19536cc",
+          "url": "https://github.com/utxo-z/utxo-z/commit/a127997d9417ffaa9d206b4a1bff1e2bee8628c4"
+        },
+        "date": 1786438804626,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 157030.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 260271.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 241615.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 276115.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 345.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 387.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11947432.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 11585492.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11327614.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 10763.72,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 7911582.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 13438388.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 90321.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 7664.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2009.96,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 2721.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2904.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 55.4,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 55.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 55.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 54.54,
             "unit": "ops/sec"
           }
         ]
