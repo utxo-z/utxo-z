@@ -116,9 +116,9 @@ void resolution_stats::record_resolved(uint32_t depth) noexcept {
     counters_.add(f_depth_total, depth);
 }
 
-void resolution_stats::record_unresolved(size_t count) noexcept {
+void resolution_stats::record_absent(size_t count) noexcept {
     if (count == 0) return;
-    counters_.add(f_unresolved, uint64_t(count));
+    counters_.add(f_absent, uint64_t(count));
 }
 
 void resolution_stats::record_file_visited(bool cache_hit) noexcept {
@@ -132,14 +132,14 @@ void resolution_stats::reset() noexcept {
 
 resolution_summary resolution_stats::get_summary() const noexcept {
     uint64_t const resolved = counters_.sum(f_resolved);
-    uint64_t const unresolved = counters_.sum(f_unresolved);
+    uint64_t const absent = counters_.sum(f_absent);
     uint64_t const depth_total = counters_.sum(f_depth_total);
     uint64_t const files = counters_.sum(f_files);
     uint64_t const cache_hits = counters_.sum(f_cache_hits);
 
     resolution_summary summary;
     summary.resolved = size_t(resolved);
-    summary.unresolved = size_t(unresolved);
+    summary.absent = size_t(absent);
     summary.files_visited = size_t(files);
     summary.cache_hits = size_t(std::min(cache_hits, files));
 

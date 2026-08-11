@@ -423,7 +423,7 @@ TEST_CASE("a partial retirement latches the instance until it is reopened",
         require_latched(db.find(expected.front(), 700));
         require_latched(db.erase(expected.front(), 700));
         require_latched(db.process_pending_deletions());
-        require_latched(db.process_pending_lookups());
+        require_latched(db.resolve(std::vector<utxoz::lookup_request>{{expected.front(), 700}}));
         require_latched(db.compact_all());
         require_latched(db.for_each_key([](utxoz::raw_outpoint const&) {}));
 
@@ -712,7 +712,7 @@ TEST_CASE("a latched reference instance refuses its own operations too",
     require_latched(db.insert(make_key(9'300'000), 1, 2, 700));
     require_latched(db.find(witness, 700));
     require_latched(db.erase(witness, 700));
-    require_latched(db.process_pending_lookups());
+    require_latched(db.resolve(std::vector<utxoz::lookup_request>{{witness, 700}}));
     require_latched(db.process_pending_deletions());
     require_latched(db.compact_all());
     require_latched(db.for_each_key([](utxoz::raw_outpoint const&) {}));
@@ -1619,12 +1619,13 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         REQUIRE(opened);
         auto db = std::move(*opened);
 
-        // Misses the active map and defers, which is what sends the sweep
-        // through the cache.
+        // Misses the active map, which is what sends the resolution through the
+        // cache.
         CHECK_FALSE(db.find(witness, 900));
+        std::vector<utxoz::lookup_request> const batch{{witness, 900}};
 
         auto const start = std::chrono::steady_clock::now();
-        auto const resolved = db.process_pending_lookups();
+        auto const resolved = db.resolve(batch);
         auto const elapsed = std::chrono::steady_clock::now() - start;
 
         // Semantics before timing. A sweep that returned an error immediately —
@@ -1641,8 +1642,9 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         REQUIRE_FALSE(resolved);
         CHECK(resolved.error() == utxoz::error_code::version_unreadable);
 
-        // Nothing was consumed, so the key is still queued rather than lost.
-        CHECK(db.deferred_lookups_size() == 1);
+        // Nothing was consumed: the batch is the caller's and comes back intact,
+        // so the same vector can simply be retried.
+        CHECK(batch.size() == 1);
 
         auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
         INFO("the sweep took " << millis << " ms");
@@ -1691,16 +1693,17 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         auto db = std::move(*opened);
 
         CHECK_FALSE(db.find(witness, 900));
+        std::vector<utxoz::lookup_request> const batch{{witness, 900}};
 
         auto const start = std::chrono::steady_clock::now();
-        auto const resolved = db.process_pending_lookups();
+        auto const resolved = db.resolve(batch);
         auto const elapsed = std::chrono::steady_clock::now() - start;
 
         // See above: the sweep has to have reached that request, not merely
         // returned quickly. version_unreadable comes only from the open path.
         REQUIRE_FALSE(resolved);
         CHECK(resolved.error() == utxoz::error_code::version_unreadable);
-        CHECK(db.deferred_lookups_size() == 1);
+        CHECK(batch.size() == 1);
 
         auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
         INFO("the sweep took " << millis << " ms");

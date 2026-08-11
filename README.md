@@ -127,25 +127,34 @@ int main() {
 
 Containers are **generational**: each one keeps writing to its latest version file and rotates to a new one when that file fills up. Only the latest version is memory-mapped.
 
-`find()` and `erase()` work on that mapped version (`erase()` also checks the cached files). Anything left behind in a previous version is *queued* rather than answered, so their immediate result is **not authoritative**:
+`find()` and `erase()` work on that mapped version (`erase()` also checks the cached files). Anything left behind in a previous version is not answered there, so their immediate result is **not authoritative**:
 
-- `find()` returning `not_found` means "not in the mapped version — queued as a pending lookup".
-- `erase()` returning `0` means "not in the mapped version — queued as a pending deletion".
+- `find()` returning `not_resolved` means "not in the active versions, and nothing else was consulted". It is not absence, and nothing was recorded: **you keep the request**.
+- `erase()` returning `0` means "not in the mapped version — queued as a pending deletion". Deletions still use an internal queue.
 
-The definitive answer comes from the batch functions, which sweep the cached files and every previous version:
+The definitive answer for a lookup comes from `resolve()`, which walks the cached files and every previous version for exactly the batch you hand it:
 
 ```cpp
-// Phase 1: issue the reads for the block/batch
+// Phase 1: issue the reads for the block/batch, keeping what did not resolve.
+std::vector<utxoz::lookup_request> pending;
 for (auto const& outpoint : block_inputs) {
     if (auto r = db.find(outpoint, height)) {
         use(*r);                 // resolved inline
+        continue;
     }
-    // not_found here means "queued" — do NOT conclude the UTXO is missing yet
+    // not_resolved — do NOT conclude the UTXO is missing yet. The database did
+    // not remember this key; the line below is what remembers it.
+    pending.emplace_back(outpoint, height);
 }
 
-// Phase 2: resolve the queue. `found` answers the deferred lookups.
-// `unresolved` is NOT proof of absence — see the warning below.
-auto [found, unresolved] = db.process_pending_lookups();
+// Phase 2: resolve your batch. `found` answers it; `absent` is proven absence.
+auto resolved = db.resolve(pending);
+if ( ! resolved) {
+    // Could not read something it needed. `pending` is untouched — retry it
+    // later and treat nothing as missing in the meantime.
+    return;
+}
+auto& [found, absent] = *resolved;
 
 // Same shape for deletions
 for (auto const& outpoint : block_inputs) {
@@ -156,34 +165,38 @@ auto [deleted, unresolved_deletions] = db.process_pending_deletions();
 
 Rules to follow:
 
-- **The second element is unresolved, not absent.** A version file that cannot be read is logged, skipped, and its keys land in that same list, indistinguishable from keys that exist nowhere. Absence is only established when the sweep managed to read every version — which today you can tell apart only from the log. Do not turn that list into "invalid block" without checking.
-- **Call `process_pending_lookups()` before `process_pending_deletions()`.** Deferred deletions remove entries from the very files the pending lookups still need to read, so the reverse order loses the values of UTXOs spent in that same batch.
-- **Both calls drain their queue, and the queue is global.** They report everything once — including keys queued by a different caller — so exactly one component may own the sweep, and it has to route results back to whoever asked. Whatever you do not read from the returned map is gone.
+- **`absent` means absent.** A request reaches it only when every version below the current one was read and the key was in none of them. If something could not be read, `resolve()` returns `version_unreadable` or `catalog_unreadable` and **no lists at all** — never a partial answer. So `absent` can be turned into "invalid block"; an error cannot.
+- **The batch is yours.** `resolve()` borrows the span and keeps nothing, so two components can each hold their own batch and neither can receive or consume the other's requests. Retry after an error with the same vector: nothing was consumed, so there is nothing to rebuild.
+- **Duplicate keys collapse.** A batch naming one outpoint twice asks one question and gets one answer, in exactly one of the two lists.
+- **Call `resolve()` before `process_pending_deletions()`.** Deferred deletions remove entries from the very files a resolution still needs to read, so the reverse order loses the values of UTXOs spent in that same batch.
+- **`process_pending_deletions()` still drains a global queue.** It reports everything once — including keys queued by a different caller — so exactly one component may own *that* call. Lookups no longer work this way.
 - **Do not decide synchronously inside a block.** A validator that needs the value on the spot has to be restructured into the two phases above.
-- `deferred_lookups_size()` and `deferred_deletions_size()` let you assert nothing is left pending at the end of a batch.
+- `deferred_deletions_size()` lets you assert nothing is left pending at the end of a batch. Lookups have no equivalent, because the pending set is the vector in your hand.
 
 #### Threading
 
-A database instance supports **one mutating operation at a time**, with no other operation of any kind in flight. Mutating means `insert()`, `erase()`, `process_pending_deletions()`, `process_pending_lookups()`, `compact_all()` and `close()`. Serialising them is the caller's job.
+A database instance supports **one mutating operation at a time**, with no other operation of any kind in flight. Mutating means `insert()`, `erase()`, `process_pending_deletions()`, `resolve()`, `compact_all()` and `close()`. Serialising them is the caller's job.
 
-`find()` is the one exception, and only a partial one: **concurrent `find()` calls are permitted strictly while no insert, erase, rotation, sweep, compaction or cache operation can run.** Providing that reader/writer barrier is the caller's responsibility — this library has no lock to lean on.
+`resolve()` is `const` and still on that list. Const means it does not change what is *stored*; it does move the LRU file cache. Caller-owned batches make two resolutions independent, not concurrent.
 
-What makes `find()` eligible at all is that every piece of shared state it touches is itself thread-safe: it reads the active maps, records into sharded atomic counters, and queues into a concurrent set. That removes the internal writer; it does **not** make the active map safe against modification. Nothing here does.
+`find()` is the one exception, and only a partial one: **concurrent `find()` calls are permitted strictly while no insert, erase, rotation, resolution, compaction or cache operation can run.** Providing that reader/writer barrier is the caller's responsibility — this library has no lock to lean on.
+
+What makes `find()` eligible at all is that it reads the active maps and writes nothing but sharded atomic counters. It holds no queue and registers no key — a miss is reported and forgotten. That removes the internal writer; it does **not** make the active map safe against modification. Nothing here does.
 
 **Statistics are operations too, not free reads.** `get_statistics()` is not const — it recomputes the fragmentation counters as it goes — and `reset_search_stats()` / `reset_all_statistics()` write by definition; the const accessors read plain counters that `insert()` and `erase()` write. All of them may overlap with `find()`, which writes nothing they look at beyond its own sharded counters, but not with any mutation, and `get_statistics()` and the reset calls not with each other either. A summary taken while `find()` is recording is also not consistent across fields — numerators can sit an increment ahead of their denominators, so take it while nothing is recording if you need exact cross-field numbers.
 
 The restriction on everything else is structural rather than incidental:
 
-- The LRU file cache owns the memory mappings and has no synchronisation. Evicting an entry unmaps the segment, so a second thread reading a map it obtained earlier is a use-after-unmap: a crash, not a torn read. `erase()`, `process_pending_deletions()` and `process_pending_lookups()` all touch that cache.
-- The deferred-lookup queue is **global, not per caller**. `process_pending_lookups()` drains all of it, so two callers steal each other's keys. Exactly one component may own the sweep; it also has to route results back to whoever asked. That is an ownership rule, separate from the threading one above.
+- The LRU file cache owns the memory mappings and has no synchronisation. Evicting an entry unmaps the segment, so a second thread reading a map it obtained earlier is a use-after-unmap: a crash, not a torn read. `erase()`, `process_pending_deletions()` and `resolve()` all touch that cache.
+- The deferred-**deletion** queue is still **global, not per caller**. `process_pending_deletions()` drains all of it, so two callers steal each other's keys. Exactly one component may own that call. Lookups used to work this way too; they no longer do.
 - The deferred-deletion queue, the entry count, the per-container statistics and the file metadata are plain members mutated without atomics.
 - A rotation — triggered from inside `insert()` — unmaps the whole active segment and briefly leaves the container pointer null. A concurrent `find()` would be reading unmapped memory, which is why "no mutation in flight" is a condition of the exception above and not a nicety.
 
 #### When the first rotation happens
 
-`find()` queues **every** miss of the mapped version — whether the key lives in an older version or does not exist at all. So `deferred_lookups_size()` starts growing at the first lookup of an unknown key, with no rotation involved, and `process_pending_lookups()` has to be called to drain it regardless of how many versions exist.
+`find()` reports `not_resolved` for **every** miss of the active versions — whether the key lives in an older version or does not exist at all. So your batch starts filling at the first lookup of an unknown key, with no rotation involved, and `resolve()` is what turns those into found-or-absent regardless of how many versions exist.
 
-What the first rotation changes is the *meaning* of a `not_found`. While a container still has a single version, everything stored is in the mapped version, so a deferred lookup can only ever resolve to "does not exist" — which is exactly why treating `not_found` as authoritative appears to work. Once a container rotates, `not_found` also covers "still stored, in a previous version", and code making that assumption starts failing abruptly, for many keys at once.
+What the first rotation changes is the *meaning* of a `not_resolved`. While a container still has a single version, everything stored is in the mapped version, so an unresolved lookup can only ever resolve to "does not exist" — which is exactly why treating it as authoritative appears to work. Once a container rotates, it also covers "still stored, in a previous version", and code making that assumption starts failing abruptly, for many keys at once.
 
 Container 0 (48-byte entries in a 2 GiB file, ~7.86M buckets) rotates when the hash table reaches `max_load_factor * 0.95`. Measured on production sizing:
 
@@ -269,7 +282,6 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `erase(key, height)` | Erase UTXO. `0` means deferred, not absent — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
 | `process_pending_deletions()` | Definitive answer for deferred deletes, returns (count, failed entries) |
 | `deferred_deletions_size()` | Count of pending deferred deletions |
-| `deferred_lookups_size()` | Count of pending deferred lookups |
 | `for_each_key(callback)` | Iterate over all stored keys |
 | `compact_all()` | Optimize storage |
 | `get_statistics()` | Get performance stats |
@@ -285,8 +297,8 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `open(path, remove_existing)` | Static: open database, returns `result<full_db>` |
 | `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, value, height)` | Insert UTXO with byte data |
-| `find(key, height)` | Returns `result<full_find_result>` (`data`, `block_height`). `not_found` means deferred — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
-| `process_pending_lookups()` | Definitive answer for deferred lookups: `(flat_map<key, full_find_result>, failed)` |
+| `find(key, height)` | Returns `result<full_find_result>` (`data`, `block_height`). `not_resolved` is not absence — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `resolve(span<lookup_request const>)` | Definitive answer for your batch: `full_resolution` (`found`, `absent`) |
 | `for_each_entry(callback)` | Callback: `(key, height, span<uint8_t const>)` |
 
 ### `reference_db`
@@ -296,8 +308,8 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `open(path, remove_existing)` | Static: open database, returns `result<reference_db>` |
 | `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, file_number, offset, height)` | Insert UTXO with typed fields |
-| `find(key, height)` | Returns `result<reference_find_result>` (`block_height`, `file_number`, `offset`). `not_found` means deferred — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
-| `process_pending_lookups()` | Definitive answer for deferred lookups: `(flat_map<key, reference_find_result>, failed)` |
+| `find(key, height)` | Returns `result<reference_find_result>` (`block_height`, `file_number`, `offset`). `not_resolved` is not absence — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `resolve(span<lookup_request const>)` | Definitive answer for your batch: `reference_resolution` (`found`, `absent`) |
 | `for_each_entry(callback)` | Callback: `(key, height, file_number, offset)` |
 
 ### `utxoz::raw_outpoint`

@@ -11,7 +11,7 @@
  * version of each container is mapped, and find()/erase() look there (plus, for
  * erase, the cached files). Anything left behind in a previous version is NOT
  * reported by find()/erase(); it is queued and answered definitively by
- * process_pending_lookups() / process_pending_deletions().
+ * resolve() / process_pending_deletions().
  *
  * This means a not_found from find() (or a 0 from erase()) is not authoritative
  * once a container has rotated. Integrators that treat it as authoritative see
@@ -205,7 +205,6 @@ TEST_CASE("find(): before rotation resolves inline, after rotation it defers",
             REQUIRE(found.has_value());
             CHECK(found->data == witness_value);
             CHECK(found->block_height == 1u);
-            CHECK(db.deferred_lookups_size() == 0);
         }
 
         uint32_t height = 2;
@@ -223,18 +222,17 @@ TEST_CASE("find(): before rotation resolves inline, after rotation it defers",
         // answering. This not_found is NOT authoritative.
         auto const deferred = db.find(witness, height);
         REQUIRE_FALSE(deferred.has_value());
-        CHECK(deferred.error() == utxoz::error_code::not_found);
-        CHECK(db.deferred_lookups_size() == 1);
+        CHECK(deferred.error() == utxoz::error_code::not_resolved);
 
-        // process_pending_lookups() is the definitive answer.
-        auto const [found, missing] = db.process_pending_lookups().value();
+        // The caller keeps the request; nothing in the database did.
+        std::vector<utxoz::lookup_request> const batch{{witness, height}};
+
+        // resolve() is the definitive answer.
+        auto const [found, missing] = db.resolve(batch).value();
         CHECK(missing.empty());
         REQUIRE(found.contains(witness));
         CHECK(found.at(witness).data == witness_value);
         CHECK(found.at(witness).block_height == 1u);
-
-        // The call drains the queue.
-        CHECK(db.deferred_lookups_size() == 0);
 
         db.close();
     }
@@ -242,7 +240,7 @@ TEST_CASE("find(): before rotation resolves inline, after rotation it defers",
     std::filesystem::remove_all(path);
 }
 
-TEST_CASE("find(): one process_pending_lookups() resolves deferrals from every container",
+TEST_CASE("find(): one resolve() answers unresolved keys from every container",
           "[database][rotation][deferred][contract]") {
     auto const path = make_unique_path("allc");
     std::filesystem::remove_all(path);
@@ -291,14 +289,16 @@ TEST_CASE("find(): one process_pending_lookups() resolves deferrals from every c
             REQUIRE(stats.rotations_per_container[i] >= 1);
         }
 
-        // Queue all five lookups, then resolve them in a single batch call.
+        // Collect all five lookups, then resolve them in a single batch call.
+        std::vector<utxoz::lookup_request> batch;
         for (size_t i = 0; i < utxoz::container_count; ++i) {
             INFO("container " << i);
             CHECK_FALSE(db.find(witnesses[i], height).has_value());
+            batch.emplace_back(witnesses[i], height);
         }
-        CHECK(db.deferred_lookups_size() == utxoz::container_count);
+        CHECK(batch.size() == utxoz::container_count);
 
-        auto const [found, missing] = db.process_pending_lookups().value();
+        auto const [found, missing] = db.resolve(batch).value();
         CHECK(missing.empty());
         for (size_t i = 0; i < utxoz::container_count; ++i) {
             INFO("container " << i);
@@ -306,7 +306,6 @@ TEST_CASE("find(): one process_pending_lookups() resolves deferrals from every c
             CHECK(found.at(witnesses[i]).data == values[i]);
             CHECK(found.at(witnesses[i]).block_height == 1u);
         }
-        CHECK(db.deferred_lookups_size() == 0);
 
         db.close();
     }
@@ -332,7 +331,8 @@ TEST_CASE("find(): a key that exists nowhere comes back in the failed list",
         auto const absent = random_outpoint(rng, 99);
         CHECK_FALSE(db.find(absent, 11).has_value());
 
-        auto const [found, missing] = db.process_pending_lookups().value();
+        std::vector<utxoz::lookup_request> const batch{{absent, 11}};
+        auto const [found, missing] = db.resolve(batch).value();
         CHECK(found.empty());
         REQUIRE(missing.size() == 1);
         CHECK(missing[0].key == absent);
@@ -389,11 +389,13 @@ TEST_CASE("erase(): after rotation it defers, process_pending_deletions() is def
         CHECK(db.deferred_deletions_size() == 0);
 
         // Now they are really gone, through both paths.
+        std::vector<utxoz::lookup_request> gone;
         for (auto const& key : early) {
             CHECK_FALSE(db.find(key, height).has_value());
             CHECK_FALSE(scan_contains(db, key));
+            gone.emplace_back(key, height);
         }
-        auto const [found_after, missing_after] = db.process_pending_lookups().value();
+        auto const [found_after, missing_after] = db.resolve(gone).value();
         CHECK(found_after.empty());
         CHECK(missing_after.size() == early.size());
 
@@ -423,14 +425,15 @@ TEST_CASE("lookups must be processed before deletions within a batch",
         REQUIRE(fill_until_container0_rotates(db, rng, height, 5'000, 400,
                                               size_profile::wide, false) > 0);
 
-        // Same batch: the key is read and spent. Both operations defer.
+        // Same batch: the key is read and spent. The read is the caller's to
+        // keep; the delete still goes on the library's own queue.
         CHECK_FALSE(db.find(key, height).has_value());
         CHECK(db.erase(key, height).value() == 0);
-        CHECK(db.deferred_lookups_size() == 1);
+        std::vector<utxoz::lookup_request> const batch{{key, height}};
         CHECK(db.deferred_deletions_size() == 1);
 
         // Lookups first: the value is still readable.
-        auto const [found, missing] = db.process_pending_lookups().value();
+        auto const [found, missing] = db.resolve(batch).value();
         CHECK(missing.empty());
         REQUIRE(found.contains(key));
         CHECK(found.at(key).data == value);
@@ -451,7 +454,7 @@ TEST_CASE("lookups must be processed before deletions within a batch",
 // Reference mode — same contract
 // =============================================================================
 
-TEST_CASE("reference find(): after rotation it defers, process_pending_lookups() is definitive",
+TEST_CASE("reference find(): after rotation it is unresolved, resolve() is definitive",
           "[database][reference][rotation][deferred][contract]") {
     auto const path = make_unique_path("reference");
     std::filesystem::remove_all(path);
@@ -484,15 +487,14 @@ TEST_CASE("reference find(): after rotation it defers, process_pending_lookups()
         // Still stored, but no longer in the mapped version.
         REQUIRE(scan_contains(db, witness));
         CHECK_FALSE(db.find(witness, height).has_value());
-        CHECK(db.deferred_lookups_size() == 1);
+        std::vector<utxoz::lookup_request> const batch{{witness, height}};
 
-        auto const [found, missing] = db.process_pending_lookups().value();
+        auto const [found, missing] = db.resolve(batch).value();
         CHECK(missing.empty());
         REQUIRE(found.contains(witness));
         CHECK(found.at(witness).file_number == 42u);
         CHECK(found.at(witness).offset == 1234u);
         CHECK(found.at(witness).block_height == 1u);
-        CHECK(db.deferred_lookups_size() == 0);
 
         db.close();
     }
@@ -584,9 +586,13 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
 
         // Warm the file cache: the sweep leaves a previous-version file mapped
         // under its (container_index, version) key.
-        for (auto const& k : probes) (void)db.find(k, height);
+        std::vector<utxoz::lookup_request> warm;
+        for (auto const& k : probes) {
+            (void)db.find(k, height);
+            warm.emplace_back(k, height);
+        }
         {
-            auto const [found, missing] = db.process_pending_lookups().value();
+            auto const [found, missing] = db.resolve(warm).value();
             CHECK(missing.empty());
             CHECK(found.size() == probes.size());
         }
@@ -610,10 +616,15 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         for (auto const& k : probes) REQUIRE(scan_contains(db, k));
 
         size_t found_inline = 0;
+        std::vector<utxoz::lookup_request> after_compaction;
         for (auto const& k : probes) {
-            if (db.find(k, height).has_value()) ++found_inline;
+            if (db.find(k, height).has_value()) {
+                ++found_inline;
+            } else {
+                after_compaction.emplace_back(k, height);
+            }
         }
-        auto const [found, missing] = db.process_pending_lookups().value();
+        auto const [found, missing] = db.resolve(after_compaction).value();
         CHECK(missing.empty());
         CHECK(found_inline + found.size() == probes.size());
 
@@ -681,9 +692,9 @@ TEST_CASE("the deferred contract holds at production sizing (~6.6M live UTXOs)",
 
         // Same contract as at test sizing: deferred, then resolved.
         CHECK_FALSE(db.find(witness, height).has_value());
-        CHECK(db.deferred_lookups_size() == 1);
+        std::vector<utxoz::lookup_request> const batch{{witness, height}};
 
-        auto const [found, missing] = db.process_pending_lookups().value();
+        auto const [found, missing] = db.resolve(batch).value();
         CHECK(missing.empty());
         REQUIRE(found.contains(witness));
         CHECK(found.at(witness).data == witness_value);

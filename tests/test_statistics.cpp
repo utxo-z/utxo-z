@@ -89,13 +89,16 @@ TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
         CHECK(hits.avg_age_answered == 100.0);  // probed at 200, created at 100
 
         // Misses in a single-version database record nothing: find() only
-        // records when it resolves, and the sweep finds no file to search.
+        // records when it resolves, and a resolution finds no file to search.
+        std::vector<utxoz::lookup_request> misses;
         for (size_t i = entries; i < entries + 100; ++i) {
             CHECK_FALSE(db.find(make_key(i), 200).has_value());
+            misses.emplace_back(make_key(i), 200);
         }
-        auto const [resolved, unresolved] = db.process_pending_lookups().value();
-        CHECK(resolved.empty());
-        CHECK(unresolved.size() == 100);
+        auto const swept = db.resolve(misses);
+        REQUIRE(swept.has_value());
+        CHECK(swept->found.empty());
+        CHECK(swept->absent.size() == 100);
 
         db.reset_search_stats();
         auto const cleared = db.get_statistics().probes;
@@ -173,16 +176,18 @@ TEST_CASE("search statistics survive concurrent recorders", "[statistics][concur
 /**
  * The other half of find(): the miss path.
  *
- * A lookup that misses the active map queues the key instead of answering, and
- * that queue is the one piece of shared state a concurrent find() writes to. The
- * hit path never touches it, so the test above does not cover it at all.
+ * A lookup that misses the active versions used to put the key into a shared
+ * queue, and that queue was the one piece of state a concurrent find() wrote to.
+ * It is gone (#116): a miss now records a probe counter and nothing else, so
+ * every thread here is free to keep its own batch.
  *
- * Every thread here asks for the same absent keys, so the queue also has to
- * deduplicate: one entry per distinct key no matter how many threads asked. The
- * database has a single version, so the sweep afterwards can resolve nothing and
- * must hand back exactly the set that was asked for.
+ * Which is what this checks. Eight threads probe the same 300 absent keys, and
+ * each builds its own vector of what did not resolve. If any shared registry
+ * came back, the batches would stop being independent — they would be the same
+ * keys funnelled through one container, and the per-thread counts below would
+ * stop matching.
  */
-TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurrency]") {
+TEST_CASE("concurrent misses record a probe and nothing else", "[statistics][concurrency]") {
     auto const path = make_unique_path("misses");
     std::filesystem::remove_all(path);
 
@@ -198,7 +203,6 @@ TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurre
         for (size_t i = 0; i < present; ++i) {
             REQUIRE(db.insert(make_key(i), make_value(33), 100).value());
         }
-        REQUIRE(db.deferred_lookups_size() == 0);
         db.reset_search_stats();
 
         constexpr size_t thread_count = 8;
@@ -207,6 +211,8 @@ TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurre
         auto const& const_db = db;
         std::vector<size_t> wrong_hits(thread_count, 0);
         std::vector<size_t> hits(thread_count, 0);
+        // One batch per thread, never shared. Nothing merges these.
+        std::vector<std::vector<utxoz::lookup_request>> batches(thread_count);
         std::vector<std::thread> workers;
         workers.reserve(thread_count);
 
@@ -215,7 +221,12 @@ TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurre
                 for (size_t round = 0; round < rounds; ++round) {
                     // Hits and misses interleaved, so both paths run at once.
                     for (size_t i = 0; i < absent; ++i) {
-                        if (const_db.find(make_key(absent_base + i), 200)) ++wrong_hits[t];
+                        auto const missed = const_db.find(make_key(absent_base + i), 200);
+                        if (missed) {
+                            ++wrong_hits[t];
+                        } else if (round == 0) {
+                            batches[t].emplace_back(make_key(absent_base + i), 200);
+                        }
                         if (const_db.find(make_key((i + t) % present), 200)) ++hits[t];
                     }
                 }
@@ -226,18 +237,24 @@ TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurre
         CHECK(std::accumulate(wrong_hits.begin(), wrong_hits.end(), size_t{0}) == 0);
         CHECK(std::accumulate(hits.begin(), hits.end(), size_t{0}) == thread_count * rounds * absent);
 
-        // Deduplicated by key: every thread asked for the same 300 outpoints.
-        CHECK(db.deferred_lookups_size() == absent);
+        // Every thread kept its own copy of the same 300 keys. Nothing
+        // deduplicated across threads, because nothing was shared to deduplicate
+        // in — the whole batch is the thread's.
+        for (auto const& batch : batches) {
+            CHECK(batch.size() == absent);
+        }
 
-        // Single version, so the sweep resolves nothing and returns exactly the
-        // set that was queued — no losses, no duplicates, no extras.
-        auto const [resolved, unresolved] = db.process_pending_lookups().value();
-        CHECK(resolved.empty());
-        REQUIRE(unresolved.size() == absent);
+        // Single version, so a resolution finds nothing and hands back exactly
+        // the batch it was given — no losses, no duplicates, no extras, and
+        // nothing from any other thread's batch.
+        auto const resolved = db.resolve(batches[0]);
+        REQUIRE(resolved.has_value());
+        CHECK(resolved->found.empty());
+        REQUIRE(resolved->absent.size() == absent);
 
         std::vector<uint64_t> seen;
-        seen.reserve(unresolved.size());
-        for (auto const& entry : unresolved) {
+        seen.reserve(resolved->absent.size());
+        for (auto const& entry : resolved->absent) {
             uint64_t n = 0;
             std::memcpy(&n, entry.key.data(), sizeof(n));
             seen.push_back(n);
@@ -246,8 +263,6 @@ TEST_CASE("concurrent misses queue exactly once per key", "[statistics][concurre
         CHECK(std::ranges::adjacent_find(seen) == seen.end());  // no duplicates
         CHECK(seen.front() == absent_base);
         CHECK(seen.back() == absent_base + absent - 1);
-
-        CHECK(db.deferred_lookups_size() == 0);
 
         db.close();
     }
@@ -338,9 +353,11 @@ TEST_CASE("probe and resolution counters describe different phases",
         // Resolving it counts on the resolution side, and leaves the probe
         // counters exactly where they were — the same lookup is not counted
         // twice inside one denominator.
-        auto const [found, unresolved] = db.process_pending_lookups().value();
-        CHECK(unresolved.empty());
-        CHECK(found.size() == 1);
+        std::vector<utxoz::lookup_request> const batch{{witness, 300}};
+        auto const swept = db.resolve(batch);
+        REQUIRE(swept.has_value());
+        CHECK(swept->absent.empty());
+        CHECK(swept->found.size() == 1);
 
         auto after_sweep = db.get_statistics();
         CHECK(after_sweep.probes.probes == 1);
@@ -348,23 +365,25 @@ TEST_CASE("probe and resolution counters describe different phases",
         CHECK(after_sweep.probes.deferred == 1);
 
         CHECK(after_sweep.resolution.resolved == 1);
-        CHECK(after_sweep.resolution.unresolved == 0);
+        CHECK(after_sweep.resolution.absent == 0);
         CHECK(after_sweep.resolution.avg_depth >= 1.0);   // at least one version back
         CHECK(after_sweep.resolution.files_visited >= 1);
 
-        // A key that exists nowhere: deferred, then reported unresolved.
+        // A key that exists nowhere: unresolved by find(), then proven absent.
         db.reset_search_stats();
         CHECK_FALSE(db.find(make_key(0xDEAD'BEEF), 300).has_value());
         {
-            auto const [f2, u2] = db.process_pending_lookups().value();
-            CHECK(f2.empty());
-            CHECK(u2.size() == 1);
+            std::vector<utxoz::lookup_request> const nowhere{{make_key(0xDEAD'BEEF), 300}};
+            auto const swept2 = db.resolve(nowhere);
+            REQUIRE(swept2.has_value());
+            CHECK(swept2->found.empty());
+            CHECK(swept2->absent.size() == 1);
         }
         auto const missing = db.get_statistics();
         CHECK(missing.probes.probes == 1);
         CHECK(missing.probes.deferred == 1);
         CHECK(missing.resolution.resolved == 0);
-        CHECK(missing.resolution.unresolved == 1);
+        CHECK(missing.resolution.absent == 1);
 
         db.close();
     }

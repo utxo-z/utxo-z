@@ -128,7 +128,15 @@ enum class storage_mode : uint8_t { full = 0, reference = 1 };
  * @brief Error codes for database operations
  */
 enum class error_code : uint8_t {
-    not_found,              ///< Key not found in the database (may be deferred)
+    not_found,              ///< Key is not in the database
+    /// The active versions do not hold this key, and nothing else was consulted.
+    ///
+    /// Not absence, and deliberately not spelled `not_found`: the key may be in
+    /// any older version. find() searches the active versions only, so this is
+    /// the whole of what it can say. Collect the request and hand it to
+    /// resolve(), which is what reaches the older versions and what can return
+    /// a proven absence.
+    not_resolved,
     closed,                 ///< Operation on a closed or moved-from database
     storage_mode_mismatch,  ///< Existing database has a different storage mode
     config_file_corrupt,    ///< Config file is invalid, truncated, or has bad magic
@@ -241,20 +249,29 @@ struct deferred_deletion_entry {
 };
 
 /**
- * @brief Deferred lookup entry
+ * @brief One lookup a caller wants resolved against the older versions.
+ *
+ * Owned by the caller, start to finish. This database stores none of these: a
+ * request exists in the caller's batch, is passed to resolve() by reference,
+ * and is still the caller's afterwards. That is the whole point of the type —
+ * the queue it replaces was database-wide, so a resolution handed results to
+ * whoever swept next rather than to whoever asked (#116).
+ *
+ * Equality and hashing are on the key alone, so a batch holding the same
+ * outpoint at two heights is one request: it is one question about one entry.
  */
-struct deferred_lookup_entry {
-    raw_outpoint key;         ///< UTXO key to lookup
-    uint32_t height;   ///< Block height when lookup was requested
+struct lookup_request {
+    raw_outpoint key;  ///< UTXO key to look up
+    uint32_t height;   ///< Block height the lookup is being made at
 
-    deferred_lookup_entry(raw_outpoint const& k, uint32_t h)
+    lookup_request(raw_outpoint const& k, uint32_t h)
         : key(k), height(h) {}
 
-    bool operator==(deferred_lookup_entry const& other) const {
+    bool operator==(lookup_request const& other) const {
         return key == other.key;
     }
 
-    friend std::size_t hash_value(deferred_lookup_entry const& entry) {
+    friend std::size_t hash_value(lookup_request const& entry) {
         return hash_outpoint(entry.key);
     }
 };
@@ -282,11 +299,11 @@ struct std::hash<utxoz::deferred_deletion_entry> {
 };
 
 /**
- * @brief Hash function for deferred_lookup_entry
+ * @brief Hash function for lookup_request
  */
 template<>
-struct std::hash<utxoz::deferred_lookup_entry> {
-    std::size_t operator()(utxoz::deferred_lookup_entry const& entry) const noexcept {
+struct std::hash<utxoz::lookup_request> {
+    std::size_t operator()(utxoz::lookup_request const& entry) const noexcept {
         return utxoz::hash_outpoint(entry.key);
     }
 };

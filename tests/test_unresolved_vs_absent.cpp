@@ -4,8 +4,7 @@
 
 /**
  * @file test_unresolved_vs_absent.cpp
- * @brief The second list from process_pending_lookups() means absent, and only
- *        absent.
+ * @brief The `absent` list from resolve() means absent, and only absent.
  *
  * A consumer decides whether a block is valid by asking whether its inputs
  * exist. If a key it merely failed to look up — because a version file would
@@ -14,19 +13,21 @@
  * may be perfectly valid, and the cause is a local storage fault it never hears
  * about.
  *
- * So the sweep is fail-closed: every version below the current one is read, or
- * the call returns an error and no lists at all. What survives into the second
- * list was looked for everywhere it could have been.
+ * So resolution is fail-closed: every version below the current one is read, or
+ * the call returns an error and no lists at all. What survives into `absent` was
+ * looked for everywhere it could have been.
  *
  * The failure is injected rather than arranged on disk. Corrupting a file and
  * hoping produces a test that passes for reasons nobody chose; the failpoint
  * names one version and fails exactly that open, so each case has one outcome.
  *
- * The retry is the assertion that carries the most weight. It is not enough
- * that the second sweep succeeds: it has to return *both* resolvable keys and
- * the one genuine absence. That is the only thing that shows the whole pending
- * set was put back — including the entries the failed sweep had already
- * consumed — rather than just the ones it never reached.
+ * The retry is the assertion that carries the most weight. It is not enough that
+ * the second call succeeds: it has to return *both* resolvable keys and the one
+ * genuine absence, from the same vector the caller passed the first time. Since
+ * the batch is the caller's (#116), that is now a property of the API rather
+ * than of anything the library has to undo — the batch is never taken, so there
+ * is nothing to give back. The case is kept precisely to pin that it stayed true
+ * once that machinery was deleted.
  */
 
 #include <atomic>
@@ -123,25 +124,35 @@ fixture build_full_fixture(std::string_view tag) {
     return f;
 }
 
-/// Queues the three keys. Reopening first leaves the file cache cold, so the
-/// sweep's order is the catalogue's and not a leftover of how the fixture was
-/// filled.
-void queue_all(utxoz::full_db& db, fixture const& f) {
-    REQUIRE_FALSE(db.find(f.in_container_0, 100'000).has_value());
-    REQUIRE_FALSE(db.find(f.in_container_1, 100'000).has_value());
-    REQUIRE_FALSE(db.find(f.never_stored, 100'000).has_value());
-    REQUIRE(db.deferred_lookups_size() == 3);
+/// Probes the three keys and keeps the ones the active versions could not
+/// answer. Reopening first leaves the file cache cold, so the resolution's order
+/// is the catalogue's and not a leftover of how the fixture was filled.
+///
+/// The batch is built here and belongs to the caller from here on. Nothing in
+/// the database remembers these keys, which is the whole change: the answer can
+/// only come back to whoever holds this vector.
+std::vector<utxoz::lookup_request> batch_of(utxoz::full_db& db, fixture const& f) {
+    std::vector<utxoz::lookup_request> batch;
+    for (auto const& key : {f.in_container_0, f.in_container_1, f.never_stored}) {
+        auto const probed = db.find(key, 100'000);
+        REQUIRE_FALSE(probed.has_value());
+        // not_resolved, never not_found: the active versions were all that was
+        // consulted, so this cannot be absence.
+        REQUIRE(probed.error() == utxoz::error_code::not_resolved);
+        batch.emplace_back(key, 100'000);
+    }
+    REQUIRE(batch.size() == 3);
+    return batch;
 }
 
-/// Exactly what a complete sweep must produce for this fixture.
-void check_complete_sweep(
-    utxoz::full_db& db,
-    utxoz::result<std::pair<utxoz::flat_map<utxoz::raw_outpoint, utxoz::full_find_result>,
-                            std::vector<utxoz::deferred_lookup_entry>>> const& swept,
-    fixture const& f) {
-    REQUIRE(swept.has_value());
+/// Exactly what a complete resolution must produce for this fixture.
+void check_complete_resolution(
+    utxoz::result<utxoz::full_resolution> const& resolved,
+    fixture const& f,
+    std::vector<utxoz::lookup_request> const& batch) {
+    REQUIRE(resolved.has_value());
 
-    auto const& [found, absent] = *swept;
+    auto const& [found, absent] = *resolved;
 
     CHECK(found.size() == 2);
     REQUIRE(found.contains(f.in_container_0));
@@ -152,7 +163,9 @@ void check_complete_sweep(
     REQUIRE(absent.size() == 1);
     CHECK(absent[0].key == f.never_stored);
 
-    CHECK(db.deferred_lookups_size() == 0);
+    // The batch survives the call unchanged. resolve() borrowed it; it did not
+    // take it, so a caller can resolve the same batch again if it wants to.
+    CHECK(batch.size() == 3);
 }
 
 struct failpoint_guard {
@@ -175,8 +188,8 @@ TEST_CASE("full: a complete sweep resolves what is there and proves what is not"
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_all(db, f);
-        check_complete_sweep(db, db.process_pending_lookups(), f);
+        auto const batch = batch_of(db, f);
+        check_complete_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
@@ -192,36 +205,42 @@ TEST_CASE("full: a version that will not open is an error, and the retry loses n
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_all(db, f);
+        auto const batch = batch_of(db, f);
 
         // Version 1: container 0 has versions 0 and 1 below its current, so the
         // sweep reads one of them before it reaches this one. The failure
-        // therefore lands after entries have already been consumed, which is the
-        // case the restore exists for.
+        // therefore lands after some keys have already been resolved into the
+        // call's own working set, which is the case that must not leak a partial
+        // answer.
         failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
 
-        auto const failed = db.process_pending_lookups();
+        auto const failed = db.resolve(batch);
 
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::version_unreadable);
 
-        // Nothing was consumed: all three are still queued, so the retry needs
-        // no requeueing.
-        CHECK(db.deferred_lookups_size() == 3);
+        // The resolution stopped partway through the versions it had to read.
+        // Nothing about the caller's batch changed, so the retry below is the
+        // same span again.
+        // The batch is unchanged, because it was borrowed rather than handed
+        // over: the call read the span and kept nothing. The retry below reuses
+        // this same vector.
+        CHECK(batch.size() == 3);
 
         failpoints::clear();
 
         // The retry returns both resolvable keys and the one genuine absence.
         // Returning only the keys the failed sweep never reached would mean the
-        // consumed entries were dropped, and that is what this pins down.
-        check_complete_sweep(db, db.process_pending_lookups(), f);
+        // keys resolved before the failure were dropped, and that is what this
+        // pins down.
+        check_complete_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
     std::filesystem::remove_all(f.path);
 }
 
-TEST_CASE("full: a failure before anything is resolved restores the queue the same way",
+TEST_CASE("full: a failure before anything is resolved reports the same way",
           "[unresolved][full][negative]") {
     failpoint_guard guard;
     auto const f = build_full_fixture("full_early");
@@ -230,18 +249,21 @@ TEST_CASE("full: a failure before anything is resolved restores the queue the sa
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_all(db, f);
+        auto const batch = batch_of(db, f);
 
         // Version 0 is the oldest, reached first.
         failpoints::fail_lookup_open_version.store(0, std::memory_order_relaxed);
 
-        auto const failed = db.process_pending_lookups();
+        auto const failed = db.resolve(batch);
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::version_unreadable);
-        CHECK(db.deferred_lookups_size() == 3);
+        // The batch is unchanged, because it was borrowed rather than handed
+        // over: the call read the span and kept nothing. The retry below reuses
+        // this same vector.
+        CHECK(batch.size() == 3);
 
         failpoints::clear();
-        check_complete_sweep(db, db.process_pending_lookups(), f);
+        check_complete_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
@@ -257,20 +279,23 @@ TEST_CASE("full: a catalogue that cannot be listed keeps its own cause",
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_all(db, f);
+        auto const batch = batch_of(db, f);
 
         failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
 
-        auto const failed = db.process_pending_lookups();
+        auto const failed = db.resolve(batch);
 
         REQUIRE_FALSE(failed.has_value());
         // Not version_unreadable: not knowing which files exist sends an
         // operator somewhere else than a file that will not open.
         CHECK(failed.error() == utxoz::error_code::catalog_unreadable);
-        CHECK(db.deferred_lookups_size() == 3);
+        // The batch is unchanged, because it was borrowed rather than handed
+        // over: the call read the span and kept nothing. The retry below reuses
+        // this same vector.
+        CHECK(batch.size() == 3);
 
         failpoints::clear();
-        check_complete_sweep(db, db.process_pending_lookups(), f);
+        check_complete_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
@@ -285,13 +310,13 @@ TEST_CASE("full: clearing the failpoint removes the failure", "[unresolved][full
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_all(db, f);
+        auto const batch = batch_of(db, f);
         failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
-        REQUIRE_FALSE(db.process_pending_lookups().has_value());
+        REQUIRE_FALSE(db.resolve(batch).has_value());
 
         failpoints::clear();
 
-        check_complete_sweep(db, db.process_pending_lookups(), f);
+        check_complete_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
@@ -311,12 +336,12 @@ TEST_CASE("full: a failed sweep publishes no statistics, and the retry counts on
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_all(db, f);
+        auto const batch = batch_of(db, f);
 
         auto const before = db.get_statistics();
 
         failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
-        REQUIRE_FALSE(db.process_pending_lookups().has_value());
+        REQUIRE_FALSE(db.resolve(batch).has_value());
 
         auto const after_failure = db.get_statistics();
 
@@ -328,23 +353,25 @@ TEST_CASE("full: a failed sweep publishes no statistics, and the retry counts on
         CHECK(after_failure.resolution.files_visited == before.resolution.files_visited);
         CHECK(after_failure.resolution.cache_hits == before.resolution.cache_hits);
         CHECK(after_failure.resolution.resolved == before.resolution.resolved);
-        CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+        CHECK(after_failure.resolution.absent == before.resolution.absent);
 
         failpoints::clear();
-        check_complete_sweep(db, db.process_pending_lookups(), f);
+        check_complete_resolution(db.resolve(batch), f, batch);
 
         auto const after_retry = db.get_statistics();
 
-#ifdef UTXOZ_STATISTICS_ENABLED
-        // One run, two lookups resolved, one left unresolved — each counted once.
-        // Only meaningful where the counters exist; with statistics off they are
-        // all zero and the checks above still hold, which is the point of
-        // running this case in both builds.
-        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs + 1);
-        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 2);
-        CHECK(after_retry.resolution.unresolved == before.resolution.unresolved + 1);
-#else
+        // A resolution never touches the deletion counters, in either build.
         CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+        CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
+        CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+        // Two keys resolved, one proven absent — each counted once, so the
+        // abandoned attempt left nothing behind. Only meaningful where the
+        // counters exist; with statistics off they are all zero and the checks
+        // above still hold, which is the point of running this in both builds.
+        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 2);
+        CHECK(after_retry.resolution.absent == before.resolution.absent + 1);
 #endif
 
         db.close();
@@ -390,20 +417,26 @@ reference_fixture build_reference_fixture(std::string_view tag) {
     return f;
 }
 
-void queue_reference(utxoz::reference_db& db, reference_fixture const& f) {
-    REQUIRE_FALSE(db.find(f.stored, 100'000).has_value());
-    REQUIRE_FALSE(db.find(f.never_stored, 100'000).has_value());
-    REQUIRE(db.deferred_lookups_size() == 2);
+std::vector<utxoz::lookup_request> reference_batch_of(utxoz::reference_db& db,
+                                                     reference_fixture const& f) {
+    std::vector<utxoz::lookup_request> batch;
+    for (auto const& key : {f.stored, f.never_stored}) {
+        auto const probed = db.find(key, 100'000);
+        REQUIRE_FALSE(probed.has_value());
+        REQUIRE(probed.error() == utxoz::error_code::not_resolved);
+        batch.emplace_back(key, 100'000);
+    }
+    REQUIRE(batch.size() == 2);
+    return batch;
 }
 
-void check_reference_sweep(
-    utxoz::reference_db& db,
-    utxoz::result<std::pair<utxoz::flat_map<utxoz::raw_outpoint, utxoz::reference_find_result>,
-                            std::vector<utxoz::deferred_lookup_entry>>> const& swept,
-    reference_fixture const& f) {
-    REQUIRE(swept.has_value());
+void check_reference_resolution(
+    utxoz::result<utxoz::reference_resolution> const& resolved,
+    reference_fixture const& f,
+    std::vector<utxoz::lookup_request> const& batch) {
+    REQUIRE(resolved.has_value());
 
-    auto const& [found, absent] = *swept;
+    auto const& [found, absent] = *resolved;
 
     CHECK(found.size() == 1);
     REQUIRE(found.contains(f.stored));
@@ -413,7 +446,7 @@ void check_reference_sweep(
     REQUIRE(absent.size() == 1);
     CHECK(absent[0].key == f.never_stored);
 
-    CHECK(db.deferred_lookups_size() == 0);
+    CHECK(batch.size() == 2);
 }
 
 } // namespace
@@ -427,8 +460,8 @@ TEST_CASE("reference: a complete sweep resolves what is there and proves what is
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_reference(db, f);
-        check_reference_sweep(db, db.process_pending_lookups(), f);
+        auto const batch = reference_batch_of(db, f);
+        check_reference_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
@@ -444,18 +477,19 @@ TEST_CASE("reference: a version that will not open is an error, and the retry lo
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_reference(db, f);
+        auto const batch = reference_batch_of(db, f);
 
         failpoints::fail_lookup_open_version.store(0, std::memory_order_relaxed);
 
-        auto const failed = db.process_pending_lookups();
+        auto const failed = db.resolve(batch);
 
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::version_unreadable);
-        CHECK(db.deferred_lookups_size() == 2);
+        // Unchanged: the call borrowed the span and kept nothing.
+        CHECK(batch.size() == 2);
 
         failpoints::clear();
-        check_reference_sweep(db, db.process_pending_lookups(), f);
+        check_reference_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
@@ -471,17 +505,18 @@ TEST_CASE("reference: a catalogue that cannot be listed keeps its own cause",
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_reference(db, f);
+        auto const batch = reference_batch_of(db, f);
 
         failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
 
-        auto const failed = db.process_pending_lookups();
+        auto const failed = db.resolve(batch);
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::catalog_unreadable);
-        CHECK(db.deferred_lookups_size() == 2);
+        // Unchanged: the call borrowed the span and kept nothing.
+        CHECK(batch.size() == 2);
 
         failpoints::clear();
-        check_reference_sweep(db, db.process_pending_lookups(), f);
+        check_reference_resolution(db.resolve(batch), f, batch);
 
         db.close();
     }
@@ -497,30 +532,32 @@ TEST_CASE("reference: a failed sweep publishes no statistics, and the retry coun
         REQUIRE(opened.has_value());
         auto db = std::move(*opened);
 
-        queue_reference(db, f);
+        auto const batch = reference_batch_of(db, f);
 
         auto const before = db.get_statistics();
 
         failpoints::fail_lookup_open_version.store(0, std::memory_order_relaxed);
-        REQUIRE_FALSE(db.process_pending_lookups().has_value());
+        REQUIRE_FALSE(db.resolve(batch).has_value());
 
         auto const after_failure = db.get_statistics();
         CHECK(after_failure.deferred.processing_runs == before.deferred.processing_runs);
         CHECK(after_failure.resolution.files_visited == before.resolution.files_visited);
         CHECK(after_failure.resolution.cache_hits == before.resolution.cache_hits);
         CHECK(after_failure.resolution.resolved == before.resolution.resolved);
-        CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+        CHECK(after_failure.resolution.absent == before.resolution.absent);
 
         failpoints::clear();
-        check_reference_sweep(db, db.process_pending_lookups(), f);
+        check_reference_resolution(db.resolve(batch), f, batch);
 
         auto const after_retry = db.get_statistics();
-#ifdef UTXOZ_STATISTICS_ENABLED
-        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs + 1);
-        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 1);
-        CHECK(after_retry.resolution.unresolved == before.resolution.unresolved + 1);
-#else
+
         CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+        CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
+        CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 1);
+        CHECK(after_retry.resolution.absent == before.resolution.absent + 1);
 #endif
 
         db.close();
