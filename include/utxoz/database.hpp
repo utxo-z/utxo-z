@@ -114,7 +114,7 @@ struct reference_resolution {
  *   call rather than around the cache lookups — long enough to cover the
  *   lifetime of every mapping reference the call obtains, because the file
  *   cache hands out references into segments it destroys on eviction and a
- *   second resolution evicting one mid-read is a use-after-unmap. Callers need
+ *   second resolution evicting one mid-read is a use-after-unmap. Callers
  *   arrange nothing.
  * - **find() may run alongside resolve().** They touch disjoint state: find()
  *   reads the active containers and writes only its own sharded probe counters,
