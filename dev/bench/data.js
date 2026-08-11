@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786450060087,
+  "lastUpdate": 1786458051047,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -14673,6 +14673,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 4.75,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ebe9abe083a4053e439da2f19df58d71ba3bca84",
+          "message": "feat!: the caller owns its deletions, and gets back what was applied (#124)\n\n* feat!: the caller owns its deletions, and gets back what was applied\n\nBREAKING CHANGE: erase(), process_pending_deletions() and\ndeferred_deletions_size() are replaced by apply_deletes(span).\n\nThe deletion queue had the ownership defect #116 fixed for lookups: erase()\nwrote into a database-wide set and process_pending_deletions() emptied all of\nit, reporting everything to whoever called. It had not bitten yet only because\nof who the callers happen to be — connect and reorg are mutually excluded — and\nthe first writer outside that exclusion would have acquired it silently.\n\nReading the old drain settled a question KTH could not answer from its own side,\nand both of its beliefs about it were wrong. There was no failure path at all:\nprocess_deferred_deletions_in_file() caught every exception, logged it and\ncarried on, so an unreadable version was skipped rather than reported. The queue\nwas then cleared unconditionally, so keys that were never applied came back in\n`failed` beside keys genuinely not stored — the #110 ambiguity, still live in\nthe write path — and a caller re-querying the queue size after a failure always\nread zero.\n\nDeletions cannot borrow the lookup fix. A resolution is a read and can discard\npartial work; a deletion has already written to a mapped file by the time it\nmeets one it cannot open. So the result enumerates instead of pretending:\n\n  erased      applied during this call, including on the failure path\n  absent      not stored, established only after full coverage\n  unresolved  still owed; the only category that may be resent\n\nEvery distinct key of the span lands in exactly one of the three — on every\npath, including the ones that apply nothing. A closed or recovery-latched\ninstance returns the same deduplicated batch in `unresolved` rather than a\nverbatim copy of the span, which is what made a refusal the one place the\npartition did not hold: three requests naming one outpoint came back as three\nkeys still owed.\n\nThe walk consolidates each deletion as it happens. The map is changed, the\ndeletion is recorded — into a vector reserved before any mutation, so it cannot\nallocate there — and only then does the bookkeeping that can throw run. What is\nstill owed is finished by a scope guard that runs on the exception path too, so\nthere is no window where the map has changed and the working set still counts\nthe key as pending. Without that, an exception after an erase left the key in\nboth `erased` and `unresolved`, and a caller resending its unresolved would be\ntold the key is absent — fatal on the connect path, one retry after a deletion\nthat had actually succeeded.\n\nfailpoints::fail_delete_after_applied is the seam that reaches it: it throws\nbetween the map changing and the bookkeeping, after a chosen number of deletions\nhave been applied within the call. fail_lookup_open_version cannot, because it\nfires before a file is touched.\n\nStatistics count what happened: applied deletions always, processing_runs only\non a completed batch. Lookup resolution writes resolution_stats and never\ndeferred_stats.\n\nThe public surface is one mutating call per batch. There was no production\ncaller of the single-key erase(), so the immediate path became phase 0 of\napply_deletes(). Internally deferred_deletions_, add_to_deferred_deletions(),\nerase(), reference_erase(), erase_from_cached_files_only() and\nprocess_deferred_deletions_in_file() are gone.\n\nThe threading contract keeps what #123 established — resolve() serialised\ninternally, find() alongside it — and says where apply_deletes() sits: it\nmutates, the resolve lock does not cover it, and it needs exclusion from\nresolve(), find(), insert(), compaction and close() alike.\n\ntests/test_deletion_ownership.cpp pins the contract in both storage modes,\nincluding the two states that apply nothing and the exception raised after real\nprogress. The 61 call sites across tests, examples and benchmarks were migrated\nby intent: a test that used to compare erase()'s return now names the category\nit means.\n\n.gitignore grows the three test-output patterns the suite can leave behind when\na case fails before its cleanup — which is when somebody is most likely to run\n`git add -A` while debugging.\n\n* fix: charge a historical reference deletion to the reference catalogue\n\nThe reference walk reached the file through the same erase_in_file<Index> the\nfull containers use, via a switch whose `default` mapped reference_sentinel_index\nonto Index 0. The bookkeeping inside was guarded by\n`if constexpr (Index == SIZE_MAX)` — a condition that dispatch can never satisfy.\nSo a historical reference deletion erased the right entry, marked the right file\ndirty (note_dirty takes the runtime index), and then called\nupdate_metadata_on_delete(0, version): the metadata of full container 0. The\nreference catalogue never heard about the deletion, and container 0's was told an\nentry left a file it was never in.\n\nThe two walks are now separate functions. The reference one opens the reference\nfile and updates reference_catalog_; the full one is templated on a real\ncontainer index and updates catalogs_[Index]. Neither can be instantiated for a\nsentinel that is not a container index, so the shape that made this possible is\ngone rather than corrected. The per-file stepping they share takes the\nbookkeeping as a parameter: which catalogue a deletion belongs to is a property\nof the file being walked, and deciding it next to the code that opened the file\nis what keeps the two from drifting again.\n\n`default:` no longer walks an unknown index as container 0. Doing that silently\nis how the sentinel came to update the wrong catalogue, so an index nobody\nrecognises stops the batch instead.\n\nThe dirty identity and the erased/absent/unresolved partition are unchanged;\nthis only moves where the metadata decrement lands.\n\nCharged rather than observed, because there is nothing to observe. entry_count\nhas no runtime consumer today — it is serialised and nothing reads it back\nduring a run — and a historical version's metadata is not persisted after a\ndeletion, so the wrong catalogue produced identical answers, identical files and\nan identical database. The defect is real and silent, which is why the control\nreads a counter the two branches bump rather than a behaviour: the bookkeeping\nis wrong the moment anything starts trusting it, and nothing would have caught\nit before then. failpoints::reference_metadata_deletes and full_metadata_deletes\nfollow sync_file_calls, which exists for the same reason.\n\nTwo cases, one per mode, each asserting its own catalogue took every deletion\nand the other took none. Restoring the old dispatch makes the reference one\nreport zero reference updates and a full one instead.\n\n* fix: restore the statistics a historical deletion records, and four review findings\n\nThe rewrite of the per-file walk dropped every counter the queue-draining path\nused to keep: deletions_by_depth, current_size, total_deletes and the\nheight-range histogram. The active-version phase kept recording its own, so the\ntwo halves of one call disagreed — and by container. A deletion that reached an\nolder file was invisible to every per-container number while an identical\ndeletion in the active version was not.\n\nNothing caught it. Every batch-level assertion still passed, because `erased`\nwas right; it was only what an operator reads that was wrong. So the fix comes\nwith a case that compares the totals across containers, and the depth histogram,\nagainst the number of deletions actually applied — a control the old shape would\nhave failed, and the one that was missing when this was introduced.\n\ndeferred_deletes is not among the restored counters and is removed instead. It\ncounted how much was sitting in the queue, and there is no queue to sit in;\nnothing had written it since the queue went, exactly as deferred_lookups stopped\nbeing written in #118.\n\nFour more from the same review:\n\nbench_large_ibd cleared its batch after each call, discarding whatever the call\ncould not finish. It now carries `unresolved` forward, which is the one category\nthat has to be sent again — a benchmark that silently drops work measures the\nwrong thing and demonstrates the wrong usage.\n\nThe README still had a section heading and prose describing a deletion queue,\nincluding \"queued as a pending deletion. Deletions still use an internal queue\",\nwhich this change makes false. The section is now \"Batched reads and deletes\"\nand says that nothing is queued inside the database.\n\nThe sentinel comment on fail_delete_after_applied justified itself with \"zero is\na real count\", but the check is `== ++applied_in_call`, so zero can never match\nand was never a reachable setting. The comment said why a distinct sentinel was\nnecessary; it is not, and it now says so.\n\ntest_compaction_invariant compared erased.size() against batch.size() for a\nbatch built by concatenating two key lists. apply_deletes() partitions distinct\nkeys, so that asserted something the contract does not promise and would have\nbroken the day those lists overlapped. It counts the distinct keys now.\n\n* docs: finish removing the queue from the vocabulary, and the fields nobody writes\n\nThe earlier pass changed the section that described the deletion queue and left\nthe rest of the prose describing an API that no longer exists. CodeRabbit's\nreview listed the sites; this is the sweep rather than another partial one.\n\nerase() is gone from README and from database.hpp: it was still named as\nsomething that \"works on that mapped version\", still credited with writing the\nstatistics counters, and still listed among db_base's methods. The sentence that\nexplained the pair now explains the pair that exists — find() answers from the\nactive versions and hands back what it could not, apply_deletes() starts there\nand then walks the older versions itself.\n\nThe dead fields go with the words. Nothing has written container_stats\n::deferred_deletes, deferred_stats::total_deferred or max_queue_size since the\nqueue was removed — they counted queue occupancy — so they are removed rather\nthan left reporting zero forever, exactly as deferred_lookups was in #118. The\none assertion that read total_deferred goes with it. What survives in\ndeferred_stats is what the deletion path still writes.\n\nbench_mixed_workload cleared its batch after each call, like bench_large_ibd\ndid: both discarded whatever the call could not finish. Both carry `unresolved`\nforward now. The blockchain_processing example's final path did the same and now\nmatches its own periodic path.\n\nThe failpoints are renamed fail_historical_open_version and\nfail_historical_catalog. They were named for lookups and the deletion path uses\nthem too, so the names said something false about who they belong to; the\nbehaviour and the initialisers are unchanged.\n\napplied_in_call becomes applied_in_walk, because that is what it counts — the\nactive-version phase has no throw point, so including it would shift the\nnumbering by however many keys happened not to have rotated away, which is not\nsomething a case can know. The failpoint's documentation says so now instead of\nimplying the whole call.\n\ntest_sync required only that nothing was left owed, which a batch that found\nevery key absent would also satisfy. It requires a non-empty `erased` too, so\nthe sync failpoint below it operates on deletions that really happened.\n\nAlso: the empty \"Deferred lookup helpers\" heading in database_impl.hpp, and the\n\"Erase helpers\" one above a function only apply_deletes() calls.",
+          "timestamp": "2026-08-11T16:16:56+02:00",
+          "tree_id": "d729d34ba6236ebe26bc48f973a3dc3ad5c9672f",
+          "url": "https://github.com/utxo-z/utxo-z/commit/ebe9abe083a4053e439da2f19df58d71ba3bca84"
+        },
+        "date": 1786458050569,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 244227.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 330193.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 264448.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 277417.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 409.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 421.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12032689.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 26317403.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11533145.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12182.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2244344.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2384743.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 117288.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 12398.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2321.49,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3280.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2731.2,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 56.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 57.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 57.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.91,
             "unit": "ops/sec"
           }
         ]
