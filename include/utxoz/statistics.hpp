@@ -189,8 +189,11 @@ struct container_stats {
 
 /**
  * @brief Deferred deletion statistics
+ *
+ * Deletion counters only. Lookups are counted by resolution_stats, and nothing
+ * writes both — a field that moved for a failed delete and for an outpoint that
+ * is legitimately not stored described neither.
  */
-/// Deletion counters only. Lookups have resolution_stats; nothing writes both.
 struct deferred_stats {
     size_t total_deferred = 0;               ///< Total deferred deletions
     size_t successfully_processed = 0;        ///< Successfully processed deletions

@@ -30,8 +30,10 @@
  *  - full and reference behave identically, case for case.
  *
  * The fixtures rotate containers, which costs a few hundred thousand inserts, so
- * they are built once and shared. Nothing here mutates the database — resolve()
- * and find() only read — so sharing is safe and the cases stay independent.
+ * they are built once and shared. Nothing touches the shared ones — resolve()
+ * and find() only read — so sharing is safe and the cases stay independent. The
+ * one case that writes, the deletion counterpart below, builds its own database
+ * rather than deleting out of a fixture the others are reading.
  */
 
 #include <algorithm>
@@ -146,6 +148,25 @@ corpus const& keys() {
     return c;
 }
 
+/// Fills with filler entries until container 0 has rotated `rotations` times, so
+/// everything inserted before the call sits below the active version.
+///
+/// Shared, because a case that must not touch the read-only fixture needs its own
+/// database and should not restate this. The filler keys are the only thing it
+/// writes, and no case names them.
+void fill_until_rotations(utxoz::full_db& db, size_t rotations) {
+    uint64_t n = 10'000;
+    uint32_t height = 2;
+    for (int round = 0; round < 400; ++round) {
+        if (db.get_statistics().rotations_per_container[0] >= rotations) break;
+        for (int i = 0; i < 5'000; ++i, ++n) {
+            (void) db.insert(outpoint_of(n, 0), utxoz::output_data_span{value_of(33, 7)}, height);
+        }
+        ++height;
+    }
+    REQUIRE(db.get_statistics().rotations_per_container[0] >= rotations);
+}
+
 /// Fills until container 0 has rotated twice, so every corpus key sits below the
 /// active version and resolve() has several files to walk.
 scoped_path const& full_fixture() {
@@ -161,16 +182,7 @@ scoped_path const& full_fixture() {
             REQUIRE(db.insert(c.b_stored[i], utxoz::output_data_span{value_of(33, static_cast<uint8_t>(100 + i))}, 1).value());
         }
 
-        uint64_t n = 10'000;
-        uint32_t height = 2;
-        for (int round = 0; round < 400; ++round) {
-            if (db.get_statistics().rotations_per_container[0] >= 2) break;
-            for (int i = 0; i < 5'000; ++i, ++n) {
-                (void) db.insert(outpoint_of(n, 0), utxoz::output_data_span{value_of(33, 7)}, height);
-            }
-            ++height;
-        }
-        REQUIRE(db.get_statistics().rotations_per_container[0] >= 2);
+        fill_until_rotations(db, 2);
 
         db.close();
         return p;
@@ -765,14 +777,24 @@ TEST_CASE("full: a resolution moves only the resolution counters",
 TEST_CASE("full: a deletion moves only the deletion counters",
           "[ownership][full][statistics]") {
     failpoint_guard guard;
-    auto db = open_full();
 
-    // One of the fixture's filler keys, which sits below the active version after
-    // the rotations. That is deliberate: a key in the active version is erased
+    // Its own database, not the shared fixture. This is the one case here that
+    // writes, and the fixture the others share is documented as read-only —
+    // deleting out of it would make their independence a matter of ordering.
+    // One rotation is enough and costs half of what the shared one does.
+    scoped_path own{make_unique_path("del")};
+    auto opened = utxoz::full_db::open_for_testing(own.path, true);
+    REQUIRE(opened.has_value());
+    auto db = std::move(*opened);
+
+    // Inserted before the fill, so the rotation leaves it below the active
+    // version. That is deliberate: a key still in the active version is erased
     // outright and never reaches the deferred path, so the sweep would have
     // nothing to do and none of its counters would move — the case would pass
-    // for the wrong reason. No other case names the fillers.
-    auto const doomed = outpoint_of(10'000, 0);
+    // for the wrong reason.
+    auto const doomed = outpoint_of(7'777'001, 2);
+    REQUIRE(db.insert(doomed, utxoz::output_data_span{value_of(33, 0x11)}, 1).value());
+    fill_until_rotations(db, 1);
 
     auto const before = db.get_statistics();
 
