@@ -63,7 +63,11 @@ if [[ "$1" == "--build" ]]; then
         mode="${spec##*:}"
         path="${build_dir}/${name}"
         mkdir -p "$(dirname "${path}")"
-        printf '#!/usr/bin/env bash\nexit %s\n' "${RUN_STATUS:-0}" > "${path}"
+        # Announces itself on stdout. An exit status of 0 can also come from a
+        # consumer that was never started; this token can only come from this
+        # file having been executed.
+        printf '#!/usr/bin/env bash\necho "CONSUMER-RAN %s"\nexit %s\n' \
+               "${name}" "${RUN_STATUS:-0}" > "${path}"
         chmod "${mode}" "${path}"
     done
     exit 0
@@ -86,12 +90,14 @@ mkdir -p "${work}/consumer"
 
 # run <emit-spec> [run-status] — one invocation against a fresh install dir.
 run() {
-    local emit="$1" run_status="${2:-0}"
+    local emit="$1" run_status="${2:-0}" install_override="${3:-}"
     rm -rf "${work}/install"
     mkdir -p "${work}/install"
     : > "${work}/install/conan_toolchain.cmake"
+    local install="${work}/install"
+    [[ -n "${install_override}" ]] && install="${work}/${install_override}"
     env EMIT="${emit}" RUN_STATUS="${run_status}" \
-        "${SCRIPT}" "${work}/install" "${work}/consumer" 2>&1
+        "${SCRIPT}" "${install}" "${work}/consumer" 2>&1
 }
 
 # check <name> <expected code> <must say> <emit> [run-status]
@@ -117,12 +123,12 @@ check() {
 
 echo "== the executable is found and run =="
 
-check "exactly one executable is found and run" ${EXIT_OK} "configures, builds and runs" \
+check "exactly one executable is found and run" ${EXIT_OK} "CONSUMER-RAN test_package" \
       "test_package:755"
 
 # What Windows produces. The same search has to accept it, or the release check
 # passes on Linux and macOS and fails on the platform #113 was about.
-check "the Windows name is accepted" ${EXIT_OK} "configures, builds and runs" \
+check "the Windows name is accepted" ${EXIT_OK} "CONSUMER-RAN test_package.exe" \
       "test_package.exe:755"
 
 check "a consumer that runs and fails is its own fault" ${EXIT_RAN_AND_FAILED} "exited 3" \
@@ -145,7 +151,7 @@ check "a build subdirectory is not the consumer" ${EXIT_NO_EXECUTABLE} "produced
 
 # All of them at once, plus the real thing: the real one must be chosen, and the
 # run must be the real one's.
-check "the real executable is chosen from among them" ${EXIT_OK} "configures, builds and runs" \
+check "the real executable is chosen from among them" ${EXIT_OK} "CONSUMER-RAN test_package" \
       "test_package.cpp.o:755 test_package.lib:755 test_package.pdb:755 test_package:755"
 
 echo
@@ -155,6 +161,47 @@ echo "== two candidates is not one =="
 # for a tree the search cannot identify.
 check "two executables named test_package are refused" ${EXIT_NO_EXECUTABLE} "holds 2 executables" \
       "test_package:755 sub/test_package:755"
+
+echo
+echo "== relative arguments name the same thing =="
+
+# CI calls this with paths built from $RUNNER_TEMP, which are absolute. A caller
+# working from its own directory need not, and BUILD_DIR is derived from
+# INSTALL_DIR — so a relative one makes `find` print a relative candidate, which
+# the run then resolves from the scratch directory it cd's into. The exec fails
+# with 127 and is reported as EXIT_RAN_AND_FAILED: a consumer that never started,
+# blamed for not working.
+#
+# Both arguments are relative here, and the assertion is the token the executable
+# itself prints. Checking for exit 0 alone would not distinguish "ran" from
+# "was never started but nothing noticed".
+rm -rf "${work}/install"
+mkdir -p "${work}/install"
+: > "${work}/install/conan_toolchain.cmake"
+
+status=0
+out="$(cd "${work}" && env EMIT="test_package:755" RUN_STATUS=0 \
+       "${SCRIPT}" install consumer 2>&1)" || status=$?
+
+if [[ ${status} -ne ${EXIT_OK} ]]; then
+    printf 'FAIL  %-52s exited %d, expected %d\n' \
+           "relative install and consumer paths" "${status}" "${EXIT_OK}"
+    printf '%s\n' "${out}" | sed 's/^/        /'
+    failures=$((failures + 1))
+elif [[ "${out}" != *"CONSUMER-RAN test_package"* ]]; then
+    printf 'FAIL  %-52s exited 0 without the consumer having run\n' \
+           "relative install and consumer paths"
+    printf '%s\n' "${out}" | sed 's/^/        /'
+    failures=$((failures + 1))
+else
+    printf 'ok    %-52s rc=%d, consumer announced itself\n' \
+           "relative install and consumer paths" "${status}"
+fi
+
+# A directory that does not exist is a caller error, not a package fault, and it
+# has to be refused before anything is derived from it.
+check "a missing install directory is refused" ${EXIT_CONFIGURE} "no such install directory" \
+      "test_package:755" 0 missing-install
 
 echo
 echo "== a search that fails keeps its own code and says why =="

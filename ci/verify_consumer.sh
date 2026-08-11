@@ -46,11 +46,27 @@ if [[ $# -ne 2 ]]; then
     exit ${EXIT_CONFIGURE}
 fi
 
-readonly INSTALL_DIR="$1"
-readonly CONSUMER_DIR="$2"
+# Both directories are made absolute before anything is derived from them.
+#
+# BUILD_DIR comes from INSTALL_DIR, and `find` prints paths that begin with the
+# directory it was given — so a relative INSTALL_DIR yields a relative candidate.
+# The run below deliberately happens from a scratch directory, because the
+# consumer creates databases under its working directory, and a relative path
+# resolved from there names nothing. The exec fails with 127 and arrives as
+# EXIT_RAN_AND_FAILED: "it built and then did not work", about a consumer that
+# was never started.
+#
+# `cd && pwd` rather than `realpath`, which is GNU coreutils and not on a stock
+# macOS. It also needs the directory to exist, which is why the checks come
+# first and keep their own diagnostics.
+[[ -d "$1" ]] || { echo "FAIL: no such install directory: $1" >&2; exit ${EXIT_CONFIGURE}; }
+[[ -d "$2" ]] || { echo "FAIL: no such consumer directory: $2" >&2; exit ${EXIT_CONFIGURE}; }
+
+INSTALL_DIR="$(cd "$1" && pwd)"
+CONSUMER_DIR="$(cd "$2" && pwd)"
+readonly INSTALL_DIR CONSUMER_DIR
 readonly TOOLCHAIN="${INSTALL_DIR}/conan_toolchain.cmake"
 
-[[ -d "${CONSUMER_DIR}" ]] || { echo "FAIL: no such consumer directory: ${CONSUMER_DIR}" >&2; exit ${EXIT_CONFIGURE}; }
 [[ -f "${TOOLCHAIN}" ]] || { echo "FAIL: no conan_toolchain.cmake in ${INSTALL_DIR}" >&2; exit ${EXIT_CONFIGURE}; }
 
 readonly BUILD_DIR="${INSTALL_DIR}/consumer-build"
