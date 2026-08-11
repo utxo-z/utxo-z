@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786447494575,
+  "lastUpdate": 1786450060087,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -14534,6 +14534,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.41,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "58fa08d2ba41ae16692787d9fd4fefa12d86aa9d",
+          "message": "fix: serialise resolutions, so resolve() can be called from two threads (#123)\n\n* fix: serialise resolutions, so resolve() can be called from two threads\n\nresolve() reads the LRU file cache, and the cache has no synchronisation. Two\nthreads resolving disjoint batches produced 90 ThreadSanitizer data races in\nfile_cache::get_or_open_file and exit 139 — a segfault, not a torn read (#120).\n\nTwo faults share that call site. The smaller one is bookkeeping: cache_,\naccess_frequency_, gets_, hits_ and the per-entry last_used and access_count are\nall mutated unguarded. The one that crashes is lifetime. The cache returns a\nreference into a managed_mapped_file it owns, and evict_lru() destroys that\nsegment; a second resolution evicting a mapping the first is still reading\nunmaps the memory underneath it. Locking the contents would not have helped, as\nthe cache's own header has said all along. max_cached_files_ defaults to 1, so\nnearly every miss evicts and two threads on different containers evict each\nother almost every file.\n\nSo the lock is held for the whole of full_resolve() and reference_resolve(),\nfrom before the first read to the return, rather than around the cache calls.\nAnything narrower protects the bookkeeping and leaves the references dangling,\nwhich is the half that segfaults. Being a function-scope scoped_lock, it also\ncovers the error returns and the empty-batch early return.\n\nThis is not a step towards a reader/writer cache. With a one-entry cache,\nreference-counted segments would let two threads overlap only to spend the\noverlap thrashing the LRU; that shape needs a much larger cache and a profile\nshowing contention is the bottleneck, and resolution is dominated by mmap page\nfaults rather than by CPU. Serialising is the whole fix until there is evidence\nasking for more.\n\nresolve-vs-resolve only. insert(), erase(), process_pending_deletions() and\ncompact_all() touch the same cache and stay the caller's to serialise.\n\nfind() needs no lock and gets none. It reads the active containers, which live\nin segments_ and are not the cache's to evict, and writes only its own sharded\nprobe counters; a resolution reads the older versions through the cache and\nwrites only the resolution counters. Disjoint mappings, disjoint counters.\n\nThe controls run both storage modes with no lock of the caller's, two disjoint\nbatches, forty barrier-synchronised rounds, plus find() and resolve() together\nfor two hundred rounds exercising both of find()'s paths. Clean under\nThreadSanitizer, and removing the two scoped_locks brings back 105 races —\nevict_lru among them — and exit 66. A sequential case resolves the same batches\nthe same number of times on one thread, so a disagreement between the two can\nonly be the concurrency.\n\nThe fixtures gain one key inserted after the fill, so it is in the active\nversion and find() has a hit path to exercise rather than only a miss path.\n\n* docs: say what the read path may now do concurrently, and what it may not\n\nThe threading contract still described the state before the lock: that resolve()\nbelongs on the \"one at a time\" list, that caller-owned batches make two\nresolutions \"independent, not concurrent\", and that find() is permitted only\nwhile no resolution can run. All three are now false, and a caller reading them\nwould build serialisation it does not need — or worse, conclude the pairing is\nunsafe and avoid the API.\n\nWhat it says instead is exactly what is true and no more:\n\n  - resolve() may be called concurrently. The library serialises resolutions\n    with a lock of its own, held for the whole call rather than around the cache\n    lookups, which is what covers the lifetime of every mapping reference the\n    call obtains. The caller arranges nothing.\n  - find() may run alongside resolve(), because they touch disjoint state: the\n    active containers and the probe counters on one side, the older versions\n    through the cache and the resolution counters on the other. Eviction cannot\n    reach the active containers; they are separate mappings. Stated as\n    demonstrated rather than reasoned, with a pointer to the ThreadSanitizer\n    cases that show it.\n  - none of that extends to insert(), a deletion, compaction or close(). A\n    rotation inside insert() unmaps the active segment outright, and\n    process_pending_deletions() writes through the very mappings a resolution\n    reads.\n  - the lock covers resolve-vs-resolve. It does not make the database\n    thread-safe, and the text says so in those words rather than leaving the\n    scope to be inferred from what is absent.\n\nThe cache bullet is corrected the same way: resolve() is safe against another\nresolve() because it holds that lock across its whole use of the references,\nwhile erase() and process_pending_deletions() touch the same cache and are not\ncovered.\n\nBoth the header and the README, which had drifted into saying opposite things\nabout the same call.\n\n* docs: fix a missing auxiliary in the threading note\n\n\"Callers need arrange nothing\" was missing its verb. Says \"Callers arrange\nnothing\", matching the register the README already uses for the same sentence.",
+          "timestamp": "2026-08-11T14:03:16+02:00",
+          "tree_id": "a92d6b98c1444ecb589f8881c92c0ebb2a425442",
+          "url": "https://github.com/utxo-z/utxo-z/commit/58fa08d2ba41ae16692787d9fd4fefa12d86aa9d"
+        },
+        "date": 1786450059438,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 12579844.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 12525715.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 8066326.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 1474693.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 566.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 770.71,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 14388115.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 33026695.72,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 14104173.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 14348.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 14796807.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 12169397.54,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 113501.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 15182.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2013.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 5816.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2621.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 4.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 4.9,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 4.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 4.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 4.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 4.75,
             "unit": "ops/sec"
           }
         ]
