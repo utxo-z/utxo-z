@@ -238,7 +238,14 @@ TEST_CASE("a failed sync discharges nothing", "[database][sync][failpoint]") {
 
     std::vector<utxoz::deferred_deletion_entry> batch;
     for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
-    REQUIRE(db.apply_deletes(batch).unresolved.empty());
+    {
+        // Both halves: nothing owed, and something actually deleted. Checking
+        // only `unresolved` would pass on a batch that found every key absent,
+        // and the sync failpoint below needs real deletions to have happened.
+        auto const progress = db.apply_deletes(batch);
+        REQUIRE(progress.unresolved.empty());
+        REQUIRE_FALSE(progress.erased.empty());
+    }
 
     failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
     auto const failed_sync = db.sync();

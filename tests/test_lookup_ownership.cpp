@@ -448,7 +448,7 @@ TEST_CASE("full: an unreadable version yields no partial results and no absences
     // Version 1 is neither the first file walked nor the only one, so the
     // failure lands after entries have already been resolved into the local
     // result. None of that may escape.
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
 
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
@@ -500,7 +500,7 @@ TEST_CASE("full: an unlistable catalogue keeps its own cause and consumes nothin
 
     auto const batch = batch_of(c.a_stored, 100'000);
 
-    failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+    failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
     // Not version_unreadable: not knowing which files exist sends an operator
@@ -530,7 +530,7 @@ TEST_CASE("full: one owner's failed resolution leaves another's batch resolvable
     auto const batch_a = batch_of(c.a_stored, 100'000);
     auto const batch_b = batch_of(c.b_stored, 100'000);
 
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
     REQUIRE_FALSE(db.resolve(batch_a).has_value());
     failpoints::clear();
 
@@ -688,7 +688,7 @@ TEST_CASE("reference: an unreadable version yields no partial results, and the r
 
     auto const before = db.get_statistics();
 
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
     CHECK(failed.error() == utxoz::error_code::version_unreadable);
@@ -715,7 +715,7 @@ TEST_CASE("reference: an unlistable catalogue keeps its own cause and consumes n
 
     auto const batch = batch_of(c.a_stored, 100'000);
 
-    failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+    failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
     CHECK(failed.error() == utxoz::error_code::catalog_unreadable);
@@ -778,7 +778,6 @@ TEST_CASE("full: a resolution moves only the resolution counters",
     CHECK(after.deferred.processing_runs == before.deferred.processing_runs);
     CHECK(after.deferred.successfully_processed == before.deferred.successfully_processed);
     CHECK(after.deferred.failed_to_delete == before.deferred.failed_to_delete);
-    CHECK(after.deferred.total_deferred == before.deferred.total_deferred);
     CHECK(after.deferred.total_processing_time == before.deferred.total_processing_time);
     CHECK(after.deferred.deletions_by_depth == before.deferred.deletions_by_depth);
 
@@ -846,7 +845,7 @@ TEST_CASE("full: an incomplete resolution moves neither family",
     auto const before = db.get_statistics();
 
     auto const batch = batch_of(c.a_stored, 100'000);
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
     REQUIRE_FALSE(db.resolve(batch).has_value());
 
     auto const after = db.get_statistics();

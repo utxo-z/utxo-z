@@ -199,7 +199,7 @@ struct deletion_progress {
  * Statistics are operations too, not free reads. get_statistics() is not const
  * — it recomputes the fragmentation counters as it goes — and
  * reset_search_stats() / reset_all_statistics() write by definition; the const
- * accessors read plain counters that insert() and erase() write. All of them
+ * accessors read plain counters that insert() and apply_deletes() write. All of them
  * may overlap with find(), which writes nothing they look at beyond its own
  * sharded counters, but not with any mutation, and get_statistics() and the
  * reset calls not with each other either. A summary taken while find() is
@@ -213,8 +213,8 @@ struct deletion_progress {
  *   across its whole use of those references. apply_deletes() writes through the
  *   same mappings and is not covered by that lock, so it stays the caller's to
  *   exclude.
- * - The entry count, per-container statistics, deferred deletions and the file
- *   metadata are plain members mutated without atomics.
+ * - The entry count, the per-container statistics and the file metadata are
+ *   plain members mutated without atomics.
  * - A rotation (triggered from inside insert()) unmaps the whole active segment
  *   and briefly leaves the container pointer null. A concurrent find() would be
  *   reading unmapped memory — which is why "no mutation in flight" is a
@@ -250,9 +250,8 @@ struct db_base {
     /// keeps answering after a failed cleanup has latched the instance, and in
     /// that state it counts entries that several files hold at once. Every
     /// operation that reads or changes what is stored reports
-    /// error_code::recovery_required instead; this one, the queue sizes and the
-    /// statistics do not, because they exist to describe a database that is in
-    /// trouble.
+    /// error_code::recovery_required instead; this one and the statistics do
+    /// not, because they exist to describe a database that is in trouble.
     size_t size() const;
 
     /**
@@ -317,7 +316,7 @@ struct db_base {
      *
      * Returns once the entries this database holds have reached the disk: the
      * active container of each size class, the older generations a batch's
-     * deferred deletions reached through the file cache, and the directory
+     * deletions reached through the file cache, and the directory
      * entries that name them. Until it returns, a power cut can lose writes
      * that every earlier call reported as successful — that is not a defect,
      * it is what buffered I/O is, and this is the call that ends it.

@@ -55,8 +55,10 @@ void register_mixed_workload_benchmarks(ankerl::nanobench::Bench& bench) {
                 // Apply the block's deletions periodically. The batch is this
                 // loop's, so nothing accumulates inside the database.
                 if (block % 10 == 9 && ! pending_deletes.empty()) {
-                    (void)f.db->apply_deletes(pending_deletes);
-                    pending_deletes.clear();
+                    auto const progress = f.db->apply_deletes(pending_deletes);
+                    // Carried, not cleared: whatever the call could not finish is
+                    // the one category that has to be sent again.
+                    pending_deletes = progress.unresolved;
                 }
             }
         });

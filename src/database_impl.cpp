@@ -860,13 +860,15 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
         pending.resize(keep);
     }
 
-    // The historical walk, shared by both phases below. Erasing through the file
-    // cache is a write to a mapping the cache may evict before this call ends, so
-    // the dirty mark has to outlive the mapping.
-    // Applied so far in this call, for the seam below. Counting here rather than
-    // per file is what lets a case aim the throw at a file that has already
-    // applied something.
-    uint64_t applied_in_call = 0;
+    // Applied so far by the historical walk, for the seam below. Counted across
+    // files rather than per file, so a case can aim the throw at a file that has
+    // already applied something.
+    //
+    // The active-version phase above is deliberately not counted. It has no throw
+    // point — the seam lives inside the per-file loop — so including it would
+    // only shift the numbering by however many keys happened to still be in the
+    // active version, which is not something a case can know.
+    uint64_t applied_in_walk = 0;
 
     // One file's worth of the walk, over whatever map it is handed.
     //
@@ -918,7 +920,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
             current_applied = true;
 
             if (failpoints::fail_delete_after_applied.load(std::memory_order_relaxed)
-                    == ++applied_in_call) {
+                    == ++applied_in_walk) {
                 throw std::runtime_error("failpoint: threw after applying a deletion");
             }
 
@@ -942,7 +944,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     // index.
     auto const erase_in_reference_file = [&](size_t version) {
         try {
-            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
@@ -974,7 +976,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     auto const erase_in_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>,
                                                      size_t version) {
         try {
-            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
@@ -1059,7 +1061,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 if (ci == reference_sentinel_index) seen.insert(version);
             }
             try {
-                if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+                if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                     throw std::runtime_error("failpoint: catalogue refused to be listed");
                 }
                 for (auto const v : reference_catalog_.below(reference_current_version_)) {
@@ -1080,7 +1082,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
             for_each_index<container_count>([&](auto I) {
                 if (pending.empty()) return;
                 try {
-                    if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+                    if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                         throw std::runtime_error("failpoint: catalogue refused to be listed");
                     }
                     for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
@@ -2856,7 +2858,7 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
 
     auto probe_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>, size_t version) {
         try {
-            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
@@ -2933,7 +2935,7 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
             // Enumerating the versions can fail too, and not knowing which files
             // exist is the same problem as not being able to read one.
             try {
-            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+            if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                 throw std::runtime_error("failpoint: catalogue refused to be listed");
             }
             for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
@@ -3101,7 +3103,7 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
 
     auto probe_reference_file = [&](size_t version) {
         try {
-            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
@@ -3162,7 +3164,7 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
         }
 
         try {
-            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+            if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                 throw std::runtime_error("failpoint: catalogue refused to be listed");
             }
             for (auto const v : reference_catalog_.below(reference_current_version_)) {

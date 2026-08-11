@@ -130,10 +130,8 @@ private:
     // Find helpers
     std::optional<find_result> find_in_latest_version(raw_outpoint const& key, uint32_t height) const;
 
-    // Erase helpers
+    // The active-version phase of apply_deletes(); nothing else calls it.
     size_t erase_in_latest_version(raw_outpoint const& key, uint32_t height);
-
-    // Deferred lookup helpers
 
     // File management
     template<size_t Index>

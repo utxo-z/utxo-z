@@ -316,7 +316,15 @@ int main() {
         log_print("Final erased: {}\n", final_progress.erased.size());
         log_print("Final absent: {}\n", final_progress.absent.size());
         log_print("Final unresolved: {}\n", final_progress.unresolved.size());
-        pending_deletes.clear();
+
+        // Same handling as the periodic path above: what could not be finished is
+        // kept rather than dropped, and the failure is reported rather than
+        // summarised away.
+        pending_deletes = final_progress.unresolved;
+        if (final_progress.error) {
+            log_print("The final batch did not complete; {} deletions are still owed\n",
+                      pending_deletes.size());
+        }
 
         // Final compaction
         log_print("Final compaction...\n");

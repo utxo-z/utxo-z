@@ -126,7 +126,7 @@ int main() {
 
 Containers are **generational**: each one keeps writing to its latest version file and rotates to a new one when that file fills up. Only the latest version is memory-mapped.
 
-`find()` and `erase()` work on that mapped version (`erase()` also checks the cached files). Anything left behind in a previous version is not answered there, so their immediate result is **not authoritative**:
+`find()` works on that mapped version alone. `apply_deletes()` starts there and then walks the older versions itself, which is the difference between them: a read reports what it could not answer and leaves the rest to you, while a deletion goes and does it.
 
 - `find()` returning `not_resolved` means "not in the active versions, and nothing else was consulted". It is not absence, and nothing was recorded: **you keep the request**.
 - `apply_deletes()` applies what it can reach and reports the rest. Nothing is queued inside the database: what is not in your batch is not being deleted.
@@ -197,12 +197,12 @@ That is the whole of it. The lock covers **resolve-vs-resolve**; it does not mak
 
 `apply_deletes()` is on neither list. It erases from the active containers *and* writes through the cache's mappings, so it needs exclusion from `resolve()`, `find()`, `insert()`, compaction and `close()` alike — the resolve lock serialises resolutions against each other and knows nothing about a deletion writing through the same segments.
 
-**Statistics are operations too, not free reads.** `get_statistics()` is not const — it recomputes the fragmentation counters as it goes — and `reset_search_stats()` / `reset_all_statistics()` write by definition; the const accessors read plain counters that `insert()` and `erase()` write. All of them may overlap with `find()`, which writes nothing they look at beyond its own sharded counters, but not with any mutation, and `get_statistics()` and the reset calls not with each other either. A summary taken while `find()` is recording is also not consistent across fields — numerators can sit an increment ahead of their denominators, so take it while nothing is recording if you need exact cross-field numbers.
+**Statistics are operations too, not free reads.** `get_statistics()` is not const — it recomputes the fragmentation counters as it goes — and `reset_search_stats()` / `reset_all_statistics()` write by definition; the const accessors read plain counters that `insert()` and `apply_deletes()` write. All of them may overlap with `find()`, which writes nothing they look at beyond its own sharded counters, but not with any mutation, and `get_statistics()` and the reset calls not with each other either. A summary taken while `find()` is recording is also not consistent across fields — numerators can sit an increment ahead of their denominators, so take it while nothing is recording if you need exact cross-field numbers.
 
 The restriction on everything else is structural rather than incidental:
 
 - The LRU file cache owns the memory mappings and has no synchronisation of its own. Evicting an entry unmaps the segment, so a second thread reading a map it obtained earlier is a use-after-unmap: a crash, not a torn read. `resolve()` is safe against another `resolve()` because it holds the lock above across its whole use of those references. `apply_deletes()` writes through the same mappings and is **not** covered by that lock, so it stays yours to exclude.
-- The deferred-deletion queue, the entry count, the per-container statistics and the file metadata are plain members mutated without atomics.
+- The entry count, the per-container statistics and the file metadata are plain members mutated without atomics.
 - A rotation — triggered from inside `insert()` — unmaps the whole active segment and briefly leaves the container pointer null. A concurrent `find()` would be reading unmapped memory, which is why "no mutation in flight" bounds the read path above and is not a nicety.
 
 #### When the first rotation happens
@@ -281,7 +281,7 @@ utxoz::set_log_prefix("utxoz");  // Messages will show as "[utxoz] ..."
 ### Class hierarchy
 
 ```text
-db_base                    — shared methods (close, size, erase, statistics, ...)
+db_base                    — shared methods (close, size, apply_deletes, statistics, ...)
   ├── full_db  (= db)      — variable-size byte values
   └── reference_db          — typed file_number + offset fields
 ```

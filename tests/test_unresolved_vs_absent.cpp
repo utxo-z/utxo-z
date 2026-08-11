@@ -212,7 +212,7 @@ TEST_CASE("full: a version that will not open is an error, and the retry loses n
         // therefore lands after some keys have already been resolved into the
         // call's own working set, which is the case that must not leak a partial
         // answer.
-        failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
 
         auto const failed = db.resolve(batch);
 
@@ -252,7 +252,7 @@ TEST_CASE("full: a failure before anything is resolved reports the same way",
         auto const batch = batch_of(db, f);
 
         // Version 0 is the oldest, reached first.
-        failpoints::fail_lookup_open_version.store(0, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(0, std::memory_order_relaxed);
 
         auto const failed = db.resolve(batch);
         REQUIRE_FALSE(failed.has_value());
@@ -281,7 +281,7 @@ TEST_CASE("full: a catalogue that cannot be listed keeps its own cause",
 
         auto const batch = batch_of(db, f);
 
-        failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+        failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
 
         auto const failed = db.resolve(batch);
 
@@ -311,7 +311,7 @@ TEST_CASE("full: clearing the failpoint removes the failure", "[unresolved][full
         auto db = std::move(*opened);
 
         auto const batch = batch_of(db, f);
-        failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
         REQUIRE_FALSE(db.resolve(batch).has_value());
 
         failpoints::clear();
@@ -340,7 +340,7 @@ TEST_CASE("full: a failed sweep publishes no statistics, and the retry counts on
 
         auto const before = db.get_statistics();
 
-        failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
         REQUIRE_FALSE(db.resolve(batch).has_value());
 
         auto const after_failure = db.get_statistics();
@@ -479,7 +479,7 @@ TEST_CASE("reference: a version that will not open is an error, and the retry lo
 
         auto const batch = reference_batch_of(db, f);
 
-        failpoints::fail_lookup_open_version.store(0, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(0, std::memory_order_relaxed);
 
         auto const failed = db.resolve(batch);
 
@@ -507,7 +507,7 @@ TEST_CASE("reference: a catalogue that cannot be listed keeps its own cause",
 
         auto const batch = reference_batch_of(db, f);
 
-        failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+        failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
 
         auto const failed = db.resolve(batch);
         REQUIRE_FALSE(failed.has_value());
@@ -536,7 +536,7 @@ TEST_CASE("reference: a failed sweep publishes no statistics, and the retry coun
 
         auto const before = db.get_statistics();
 
-        failpoints::fail_lookup_open_version.store(0, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(0, std::memory_order_relaxed);
         REQUIRE_FALSE(db.resolve(batch).has_value());
 
         auto const after_failure = db.get_statistics();

@@ -29,11 +29,13 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <numeric>
 #include <ranges>
+#include <span>
 #include <vector>
 
 #ifdef _WIN32
@@ -312,7 +314,7 @@ TEST_CASE("full: an unreadable version keeps what was applied and calls nothing 
 
         // Version 1: container 0 has versions 0 and 1 below its current, so the
         // walk applies deletions from one of them before it reaches this one.
-        failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
 
         auto const progress = db.apply_deletes(batch);
 
@@ -365,7 +367,7 @@ TEST_CASE("full: an unlistable catalogue keeps its own cause and calls nothing a
         std::vector<deferred_deletion_entry> batch = batch_of(f.historical, 60'000);
         for (auto const& k : f.never_stored) batch.emplace_back(k, 60'000);
 
-        failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+        failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
         auto const progress = db.apply_deletes(batch);
 
         REQUIRE(progress.error.has_value());
@@ -470,7 +472,7 @@ TEST_CASE("full: an incomplete batch counts what it applied and no completed run
         std::vector<deferred_deletion_entry> batch = batch_of(f.historical, 60'000);
         for (auto const& k : f.never_stored) batch.emplace_back(k, 60'000);
 
-        failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
         auto const partial = db.apply_deletes(batch);
         REQUIRE(partial.error.has_value());
 
@@ -738,7 +740,7 @@ TEST_CASE("full: a latched database refuses the batch, deduplicated",
 /**
  * The window between the map changing and the working set knowing about it.
  *
- * fail_lookup_open_version fires before a file is touched, so every case using
+ * fail_historical_open_version fires before a file is touched, so every case using
  * it leaves that window unexercised. This one throws between the erase and the
  * bookkeeping that follows it, after a chosen number of deletions have already
  * been applied within the call — which is the only way to reach the state the
@@ -896,7 +898,7 @@ TEST_CASE("reference: an unreadable version keeps what was applied and calls not
         std::vector<deferred_deletion_entry> batch = batch_of(f.historical, 60'000);
         for (auto const& k : f.never_stored) batch.emplace_back(k, 60'000);
 
-        failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+        failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
         auto const progress = db.apply_deletes(batch);
 
         REQUIRE(progress.error.has_value());
@@ -922,7 +924,7 @@ TEST_CASE("reference: an unlistable catalogue keeps its own cause", "[deletion][
         auto db = std::move(*utxoz::reference_db::open_for_testing(f.path, false));
 
         auto const batch = batch_of(f.historical, 60'000);
-        failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+        failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
         auto const progress = db.apply_deletes(batch);
 
         REQUIRE(progress.error.has_value());

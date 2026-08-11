@@ -115,17 +115,18 @@ struct failpoints {
     static constexpr uint64_t no_version = ~uint64_t{0};
 
     /// Fails a historical walk — resolution or deletion alike — as it opens one
-    /// specific version.
+    /// specific version. Named for the walk rather than for lookups: deletions
+    /// use the same seam, and the old name said otherwise.
     /// A specific version and not a blanket switch, because what has to be shown
     /// is a sweep that reads some files and then cannot read one — the case
     /// where a partial result exists and must not be handed back as absence. A
     /// blanket failure stops at the first file and never reaches it.
-    static inline std::atomic<uint64_t> fail_lookup_open_version{no_version};
+    static inline std::atomic<uint64_t> fail_historical_open_version{no_version};
 
     /// Fails a historical walk's attempt to enumerate which versions exist. A different
     /// failure from a file that will not open, reported with a different code,
     /// so the two cannot be shown to work by the same test.
-    static inline std::atomic<bool> fail_lookup_catalog{false};
+    static inline std::atomic<bool> fail_historical_catalog{false};
 
     /// Sentinel meaning "never throw".
     ///
@@ -136,11 +137,15 @@ struct failpoints {
     static constexpr uint64_t no_applied_count = ~uint64_t{0};
 
     /// Throws inside a deletion batch once this many deletions have been applied
-    /// within the call, between the map changing and the bookkeeping that
-    /// follows it.
+    /// *by the historical walk*, between the map changing and the bookkeeping
+    /// that follows it.
+    ///
+    /// The active-version phase is not counted: the seam is inside the per-file
+    /// loop, so a deletion applied before the walk starts can never be the one
+    /// that throws.
     ///
     /// A deletion writes as it walks, so the dangerous exception is not the one
-    /// that stops a file from opening — fail_lookup_open_version already covers
+    /// that stops a file from opening — fail_historical_open_version already covers
     /// that, and it fires before anything in the file has changed. It is the one
     /// raised after a key is gone from the map: dirty tracking, metadata, a
     /// vector growing. Without a seam that reaches that point, nothing shows
@@ -230,8 +235,8 @@ struct failpoints {
         fail_replace.store(false, std::memory_order_relaxed);
         fail_unlink.store(false, std::memory_order_relaxed);
         fail_source_unlink.store(false, std::memory_order_relaxed);
-        fail_lookup_open_version.store(no_version, std::memory_order_relaxed);
-        fail_lookup_catalog.store(false, std::memory_order_relaxed);
+        fail_historical_open_version.store(no_version, std::memory_order_relaxed);
+        fail_historical_catalog.store(false, std::memory_order_relaxed);
         fail_delete_after_applied.store(no_applied_count, std::memory_order_relaxed);
         reference_metadata_deletes.store(0, std::memory_order_relaxed);
         full_metadata_deletes.store(0, std::memory_order_relaxed);
