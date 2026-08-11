@@ -14,30 +14,49 @@
  * install but whose library does not link is just as unusable, and a package
  * whose full_db links while reference_db does not is broken for half its users.
  * Both failures belong here rather than downstream.
+ *
+ * Every include here comes from utxoz or from the standard library, and that is
+ * the point rather than a coincidence. This file used to print with
+ * `fmt::println`, and CMakeLists.txt declares one package: utxoz. On Linux and
+ * macOS the include resolved anyway, through fmt reaching the compiler's search
+ * path as a dependency of utxoz rather than as anything this consumer asked
+ * for; on Windows it did not, and the 0.9.1 release verification failed to
+ * compile a package that was published, retrievable and correct (#113).
+ *
+ * A package whose headers are pulled in without being declared is a package
+ * this test cannot speak about: it would pass or fail on how utxoz happens to
+ * propagate its own dependencies, which is not what it is here to measure. fmt
+ * is an implementation dependency — no header under include/utxoz includes it —
+ * so the printing moved to <iostream>.
+ *
+ * <iostream> rather than <print> or <format>, deliberately. This consumer is
+ * compiled by whatever toolchain a release runs on, and a diagnostic that fails
+ * because the compiler's C++23 library is incomplete would report utxoz as
+ * broken when it is not. Stream insertion is the one output facility every
+ * implementation that can build this package already has.
  */
 
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <span>
-
-#include <fmt/format.h>
 
 #include <utxoz/config.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/version.hpp>
 
 int main() {
-    fmt::println("utxoz {}", utxoz::version);
+    std::cout << "utxoz " << utxoz::version << '\n';
 
 #ifdef UTXOZ_STATISTICS_ENABLED
-    fmt::println("statistics: enabled");
+    std::cout << "statistics: enabled\n";
 #else
-    fmt::println("statistics: disabled");
+    std::cout << "statistics: disabled\n";
 #endif
 
     if (utxoz::version.empty()) {
-        fmt::println("the packaged version.hpp carries no version");
+        std::cout << "the packaged version.hpp carries no version\n";
         return EXIT_FAILURE;
     }
 
@@ -57,7 +76,7 @@ int main() {
 
         auto opened = utxoz::full_db::open_for_testing(path, true);
         if ( ! opened) {
-            fmt::println("full_db: open failed");
+            std::cout << "full_db: open failed\n";
             return EXIT_FAILURE;
         }
 
@@ -67,23 +86,23 @@ int main() {
 
         std::array<uint8_t, 32> const value{};
         if ( ! db.insert(key, utxoz::output_data_span{value}, 100)) {
-            fmt::println("full_db: insert failed");
+            std::cout << "full_db: insert failed\n";
             return EXIT_FAILURE;
         }
 
         auto const found = db.find(key, 200);
         if ( ! found) {
-            fmt::println("full_db: find failed");
+            std::cout << "full_db: find failed\n";
             return EXIT_FAILURE;
         }
         if (found->block_height != 100) {
-            fmt::println("full_db: find returned the wrong height");
+            std::cout << "full_db: find returned the wrong height\n";
             return EXIT_FAILURE;
         }
 
         db.close();
         std::filesystem::remove_all(path);
-        fmt::println("full_db: ok");
+        std::cout << "full_db: ok\n";
     }
 
     {
@@ -92,7 +111,7 @@ int main() {
 
         auto opened = utxoz::reference_db::open_for_testing(path, true);
         if ( ! opened) {
-            fmt::println("reference_db: open failed");
+            std::cout << "reference_db: open failed\n";
             return EXIT_FAILURE;
         }
 
@@ -101,28 +120,28 @@ int main() {
         key[0] = 2;
 
         if ( ! db.insert(key, 7, 42, 100)) {
-            fmt::println("reference_db: insert failed");
+            std::cout << "reference_db: insert failed\n";
             return EXIT_FAILURE;
         }
 
         auto const found = db.find(key, 200);
         if ( ! found) {
-            fmt::println("reference_db: find failed");
+            std::cout << "reference_db: find failed\n";
             return EXIT_FAILURE;
         }
         // The typed fields come back, which is the whole point of this mode and
         // the part that would break if reference_find_result ever stopped being
         // installed.
         if (found->file_number != 7 || found->offset != 42) {
-            fmt::println("reference_db: find returned the wrong fields");
+            std::cout << "reference_db: find returned the wrong fields\n";
             return EXIT_FAILURE;
         }
 
         db.close();
         std::filesystem::remove_all(path);
-        fmt::println("reference_db: ok");
+        std::cout << "reference_db: ok\n";
     }
 
-    fmt::println("ok");
+    std::cout << "ok\n";
     return EXIT_SUCCESS;
 }

@@ -216,7 +216,7 @@ jobs:
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=${{ matrix.build-type }} -o sanitizer=${{ matrix.sanitizer }}
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=${{ matrix.build-type }} -o "utxoz/*:sanitizer=${{ matrix.sanitizer }}"
 
       - name: ⚙️ Configure CMake
         run: |
@@ -396,12 +396,38 @@ jobs:
       #
       # A separate remote name, anonymous: it reads what a consumer would get,
       # not what the authenticated session that just uploaded can see.
+      #
+      # Three layers, three results, and they are not ranked the same. The
+      # release gate is that the exact recipe revision is on the remote and comes
+      # back from an empty cache; a prebuilt binary is an acceleration, and a
+      # consumer that compiles is a diagnostic. 0.9.1 published its recipe,
+      # uploaded its Windows binary, and went red anyway because the consumer
+      # included a header from a package it had not declared — a run that read as
+      # a failed release (#113).
+      #
+      # Every failure below is still red. What changes is that the annotation
+      # says which layer failed, and never says the recipe is missing when it is
+      # not. The exit code is the script's own, passed through, so anything
+      # reading this job can tell the four cases apart.
       - name: 🔍 The package is actually retrievable
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
           UTXOZ_REMOTE: kth-verify
           UTXOZ_REMOTE_URL: https://packages.kth.cash/api/
-        run: ./ci/verify_published.sh
+        run: |
+          verdict=0
+          ./ci/verify_published.sh || verdict=$?
+          reference="utxoz/$UTXOZ_BUILD_VERSION#${UTXOZ_RECIPE_REVISION:-unknown}"
+          case ${verdict} in
+            0) echo "ok: $reference published, binary retrieved, consumer runs" ;;
+            3) echo "::error title=Release gate failed::$reference is not on kth-verify. The remote answered, and said so." ;;
+            4) echo "::error title=Release gate undetermined::could not establish whether kth-verify has $reference. This is not absence and it is not a pass; re-run before concluding anything." ;;
+            5) echo "::error title=Release gate failed::kth-verify lists $reference but the recipe did not come back into an empty cache." ;;
+            6) echo "::error title=Binary missing — the recipe IS published::$reference is published and retrievable. No prebuilt binary for this platform came back under --build=never; consumers here will build from the recipe." ;;
+            7) echo "::error title=Consumer check failed — the recipe IS published::$reference is published and retrievable, and its binary downloaded. The verification consumer did not compile, link or run." ;;
+            *) echo "::error title=Verification failed unexpectedly::ci/verify_published.sh exited ${verdict}, which it has no meaning for." ;;
+          esac
+          exit ${verdict}
 
   build-wasm:
     needs: [setup]
@@ -552,7 +578,7 @@ jobs:
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o with_tests=False -o with_examples=False -o with_benchmarks=False
+          conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o "utxoz/*:with_tests=False" -o "utxoz/*:with_examples=False" -o "utxoz/*:with_benchmarks=False"
 
   statistics-disabled:
     needs: [setup]
@@ -590,7 +616,7 @@ jobs:
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o statistics=False
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o "utxoz/*:statistics=False"
 
       - name: ⚙️ Configure CMake
         run: |
@@ -754,6 +780,8 @@ jobs:
           ./ci/test_remote_revisions.sh
           ./ci/test_one_revision.sh
           ./ci/test_await_published.sh
+          ./ci/test_verify_published.sh
+          ./ci/test_verify_consumer.sh
 
       - name: 🧪 Verify toolchain
         env:
@@ -791,6 +819,63 @@ jobs:
           fi
           echo "ok: no publishing remote exists in this cache, so no upload was possible"
 
+      # The diagnostic layer of the release verification, run for real on every
+      # platform the release runs on — Windows included, which is where it broke
+      # — and then required to fail.
+      #
+      # The failing half is the point. Until 0.9.1 nothing had ever established
+      # that this check could fail: it had only ever been run against a package
+      # it was expected to work with. A check nobody has seen fail is not known
+      # to be able to, and the day it finally did fail it failed for the wrong
+      # reason — an undeclared fmt include rather than anything about utxoz
+      # (#113).
+      #
+      # So the same consumer is built twice against the same installed package:
+      # as it ships, which must work, and with its utxoz dependency stripped out,
+      # which must not. The second run is the one that gives the first its
+      # meaning.
+      - name: 🧪 The consumer check passes, and can fail
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+        run: |
+          install_dir="$RUNNER_TEMP/consumer-install"
+          rm -rf "$install_dir"
+          conan install --requires="utxoz/$UTXOZ_BUILD_VERSION" --build=never --lockfile-partial \
+            -pr:h ci/conan-cpp23 -s build_type=Release \
+            -o "utxoz/*:with_tests=False" -o "utxoz/*:with_examples=False" -o "utxoz/*:with_benchmarks=False" \
+            -g CMakeDeps -g CMakeToolchain -of "$install_dir"
+
+          echo "== the consumer as it ships must work =="
+          # Captured rather than just run: the success line is what says the
+          # search identified one executable and ran that one. On Windows the
+          # name carries a .exe and the filesystem reports ordinary files as
+          # executable, so "it exited 0" is not by itself evidence that the thing
+          # it ran was the consumer.
+          ./ci/verify_consumer.sh "$install_dir" test_package | tee consumer.log
+          if ! grep -q "ok: the consumer configures, builds and runs" consumer.log; then
+            echo "the consumer check passed without reporting a run" >&2
+            exit 1
+          fi
+
+          echo
+          echo "== and the same consumer without utxoz must not =="
+          stripped="$RUNNER_TEMP/consumer-without-utxoz"
+          rm -rf "$stripped"
+          cp -r test_package "$stripped"
+          # `conan create` leaves a build tree inside test_package; copying it
+          # would hand the negative control an executable from the run that
+          # passed, which is exactly the way this control would go vacuous.
+          rm -rf "$stripped/build"
+          grep -v 'utxoz' test_package/CMakeLists.txt > "$stripped/CMakeLists.txt"
+
+          negative=0
+          ./ci/verify_consumer.sh "$install_dir" "$stripped" || negative=$?
+          if [[ ${negative} -eq 0 ]]; then
+            echo "::error title=The consumer check is vacuous::a consumer that never declares utxoz configured, built and ran. The check cannot fail, so its passing says nothing." >&2
+            exit 1
+          fi
+          echo "ok: removing the utxoz dependency fails the consumer check (exit ${negative})"
+
       # The post-upload verification runs only during a release, so nothing would
       # exercise it until the day it matters. Here it is pointed at a version the
       # remote cannot have, and required to say so — in those words.
@@ -826,6 +911,52 @@ jobs:
           esac
           if ! grep -q "did not appear on kth-verify" verify.log; then
             echo "it exited 3 without saying why; the message the release is read from is missing" >&2
+            exit 1
+          fi
+          # The verdict has to name the layer that failed, and only that layer.
+          if ! grep -q "REQUIRED   recipe published and retrievable : ABSENT" verify.log; then
+            echo "the verdict does not report the required gate as absent" >&2
+            exit 1
+          fi
+          # Nothing below the gate ran, so nothing below it may be blamed.
+          if ! grep -q "OPTIONAL   binary for this platform         : not attempted" verify.log; then
+            echo "the verdict blames a layer that never ran" >&2
+            exit 1
+          fi
+
+      # The other half of the same distinction, and the one that costs releases:
+      # a remote that cannot be reached has told us nothing. Absence is a claim,
+      # and this must refuse to make it.
+      #
+      # Port 9 is discard: the connection is refused immediately, so this asks a
+      # question that cannot be answered without waiting for a timeout to prove
+      # it. The version here is a real one — the point is the remote, not the
+      # reference.
+      - name: 🧪 An unreachable remote is not an absent package
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+          UTXOZ_RECIPE_REVISION: 00000000000000000000000000000000
+          UTXOZ_REMOTE: kth-verify
+          UTXOZ_REMOTE_URL: https://127.0.0.1:9/
+          UTXOZ_PUBLISH_TIMEOUT: 10
+        run: |
+          status=0
+          ./ci/verify_published.sh > unreachable.log 2>&1 || status=$?
+          cat unreachable.log
+          case ${status} in
+            0) echo "an unreachable remote reported success" >&2; exit 1 ;;
+            4) echo "ok: not knowing is reported as not knowing" ;;
+            3) echo "::error::an unreachable remote was reported as a package that is not there" >&2; exit 1 ;;
+            *) echo "it failed for some other reason (${status}); this proves nothing" >&2; exit 1 ;;
+          esac
+          # The words matter as much as the code here: this is the sentence that
+          # stops somebody re-cutting a release that may already be published.
+          if ! grep -q "UNDETERMINED" unreachable.log; then
+            echo "it exited 4 without saying the gate is undetermined" >&2
+            exit 1
+          fi
+          if grep -q "did not appear on kth-verify" unreachable.log; then
+            echo "it exited 4 while claiming the package is not there" >&2
             exit 1
           fi
 
@@ -865,7 +996,7 @@ jobs:
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version="$UTXOZ_BUILD_VERSION" -o with_benchmarks=True -o with_large_benchmarks=False --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" -o "utxoz/*:with_benchmarks=True" -o "utxoz/*:with_large_benchmarks=False" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
 
       - name: ⚙️ Configure CMake
         run: |
