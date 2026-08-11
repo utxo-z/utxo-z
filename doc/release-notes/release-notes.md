@@ -1,3 +1,15 @@
+# version 0.10.0
+
+## What's Changed
+* fix: carry the database path to the filesystem in its native form by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/115
+* fix: report the release gate apart from the checks below it by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/114
+* feat!: the caller owns its lookups, and hands them to resolve() by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/118
+* fix: serialise resolutions, so resolve() can be called from two threads by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/123
+* feat!: the caller owns its deletions, and gets back what was applied by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/124
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.9.1...ebe9abe083a4053e439da2f19df58d71ba3bca84
+
 # version 0.9.1
 
 ## What's Changed
