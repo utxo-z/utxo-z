@@ -52,10 +52,6 @@ size_t db_base::deferred_deletions_size() const {
     return impl_ ? impl_->deferred_deletions_size() : 0;
 }
 
-size_t db_base::deferred_lookups_size() const {
-    return impl_ ? impl_->deferred_lookups_size() : 0;
-}
-
 durability_level platform_durability() noexcept {
     switch (detail::platform_sync_support()) {
         case detail::sync_support::full:      return durability_level::full;
@@ -155,15 +151,16 @@ result<full_find_result> full_db::find(raw_outpoint const& key, uint32_t height)
     if (!impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
     auto r = impl_->full_find(key, height);
-    if (!r) return std::unexpected(error_code::not_found);
+    // not_resolved, not not_found: the active versions did not have it, and they
+    // are all this looked at. Absence is resolve()'s to establish.
+    if (!r) return std::unexpected(error_code::not_resolved);
     return std::move(*r);
 }
 
-result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>>
-full_db::process_pending_lookups() {
+result<full_resolution> full_db::resolve(std::span<lookup_request const> requests) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    return impl_->full_process_pending_lookups();
+    return impl_->full_resolve(requests);
 }
 
 result<> full_db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
@@ -207,15 +204,15 @@ result<reference_find_result> reference_db::find(raw_outpoint const& key, uint32
     if (!impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
     auto r = impl_->reference_find_typed(key, height);
-    if (!r) return std::unexpected(error_code::not_found);
+    // not_resolved, not not_found: see full_db::find().
+    if (!r) return std::unexpected(error_code::not_resolved);
     return std::move(*r);
 }
 
-result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>>
-reference_db::process_pending_lookups() {
+result<reference_resolution> reference_db::resolve(std::span<lookup_request const> requests) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    return impl_->reference_process_pending_lookups();
+    return impl_->reference_resolve(requests);
 }
 
 result<> reference_db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const {

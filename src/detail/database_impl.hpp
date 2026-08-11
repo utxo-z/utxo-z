@@ -18,7 +18,6 @@
 #include <variant>
 
 #include <boost/unordered/unordered_flat_set.hpp>
-#include <boost/unordered/concurrent_flat_set.hpp>
 
 #include <utxoz/aliases.hpp>
 #include <utxoz/database.hpp>
@@ -64,8 +63,6 @@ struct database_impl {
     std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
     size_t deferred_deletions_size() const;
 
-    size_t deferred_lookups_size() const;
-
     result<> compact_all();
 
     /// Puts everything written so far on stable storage. See db_base::sync().
@@ -75,12 +72,12 @@ struct database_impl {
 
     // Typed full-mode methods (no runtime dispatch)
     std::optional<full_find_result> full_find(raw_outpoint const& key, uint32_t height) const;
-    result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>> full_process_pending_lookups();
+    result<full_resolution> full_resolve(std::span<lookup_request const> requests) const;
 
     // Typed reference-mode methods (no serialization)
     result<bool> reference_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
     std::optional<reference_find_result> reference_find_typed(raw_outpoint const& key, uint32_t height) const;
-    result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>> reference_process_pending_lookups();
+    result<reference_resolution> reference_resolve(std::span<lookup_request const> requests) const;
     result<> reference_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 
     database_statistics get_statistics();
@@ -127,7 +124,6 @@ private:
     size_t process_deferred_deletions_in_file(size_t container_index, size_t version, bool is_cached);
 
     // Deferred lookup helpers
-    void add_to_deferred_lookups(raw_outpoint const& key, uint32_t height) const;
 
     // File management
     template<size_t Index>
@@ -324,14 +320,15 @@ private:
     std::array<version_catalog, container_count> catalogs_;
     std::unique_ptr<file_cache> file_cache_;
 
-    // Statistics (mutable to allow const find operations)
+    // Statistics (mutable to allow const find and resolve operations)
     mutable probe_stats probe_stats_;
     mutable resolution_stats resolution_stats_;
     boost::unordered_flat_set<deferred_deletion_entry> deferred_deletions_;
-    mutable boost::concurrent_flat_set<deferred_lookup_entry> deferred_lookups_;
     std::array<container_stats, container_count> container_stats_;
     height_range_stats height_range_stats_;
-    deferred_stats deferred_stats_;
+    // Mutable because resolve() is const: it reports on the stored data without
+    // changing it, and its counters are published from that const call.
+    mutable deferred_stats deferred_stats_;
     not_found_stats not_found_stats_;
     utxo_lifetime_stats lifetime_stats_;
     fragmentation_stats fragmentation_stats_;

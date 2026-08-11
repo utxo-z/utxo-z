@@ -25,7 +25,8 @@ namespace utxoz {
 /**
  * @brief What probes saw.
  *
- * A probe is a find(): it either finds the key in the active map or it defers.
+ * A probe is a find(): it either finds the key in the active map or it does not,
+ * in which case the caller keeps the request and resolves it later.
  * This measures how often the requested key is present in an active map. It does
  * not yet measure whether the caller can use that answer; see the warning below.
  *
@@ -40,7 +41,7 @@ namespace utxoz {
 struct probe_summary {
     size_t probes = 0;                 ///< find() calls
     size_t answered_from_active = 0;   ///< key present in an active map
-    size_t deferred = 0;               ///< queued for historical resolution
+    size_t deferred = 0;               ///< left for the caller to resolve() later
     double active_map_hit_rate = 0.0;  ///< answered_from_active / probes
     double avg_age_answered = 0.0;     ///< blocks between creation and probe, over the answered ones
 };
@@ -174,7 +175,6 @@ struct container_stats {
     size_t current_size = 0;         ///< Current number of entries
     size_t failed_deletes = 0;       ///< Failed deletion attempts
     size_t deferred_deletes = 0;     ///< Deferred deletions
-    size_t deferred_lookups = 0;     ///< Deferred lookups
     size_t rehash_count = 0;         ///< Number of hash table rehashes
     boost::unordered_flat_map<size_t, size_t> value_size_distribution; ///< Value size -> count
 };

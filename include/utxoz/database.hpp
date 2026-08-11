@@ -71,6 +71,29 @@ struct database_impl;
 // =============================================================================
 
 /**
+ * @brief A batch of lookups resolved against the older versions (full mode).
+ *
+ * Two lists, and the difference between them is the contract: `found` holds the
+ * entries that exist, `absent` holds the requests proven not to exist anywhere.
+ * A request that could not be answered appears in neither, because a resolution
+ * that could not cover everything returns an error and no lists at all.
+ */
+struct full_resolution {
+    flat_map<raw_outpoint, full_find_result> found;  ///< Requests that resolved to an entry
+    std::vector<lookup_request> absent;              ///< Requests proven absent
+};
+
+/**
+ * @brief A batch of lookups resolved against the older versions (reference mode).
+ *
+ * Same contract as full_resolution, with the typed reference fields.
+ */
+struct reference_resolution {
+    flat_map<raw_outpoint, reference_find_result> found;  ///< Requests that resolved to an entry
+    std::vector<lookup_request> absent;                   ///< Requests proven absent
+};
+
+/**
  * @brief Base class with methods common to both storage modes.
  *
  * Not intended to be instantiated directly — use full_db::open() or reference_db::open().
@@ -78,17 +101,23 @@ struct database_impl;
  * @par Threading
  * A database instance supports ONE mutating operation at a time, with no other
  * operation of any kind in flight. Mutating means insert(), erase(),
- * process_pending_deletions(), process_pending_lookups(), compact_all() and
- * close(). Serialising them is the caller's job.
+ * process_pending_deletions(), resolve(), compact_all() and close().
+ * Serialising them is the caller's job.
+ *
+ * resolve() is const and still belongs on that list. Const here means it does
+ * not change what is stored; it does move the LRU file cache, which owns the
+ * memory mappings and has no synchronisation. Two threads resolving at once is
+ * a use-after-unmap, not a slow path. What resolve() being caller-owned buys is
+ * that batches cannot mix — not that they may run concurrently.
  *
  * find() is the one exception, and only a partial one: concurrent find() calls
- * are permitted strictly while no insert, erase, rotation, sweep, compaction or
- * cache operation can run. Providing that reader/writer barrier is the caller's
- * responsibility — this library has no lock to lean on.
+ * are permitted strictly while no insert, erase, rotation, resolution,
+ * compaction or cache operation can run. Providing that reader/writer barrier is
+ * the caller's responsibility — this library has no lock to lean on.
  *
- * What makes find() eligible at all is that every piece of shared state it
- * touches is itself thread-safe: it reads the active maps, records into sharded
- * atomic counters, and queues into a concurrent set. That removes the internal
+ * What makes find() eligible at all is that it reads the active maps and writes
+ * nothing but sharded atomic counters. It holds no queue and registers no key:
+ * a miss is reported to the caller and forgotten. That removes the internal
  * writer; it does NOT make the active map safe against modification. Nothing
  * here does.
  *
@@ -105,8 +134,7 @@ struct database_impl;
  * - The LRU file cache has no synchronisation, and it owns the memory mappings.
  *   Evicting an entry unmaps the segment, so a second thread reading a
  *   previously returned map is a use-after-unmap — a crash, not a torn read.
- *   The cache is touched by erase(), process_pending_deletions() and
- *   process_pending_lookups().
+ *   The cache is touched by erase(), process_pending_deletions() and resolve().
  * - The entry count, per-container statistics, deferred deletions and the file
  *   metadata are plain members mutated without atomics.
  * - A rotation (triggered from inside insert()) unmaps the whole active segment
@@ -114,9 +142,13 @@ struct database_impl;
  *   reading unmapped memory — which is why "no mutation in flight" is a
  *   condition of the exception above, not a nicety.
  *
- * Separately from threading, the deferred-lookup queue is drained wholesale
- * (see process_pending_lookups()), so two *callers* steal each other's keys
- * even when properly serialised. That one is an ownership rule.
+ * @par Ownership
+ * Lookups have no ownership rule any more, because they have no shared state to
+ * own. resolve() answers the batch it is handed and nothing else, so two
+ * components can each keep their own batch without arranging which of them is
+ * allowed to sweep. Deferred *deletions* still work the old way: the queue is
+ * global and process_pending_deletions() drains all of it, so that one call
+ * still needs a single owner.
  */
 struct db_base {
     // Non-copyable
@@ -157,7 +189,7 @@ struct db_base {
      * @warning The keys that call reports as failed are UNRESOLVED, not proven
      * absent: a version file that could not be read is logged and skipped, and
      * its keys land in the same list. This is the deletion path, and it still
-     * carries that ambiguity — process_pending_lookups() no longer does.
+     * carries that ambiguity — resolve() no longer does.
      *
      * @param key UTXO key to erase
      * @param height Current block height
@@ -193,12 +225,6 @@ struct db_base {
      */
     [[nodiscard]]
     size_t deferred_deletions_size() const;
-
-    /**
-     * @brief Get the number of pending deferred lookups
-     */
-    [[nodiscard]]
-    size_t deferred_lookups_size() const;
 
     /**
      * @brief Compact all containers
@@ -365,69 +391,72 @@ struct full_db : db_base {
     result<bool> insert(raw_outpoint const& key, output_data_span value, uint32_t height);
 
     /**
-     * @brief Find a UTXO by key
+     * @brief Find a UTXO by key, in the active versions only
      *
-     * @warning A not_found result is NOT authoritative. find() only searches the
-     * currently mapped (latest) version of each container. Once a container has
-     * rotated to a new file, entries left behind in previous versions are not
-     * visible here: the lookup is queued as a deferred lookup and not_found is
-     * returned. The definitive answer comes from process_pending_lookups(),
-     * which sweeps the cached files and every previous version.
+     * @warning An error result is NOT absence. find() searches the currently
+     * mapped (latest) version of each container and nothing else. Once a
+     * container has rotated, entries left behind in previous versions are not
+     * visible here, and the answer is error_code::not_resolved — which says
+     * exactly that: not answerable from the active versions. resolve() is what
+     * reaches the older ones.
      *
-     * Per-batch usage, mirroring the erase()/process_pending_deletions() pair:
+     * find() records nothing. It does not remember the key, does not queue it,
+     * and does not expect a later call to pick it up; a caller that drops a
+     * not_resolved on the floor has simply not asked the question. Keeping the
+     * request is the caller's job, and keeping it is what makes the answer come
+     * back to the caller that asked (#116).
+     *
+     * Per-batch usage:
      * @code
+     * std::vector<utxoz::lookup_request> pending;
      * for (auto const& op : outpoints) {
-     *     if (auto r = db.find(op, height)) { use(*r); }   // resolved right away
-     *     // otherwise: queued, do NOT conclude "does not exist" yet
+     *     auto r = db.find(op, height);
+     *     if (r) { use(*r); continue; }                    // resolved right away
+     *     if (r.error() != utxoz::error_code::not_resolved) return r.error();
+     *     pending.emplace_back(op, height);                // mine, and still mine
      * }
-     * auto swept = db.process_pending_lookups();
-     * if ( ! swept) {
-     *     // The sweep could not read something it needed. Nothing was
-     *     // consumed, so the queue is intact: come back to it later and do not
-     *     // treat anything as missing in the meantime.
-     *     return;                     // and never reach *swept below
-     * }
-     * auto& [found, absent] = *swept;
-     * // `found` resolves the queued lookups; `absent` is proven absence.
-     * @endcode
      *
-     * Call process_pending_lookups() before process_pending_deletions(): the
-     * latter removes entries from the previous-version files that the pending
-     * lookups still need to read.
+     * auto resolved = db.resolve(pending);
+     * if ( ! resolved) {
+     *     // Could not read something it needed. `pending` is untouched — it was
+     *     // never handed over, only borrowed — so retry it later and treat
+     *     // nothing as missing in the meantime.
+     *     return;
+     * }
+     * auto& [found, absent] = *resolved;
+     * @endcode
      *
      * @param key UTXO key to search for
      * @param height Current block height (for statistics)
-     * @return full_find_result if found in the latest version; error not_found
-     *         if the lookup was deferred (or the key does not exist)
-     * @see process_pending_lookups()
+     * @return full_find_result if the active versions hold it; error
+     *         error_code::not_resolved otherwise
+     * @see resolve()
      */
     [[nodiscard]]
     result<full_find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     /**
-     * @brief Process all pending deferred lookups
+     * @brief Resolve a caller's batch of lookups against the older versions
      *
-     * Sweeps the cached files and every previous version, resolving the lookups
-     * queued by find(). This is where a find() that returned not_found gets
-     * resolved. Drains the queue: after this call nothing is pending, so
-     * whatever you do not read from the returned map is lost.
+     * Walks the cached files and every version below the current one, answering
+     * exactly the requests it was handed. Keys are dropped from its working set
+     * as they are found, so each further file is searched for fewer of them.
      *
-     * Call this before process_pending_deletions(), which removes entries from
-     * the very files the pending lookups still need to read.
+     * The batch belongs to the caller throughout. This call reads the span and
+     * keeps nothing: no request survives the return, so two components can each
+     * resolve their own batch without agreeing which of them is allowed to, and
+     * neither can receive — or consume — a request the other made. That is the
+     * whole reason this takes an argument instead of draining a queue (#116).
      *
-     * @warning Single owner. The queue is global, not per caller: this call
-     * takes every pending key — including any queued by a different caller —
-     * and reports them all to whoever called it. Exactly one component may own
-     * the sweep, and it is responsible for routing results back to whoever
-     * asked. (This is about ownership, not threads: per the class contract,
-     * operations are serialised anyway.)
+     * Duplicate keys collapse. A batch naming the same outpoint twice asks one
+     * question and gets one answer, in exactly one of the two lists.
      *
-     * The second element is ABSENT, and only that. It is reached exactly when
-     * the sweep read every version below the current one and the key was in
-     * none of them, so it is a fact about the database and not about how the
-     * sweep happened to go.
+     * `absent` is ABSENT, and only that. A request reaches it exactly when every
+     * version below the current one was read and the key was in none of them, so
+     * it is a fact about the database and not about how the resolution happened
+     * to go.
      *
-     * If the sweep could not cover everything it needed to, this returns an
+     * If the resolution could not cover everything it needed to, this returns an
      * error and no lists at all, and the cause is kept rather than flattened:
      *
      *   - error_code::version_unreadable — a version file that the catalogue
@@ -436,21 +465,27 @@ struct full_db : db_base {
      *     enumerated, so which files exist is not known.
      *
      * They send an operator to different places, which is why they are not the
-     * same code. Nothing is consumed on either path: the pending set is left
-     * exactly as it was, so the call can simply be made again once the storage
-     * fault is dealt with.
+     * same code. On either, retry with the same span once the storage fault is
+     * dealt with: nothing was consumed, so nothing has to be rebuilt.
      *
      * That distinction is the point. A caller that cannot tell "this outpoint
      * does not exist" from "this outpoint could not be looked up" turns a local
      * storage fault into a missing input, and rejects a block that may be
      * perfectly valid.
      *
-     * @return Pair of (resolved_lookups_map, keys proven absent), or
-     *         error_code::version_unreadable / error_code::catalog_unreadable if
-     *         the sweep could not cover everything it needed to.
+     * Call this before process_pending_deletions(), which removes entries from
+     * the very files a resolution still needs to read.
+     *
+     * @warning const means it does not change what is stored. It is not
+     * concurrently callable: it moves the unsynchronised LRU file cache. See the
+     * threading notes on db_base.
+     *
+     * @param requests The caller's batch; borrowed for the duration of the call
+     * @return full_resolution, or error_code::version_unreadable /
+     *         error_code::catalog_unreadable if it could not cover everything
      */
     [[nodiscard]]
-    result<std::pair<flat_map<raw_outpoint, full_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
+    result<full_resolution> resolve(std::span<lookup_request const> requests) const;
 
     /**
      * @brief Iterate over all entries (key + value) in the database
@@ -518,40 +553,39 @@ struct reference_db : db_base {
     result<bool> insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height);
 
     /**
-     * @brief Find a UTXO by key
+     * @brief Find a UTXO by key, in the active version only
      *
-     * @warning A not_found result is NOT authoritative — see full_db::find().
-     * Only the currently mapped (latest) version is searched; anything left in
-     * a previous version is queued as a deferred lookup and resolved by
-     * process_pending_lookups().
+     * @warning An error result is NOT absence — see full_db::find(). Only the
+     * currently mapped (latest) version is searched; anything left in a previous
+     * version comes back as error_code::not_resolved, and resolve() is what
+     * answers it. Nothing is recorded: keeping the request is the caller's job.
      *
      * @param key UTXO key to search for
      * @param height Current block height (for statistics)
-     * @return reference_find_result if found in the latest version; error
-     *         not_found if the lookup was deferred (or the key does not exist)
-     * @see process_pending_lookups()
+     * @return reference_find_result if the active version holds it; error
+     *         error_code::not_resolved otherwise
+     * @see resolve()
      */
     [[nodiscard]]
     result<reference_find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     /**
-     * @brief Process all pending deferred lookups
+     * @brief Resolve a caller's batch of lookups against the older versions
      *
-     * Resolves the lookups queued by find() — see
-     * full_db::process_pending_lookups() for the full contract: single owner,
-     * drains the queue, and must run before process_pending_deletions().
+     * The same contract as full_db::resolve(), case for case, with the typed
+     * reference fields: the batch stays the caller's, duplicate keys collapse,
+     * `absent` means proven absent, and version_unreadable / catalog_unreadable
+     * return no lists at all so the same span can simply be retried.
      *
-     * The second element is ABSENT, and only that: reached exactly when every
-     * version below the current one was read and the key was in none of them.
-     * A version file that could not be read gives error_code::version_unreadable;
-     * a catalogue that could not be enumerated gives error_code::catalog_unreadable.
-     * Either way there are no lists and nothing is consumed.
+     * @warning const means it does not change what is stored. It is not
+     * concurrently callable: it moves the unsynchronised LRU file cache.
      *
-     * @return Pair of (resolved_lookups_map, keys proven absent), or
-     *         error_code::version_unreadable / error_code::catalog_unreadable.
+     * @param requests The caller's batch; borrowed for the duration of the call
+     * @return reference_resolution, or error_code::version_unreadable /
+     *         error_code::catalog_unreadable.
      */
     [[nodiscard]]
-    result<std::pair<flat_map<raw_outpoint, reference_find_result>, std::vector<deferred_lookup_entry>>> process_pending_lookups();
+    result<reference_resolution> resolve(std::span<lookup_request const> requests) const;
 
     /**
      * @brief Iterate over all entries (key + reference fields) in the database
