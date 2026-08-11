@@ -82,6 +82,9 @@ struct full_resolution {
     flat_map<raw_outpoint, full_find_result> found;  ///< Requests that resolved to an entry
     std::vector<lookup_request> absent;              ///< Requests proven absent
 };
+// Together these hold one entry per DISTINCT key of the request span, not one
+// per request: duplicates are collapsed, keeping the first occurrence. Match by
+// key, not by position.
 
 /**
  * @brief A batch of lookups resolved against the older versions (reference mode).
@@ -406,24 +409,36 @@ struct full_db : db_base {
      * request is the caller's job, and keeping it is what makes the answer come
      * back to the caller that asked (#116).
      *
-     * Per-batch usage:
+     * Per-batch usage. A complete function, so the return types agree and it
+     * compiles as written:
      * @code
-     * std::vector<utxoz::lookup_request> pending;
-     * for (auto const& op : outpoints) {
-     *     auto r = db.find(op, height);
-     *     if (r) { use(*r); continue; }                    // resolved right away
-     *     if (r.error() != utxoz::error_code::not_resolved) return r.error();
-     *     pending.emplace_back(op, height);                // mine, and still mine
-     * }
+     * utxoz::result<void> validate(utxoz::full_db const& db,
+     *                              std::span<utxoz::raw_outpoint const> outpoints,
+     *                              uint32_t height) {
+     *     std::vector<utxoz::lookup_request> pending;
+     *     for (auto const& op : outpoints) {
+     *         auto r = db.find(op, height);
+     *         if (r) { use(*r); continue; }                 // resolved right away
+     *         if (r.error() != utxoz::error_code::not_resolved) {
+     *             return std::unexpected(r.error());
+     *         }
+     *         pending.emplace_back(op, height);             // mine, and still mine
+     *     }
      *
-     * auto resolved = db.resolve(pending);
-     * if ( ! resolved) {
-     *     // Could not read something it needed. `pending` is untouched — it was
-     *     // never handed over, only borrowed — so retry it later and treat
-     *     // nothing as missing in the meantime.
-     *     return;
+     *     auto resolved = db.resolve(pending);
+     *     if ( ! resolved) {
+     *         // Could not read something it needed. `pending` is untouched — it
+     *         // was never handed over, only borrowed — so retry it later and
+     *         // treat nothing as missing in the meantime.
+     *         return std::unexpected(resolved.error());
+     *     }
+     *
+     *     // Matched back by key. The lists are not positional and are not
+     *     // parallel to `pending`.
+     *     for (auto const& [key, value] : resolved->found) { use_resolved(key, value); }
+     *     for (auto const& missing : resolved->absent)     { reject(missing.key); }
+     *     return {};
      * }
-     * auto& [found, absent] = *resolved;
      * @endcode
      *
      * @param key UTXO key to search for
@@ -448,8 +463,15 @@ struct full_db : db_base {
      * neither can receive — or consume — a request the other made. That is the
      * whole reason this takes an argument instead of draining a queue (#116).
      *
-     * Duplicate keys collapse. A batch naming the same outpoint twice asks one
-     * question and gets one answer, in exactly one of the two lists.
+     * Duplicate keys collapse, and the results are not positional. The batch is
+     * deduplicated by key, keeping the first occurrence of each — so a span
+     * naming one outpoint three times asks one question and is answered once,
+     * and `found.size() + absent.size()` equals the number of **distinct** keys
+     * rather than `requests.size()`. Match results back by key; never by
+     * position against the span, and never by count.
+     *
+     * A caller that sent the same outpoint at two heights gets one entry back,
+     * carrying the height of the first occurrence.
      *
      * `absent` is ABSENT, and only that. A request reaches it exactly when every
      * version below the current one was read and the key was in none of them, so

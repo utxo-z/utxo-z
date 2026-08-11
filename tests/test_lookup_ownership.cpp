@@ -35,13 +35,18 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <numeric>
+#include <span>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -440,7 +445,7 @@ TEST_CASE("full: an unreadable version yields no partial results and no absences
     CHECK(after_failure.resolution.files_visited == before.resolution.files_visited);
     CHECK(after_failure.resolution.cache_hits == before.resolution.cache_hits);
     CHECK(after_failure.resolution.resolved == before.resolution.resolved);
-    CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+    CHECK(after_failure.resolution.absent == before.resolution.absent);
 
     // The retry uses the same vector the caller has been holding all along —
     // nothing to rebuild, because nothing was taken — and is complete.
@@ -451,13 +456,16 @@ TEST_CASE("full: an unreadable version yields no partial results and no absences
     CHECK(retried->absent.size() == corpus::group_size);
 
     auto const after_retry = db.get_statistics();
+
+    // A resolution never touches the deletion counters, in either build.
+    CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+    CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
+    CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
+
 #ifdef UTXOZ_STATISTICS_ENABLED
     // Counted once: the abandoned attempt left nothing behind.
-    CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs + 1);
     CHECK(after_retry.resolution.resolved == before.resolution.resolved + corpus::group_size);
-    CHECK(after_retry.resolution.unresolved == before.resolution.unresolved + corpus::group_size);
-#else
-    CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+    CHECK(after_retry.resolution.absent == before.resolution.absent + corpus::group_size);
 #endif
 
     db.close();
@@ -665,7 +673,7 @@ TEST_CASE("reference: an unreadable version yields no partial results, and the r
     auto const after_failure = db.get_statistics();
     CHECK(after_failure.deferred.processing_runs == before.deferred.processing_runs);
     CHECK(after_failure.resolution.resolved == before.resolution.resolved);
-    CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+    CHECK(after_failure.resolution.absent == before.resolution.absent);
 
     failpoints::clear();
     auto const retried = db.resolve(batch);
@@ -694,6 +702,166 @@ TEST_CASE("reference: an unlistable catalogue keeps its own cause and consumes n
     auto const retried = db.resolve(batch);
     REQUIRE(retried.has_value());
     CHECK(retried->found.size() == corpus::group_size);
+
+    db.close();
+}
+
+// =============================================================================
+// The two statistics families do not touch each other
+// =============================================================================
+
+/**
+ * A resolution writes resolution_stats and nothing else; a deletion writes
+ * deferred_stats and nothing else.
+ *
+ * They used to share. resolve() incremented deferred_stats.processing_runs,
+ * added its found keys to successfully_processed and its absences to
+ * failed_to_delete, and wrote a per-depth histogram into lookups_by_depth —
+ * fields belonging to the deletion path. An operator reading
+ * `failed_to_delete` saw deletions that failed plus outpoints that were looked
+ * up and are legitimately not stored, which are unrelated events, and
+ * `successfully_processed` moved for both too. Neither number described
+ * anything (#118).
+ *
+ * Each case below moves one path and asserts the other family is byte-identical,
+ * so a single write across the boundary fails it.
+ */
+TEST_CASE("full: a resolution moves only the resolution counters",
+          "[ownership][full][statistics]") {
+    failpoint_guard guard;
+    auto db = open_full();
+    auto const& c = keys();
+
+    auto const before = db.get_statistics();
+
+    // One key that resolves and one proven absent, so both outcomes are
+    // exercised in a single completed resolution.
+    std::vector<lookup_request> const batch{{c.a_stored[0], 100'000},
+                                            {c.a_absent[0], 100'000}};
+    auto const resolved = db.resolve(batch);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->found.size() == 1);
+    REQUIRE(resolved->absent.size() == 1);
+
+    auto const after = db.get_statistics();
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    CHECK(after.resolution.resolved == before.resolution.resolved + 1);
+    CHECK(after.resolution.absent == before.resolution.absent + 1);
+    CHECK(after.resolution.files_visited > before.resolution.files_visited);
+#endif
+
+    // Not one of these may have moved. They belong to deletions.
+    CHECK(after.deferred.processing_runs == before.deferred.processing_runs);
+    CHECK(after.deferred.successfully_processed == before.deferred.successfully_processed);
+    CHECK(after.deferred.failed_to_delete == before.deferred.failed_to_delete);
+    CHECK(after.deferred.total_deferred == before.deferred.total_deferred);
+    CHECK(after.deferred.total_processing_time == before.deferred.total_processing_time);
+    CHECK(after.deferred.deletions_by_depth == before.deferred.deletions_by_depth);
+
+    db.close();
+}
+
+TEST_CASE("full: a deletion moves only the deletion counters",
+          "[ownership][full][statistics]") {
+    failpoint_guard guard;
+    auto db = open_full();
+
+    // One of the fixture's filler keys, which sits below the active version after
+    // the rotations. That is deliberate: a key in the active version is erased
+    // outright and never reaches the deferred path, so the sweep would have
+    // nothing to do and none of its counters would move — the case would pass
+    // for the wrong reason. No other case names the fillers.
+    auto const doomed = outpoint_of(10'000, 0);
+
+    auto const before = db.get_statistics();
+
+    auto const erased = db.erase(doomed, 70'001);
+    REQUIRE(erased.has_value());
+    REQUIRE(*erased == 0);            // deferred, as the case needs
+    auto const swept = db.process_pending_deletions();
+    REQUIRE(swept.has_value());
+    REQUIRE(swept->first == 1u);      // and the sweep actually applied it
+
+    auto const after = db.get_statistics();
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    // The deletion path moved — whether through the queueing or the sweep, at
+    // least one of its counters has to have changed, or this case would be
+    // asserting that the resolution family stayed still while nothing happened
+    // at all. With statistics off every counter is zero by construction and
+    // there is nothing to move, which is why this half is guarded and the half
+    // below is not.
+    CHECK((after.deferred.processing_runs != before.deferred.processing_runs
+           || after.deferred.total_deferred != before.deferred.total_deferred
+           || after.deferred.successfully_processed != before.deferred.successfully_processed));
+#endif
+
+    // And the resolution family did not. No resolve() ran.
+    CHECK(after.resolution.resolved == before.resolution.resolved);
+    CHECK(after.resolution.absent == before.resolution.absent);
+    CHECK(after.resolution.files_visited == before.resolution.files_visited);
+    CHECK(after.resolution.cache_hits == before.resolution.cache_hits);
+
+    db.close();
+}
+
+TEST_CASE("full: an incomplete resolution moves neither family",
+          "[ownership][full][statistics][negative]") {
+    failpoint_guard guard;
+    auto db = open_full();
+    auto const& c = keys();
+
+    auto const before = db.get_statistics();
+
+    auto const batch = batch_of(c.a_stored, 100'000);
+    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    REQUIRE_FALSE(db.resolve(batch).has_value());
+
+    auto const after = db.get_statistics();
+
+    // Nothing at all. An attempt that was abandoned did work — it opened files
+    // and resolved keys — and none of it may be observable, because the retry
+    // does all of it again and would otherwise count twice.
+    CHECK(after.resolution.resolved == before.resolution.resolved);
+    CHECK(after.resolution.absent == before.resolution.absent);
+    CHECK(after.resolution.files_visited == before.resolution.files_visited);
+    CHECK(after.resolution.cache_hits == before.resolution.cache_hits);
+
+    CHECK(after.deferred.processing_runs == before.deferred.processing_runs);
+    CHECK(after.deferred.successfully_processed == before.deferred.successfully_processed);
+    CHECK(after.deferred.failed_to_delete == before.deferred.failed_to_delete);
+    CHECK(after.deferred.total_processing_time == before.deferred.total_processing_time);
+
+    db.close();
+}
+
+TEST_CASE("reference: a resolution moves only the resolution counters",
+          "[ownership][reference][statistics]") {
+    failpoint_guard guard;
+    auto db = open_reference();
+    auto const& c = keys();
+
+    auto const before = db.get_statistics();
+
+    std::vector<lookup_request> const batch{{c.a_stored[0], 100'000},
+                                            {c.a_absent[0], 100'000}};
+    auto const resolved = db.resolve(batch);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->found.size() == 1);
+    REQUIRE(resolved->absent.size() == 1);
+
+    auto const after = db.get_statistics();
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+    CHECK(after.resolution.resolved == before.resolution.resolved + 1);
+    CHECK(after.resolution.absent == before.resolution.absent + 1);
+#endif
+
+    CHECK(after.deferred.processing_runs == before.deferred.processing_runs);
+    CHECK(after.deferred.successfully_processed == before.deferred.successfully_processed);
+    CHECK(after.deferred.failed_to_delete == before.deferred.failed_to_delete);
+    CHECK(after.deferred.total_processing_time == before.deferred.total_processing_time);
 
     db.close();
 }

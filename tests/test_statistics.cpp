@@ -365,7 +365,7 @@ TEST_CASE("probe and resolution counters describe different phases",
         CHECK(after_sweep.probes.deferred == 1);
 
         CHECK(after_sweep.resolution.resolved == 1);
-        CHECK(after_sweep.resolution.unresolved == 0);
+        CHECK(after_sweep.resolution.absent == 0);
         CHECK(after_sweep.resolution.avg_depth >= 1.0);   // at least one version back
         CHECK(after_sweep.resolution.files_visited >= 1);
 
@@ -383,7 +383,7 @@ TEST_CASE("probe and resolution counters describe different phases",
         CHECK(missing.probes.probes == 1);
         CHECK(missing.probes.deferred == 1);
         CHECK(missing.resolution.resolved == 0);
-        CHECK(missing.resolution.unresolved == 1);
+        CHECK(missing.resolution.absent == 1);
 
         db.close();
     }

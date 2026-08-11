@@ -53,13 +53,21 @@ struct probe_summary {
  * once as a deferred probe and once as a resolution, and folding them into a
  * single denominator would make every ratio meaningless.
  *
- * Deletions are not counted here. They resolve through their own sweep and are
- * reported by deferred_stats — mixing the age of a read with the age of a delete
- * produces an average of two different things.
+ * Deletions are not counted here, and lookups are not counted in deferred_stats.
+ * The two paths share nothing: a resolution writes only these counters, a
+ * deletion only its own. Mixing the age of a read with the age of a delete
+ * produces an average of two different things, and a `successfully_processed`
+ * that moves for both tells an operator nothing about either.
  */
 struct resolution_summary {
-    size_t resolved = 0;          ///< keys a sweep answered
-    size_t unresolved = 0;        ///< keys a sweep could not settle
+    size_t resolved = 0;          ///< keys a resolution answered
+    /// keys a resolution proved absent
+    ///
+    /// Published only by a resolution that covered every version it needed to,
+    /// which is the only state in which absence is a fact. An incomplete attempt
+    /// publishes nothing at all — not this counter and not any other — so this
+    /// never stands for "could not settle".
+    size_t absent = 0;
     size_t files_visited = 0;     ///< version files opened or reused across sweeps
     size_t cache_hits = 0;        ///< of those, served by the file cache
     double avg_depth = 0.0;       ///< versions back from the active one, over resolved
@@ -143,8 +151,8 @@ struct resolution_stats {
 #ifdef UTXOZ_STATISTICS_ENABLED
     /// A key a sweep answered, at `depth` versions back from the active one.
     void record_resolved(uint32_t depth) noexcept;
-    /// Keys a sweep finished without settling.
-    void record_unresolved(size_t count) noexcept;
+    /// Keys a completed resolution proved absent.
+    void record_absent(size_t count) noexcept;
     /// A version file a sweep worked against.
     void record_file_visited(bool cache_hit) noexcept;
 
@@ -152,14 +160,14 @@ struct resolution_stats {
     [[nodiscard]] resolution_summary get_summary() const noexcept;
 
 private:
-    enum field : size_t { f_resolved, f_unresolved, f_depth_total, f_files, f_cache_hits };
+    enum field : size_t { f_resolved, f_absent, f_depth_total, f_files, f_cache_hits };
     static_assert(f_cache_hits < detail::sharded_counters::field_count,
                   "resolution_stats has outgrown its counter slots");
 
     detail::sharded_counters counters_;
 #else
     void record_resolved(uint32_t) noexcept {}
-    void record_unresolved(size_t) noexcept {}
+    void record_absent(size_t) noexcept {}
     void record_file_visited(bool) noexcept {}
     void reset() noexcept {}
     [[nodiscard]] resolution_summary get_summary() const noexcept { return {}; }
@@ -182,6 +190,7 @@ struct container_stats {
 /**
  * @brief Deferred deletion statistics
  */
+/// Deletion counters only. Lookups have resolution_stats; nothing writes both.
 struct deferred_stats {
     size_t total_deferred = 0;               ///< Total deferred deletions
     size_t successfully_processed = 0;        ///< Successfully processed deletions
@@ -190,7 +199,6 @@ struct deferred_stats {
     size_t processing_runs = 0;              ///< Number of processing runs
     std::chrono::milliseconds total_processing_time{0}; ///< Total processing time
     boost::unordered_flat_map<size_t, size_t> deletions_by_depth; ///< Depth -> deletion count
-    boost::unordered_flat_map<size_t, size_t> lookups_by_depth;   ///< Depth -> lookup count
 };
 
 /**

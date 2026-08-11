@@ -25,8 +25,9 @@
  * the second call succeeds: it has to return *both* resolvable keys and the one
  * genuine absence, from the same vector the caller passed the first time. Since
  * the batch is the caller's (#116), that is now a property of the API rather
- * than of a rollback the library has to get right — and the case is kept
- * precisely to pin that it stayed true when the rollback was deleted.
+ * than of anything the library has to undo — the batch is never taken, so there
+ * is nothing to give back. The case is kept precisely to pin that it stayed true
+ * once that machinery was deleted.
  */
 
 #include <atomic>
@@ -208,8 +209,9 @@ TEST_CASE("full: a version that will not open is an error, and the retry loses n
 
         // Version 1: container 0 has versions 0 and 1 below its current, so the
         // sweep reads one of them before it reaches this one. The failure
-        // therefore lands after entries have already been consumed, which is the
-        // case the restore exists for.
+        // therefore lands after some keys have already been resolved into the
+        // call's own working set, which is the case that must not leak a partial
+        // answer.
         failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
 
         auto const failed = db.resolve(batch);
@@ -217,17 +219,20 @@ TEST_CASE("full: a version that will not open is an error, and the retry loses n
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::version_unreadable);
 
-        // Nothing was consumed: all three are still queued, so the retry needs
-        // no requeueing.
-        // Untouched: a failed resolution consumes nothing, because it was never
-        // given anything to consume. The retry below needs no rebuilding.
+        // The resolution stopped partway through the versions it had to read.
+        // Nothing about the caller's batch changed, so the retry below is the
+        // same span again.
+        // The batch is unchanged, because it was borrowed rather than handed
+        // over: the call read the span and kept nothing. The retry below reuses
+        // this same vector.
         CHECK(batch.size() == 3);
 
         failpoints::clear();
 
         // The retry returns both resolvable keys and the one genuine absence.
         // Returning only the keys the failed sweep never reached would mean the
-        // consumed entries were dropped, and that is what this pins down.
+        // keys resolved before the failure were dropped, and that is what this
+        // pins down.
         check_complete_resolution(db.resolve(batch), f, batch);
 
         db.close();
@@ -235,7 +240,7 @@ TEST_CASE("full: a version that will not open is an error, and the retry loses n
     std::filesystem::remove_all(f.path);
 }
 
-TEST_CASE("full: a failure before anything is resolved restores the queue the same way",
+TEST_CASE("full: a failure before anything is resolved reports the same way",
           "[unresolved][full][negative]") {
     failpoint_guard guard;
     auto const f = build_full_fixture("full_early");
@@ -252,8 +257,9 @@ TEST_CASE("full: a failure before anything is resolved restores the queue the sa
         auto const failed = db.resolve(batch);
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::version_unreadable);
-        // Untouched: a failed resolution consumes nothing, because it was never
-        // given anything to consume. The retry below needs no rebuilding.
+        // The batch is unchanged, because it was borrowed rather than handed
+        // over: the call read the span and kept nothing. The retry below reuses
+        // this same vector.
         CHECK(batch.size() == 3);
 
         failpoints::clear();
@@ -283,8 +289,9 @@ TEST_CASE("full: a catalogue that cannot be listed keeps its own cause",
         // Not version_unreadable: not knowing which files exist sends an
         // operator somewhere else than a file that will not open.
         CHECK(failed.error() == utxoz::error_code::catalog_unreadable);
-        // Untouched: a failed resolution consumes nothing, because it was never
-        // given anything to consume. The retry below needs no rebuilding.
+        // The batch is unchanged, because it was borrowed rather than handed
+        // over: the call read the span and kept nothing. The retry below reuses
+        // this same vector.
         CHECK(batch.size() == 3);
 
         failpoints::clear();
@@ -346,23 +353,25 @@ TEST_CASE("full: a failed sweep publishes no statistics, and the retry counts on
         CHECK(after_failure.resolution.files_visited == before.resolution.files_visited);
         CHECK(after_failure.resolution.cache_hits == before.resolution.cache_hits);
         CHECK(after_failure.resolution.resolved == before.resolution.resolved);
-        CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+        CHECK(after_failure.resolution.absent == before.resolution.absent);
 
         failpoints::clear();
         check_complete_resolution(db.resolve(batch), f, batch);
 
         auto const after_retry = db.get_statistics();
 
-#ifdef UTXOZ_STATISTICS_ENABLED
-        // One run, two lookups resolved, one left unresolved — each counted once.
-        // Only meaningful where the counters exist; with statistics off they are
-        // all zero and the checks above still hold, which is the point of
-        // running this case in both builds.
-        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs + 1);
-        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 2);
-        CHECK(after_retry.resolution.unresolved == before.resolution.unresolved + 1);
-#else
+        // A resolution never touches the deletion counters, in either build.
         CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+        CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
+        CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+        // Two keys resolved, one proven absent — each counted once, so the
+        // abandoned attempt left nothing behind. Only meaningful where the
+        // counters exist; with statistics off they are all zero and the checks
+        // above still hold, which is the point of running this in both builds.
+        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 2);
+        CHECK(after_retry.resolution.absent == before.resolution.absent + 1);
 #endif
 
         db.close();
@@ -476,7 +485,7 @@ TEST_CASE("reference: a version that will not open is an error, and the retry lo
 
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::version_unreadable);
-        // Untouched: the batch was borrowed, not taken.
+        // Unchanged: the call borrowed the span and kept nothing.
         CHECK(batch.size() == 2);
 
         failpoints::clear();
@@ -503,7 +512,7 @@ TEST_CASE("reference: a catalogue that cannot be listed keeps its own cause",
         auto const failed = db.resolve(batch);
         REQUIRE_FALSE(failed.has_value());
         CHECK(failed.error() == utxoz::error_code::catalog_unreadable);
-        // Untouched: the batch was borrowed, not taken.
+        // Unchanged: the call borrowed the span and kept nothing.
         CHECK(batch.size() == 2);
 
         failpoints::clear();
@@ -535,18 +544,20 @@ TEST_CASE("reference: a failed sweep publishes no statistics, and the retry coun
         CHECK(after_failure.resolution.files_visited == before.resolution.files_visited);
         CHECK(after_failure.resolution.cache_hits == before.resolution.cache_hits);
         CHECK(after_failure.resolution.resolved == before.resolution.resolved);
-        CHECK(after_failure.resolution.unresolved == before.resolution.unresolved);
+        CHECK(after_failure.resolution.absent == before.resolution.absent);
 
         failpoints::clear();
         check_reference_resolution(db.resolve(batch), f, batch);
 
         auto const after_retry = db.get_statistics();
-#ifdef UTXOZ_STATISTICS_ENABLED
-        CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs + 1);
-        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 1);
-        CHECK(after_retry.resolution.unresolved == before.resolution.unresolved + 1);
-#else
+
         CHECK(after_retry.deferred.processing_runs == before.deferred.processing_runs);
+        CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
+        CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+        CHECK(after_retry.resolution.resolved == before.resolution.resolved + 1);
+        CHECK(after_retry.resolution.absent == before.resolution.absent + 1);
 #endif
 
         db.close();

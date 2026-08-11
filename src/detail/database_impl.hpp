@@ -72,11 +72,13 @@ struct database_impl {
 
     // Typed full-mode methods (no runtime dispatch)
     std::optional<full_find_result> full_find(raw_outpoint const& key, uint32_t height) const;
+    [[nodiscard]]
     result<full_resolution> full_resolve(std::span<lookup_request const> requests) const;
 
     // Typed reference-mode methods (no serialization)
     result<bool> reference_insert_typed(raw_outpoint const& key, uint32_t height, uint32_t file_number, uint32_t offset);
     std::optional<reference_find_result> reference_find_typed(raw_outpoint const& key, uint32_t height) const;
+    [[nodiscard]]
     result<reference_resolution> reference_resolve(std::span<lookup_request const> requests) const;
     result<> reference_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
 
@@ -326,9 +328,7 @@ private:
     boost::unordered_flat_set<deferred_deletion_entry> deferred_deletions_;
     std::array<container_stats, container_count> container_stats_;
     height_range_stats height_range_stats_;
-    // Mutable because resolve() is const: it reports on the stored data without
-    // changing it, and its counters are published from that const call.
-    mutable deferred_stats deferred_stats_;
+    deferred_stats deferred_stats_;
     not_found_stats not_found_stats_;
     utxo_lifetime_stats lifetime_stats_;
     fragmentation_stats fragmentation_stats_;

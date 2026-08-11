@@ -2047,7 +2047,7 @@ void database_impl::print_statistics() {
     log::info("Avg age of answered probes: {:.1f} blocks", stats.probes.avg_age_answered);
 
     log::info("--- Historical resolution ---");
-    log::info("Resolved: {}   unresolved: {}", stats.resolution.resolved, stats.resolution.unresolved);
+    log::info("Resolved: {}   absent: {}", stats.resolution.resolved, stats.resolution.absent);
     log::info("Avg depth: {:.2f} versions", stats.resolution.avg_depth);
     log::info("Files visited: {}  cache hit rate: {:.2f}%",
         stats.resolution.files_visited, stats.resolution.cache_hit_rate * 100);
@@ -2769,14 +2769,17 @@ namespace {
 /// Distinct keys, because a batch naming one outpoint twice is asking one
 /// question. Without this the duplicate is probed again in every file and comes
 /// back twice in `absent`, which reads as two missing inputs where there is one.
-std::vector<uint32_t> working_set_of(std::span<lookup_request const> requests) {
-    std::vector<uint32_t> pending;
+/// The first occurrence is the one kept, and the index type is size_t because
+/// that is what it indexes — a narrower one would silently truncate a batch
+/// larger than it can count.
+std::vector<size_t> working_set_of(std::span<lookup_request const> requests) {
+    std::vector<size_t> pending;
     pending.reserve(requests.size());
 
     boost::unordered_flat_set<raw_outpoint> seen;
     seen.reserve(requests.size());
 
-    for (uint32_t i = 0; i < static_cast<uint32_t>(requests.size()); ++i) {
+    for (size_t i = 0; i < requests.size(); ++i) {
         if (seen.insert(requests[i].key).second) pending.push_back(i);
     }
     return pending;
@@ -2788,10 +2791,6 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     if (requests.empty()) return full_resolution{};
 
     full_resolution resolved;
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    auto const start_time = std::chrono::steady_clock::now();
-#endif
 
     // Indices into the caller's batch, shrinking as keys are found so each
     // further file is searched for fewer of them. Nothing is taken: the requests
@@ -2821,6 +2820,11 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     // run that never produced a result. Operators read these to decide whether
     // the deferred path is behaving, so an attempt that produced nothing must not
     // appear in them at all.
+    //
+    // Everything published below lands in resolution_stats_ and nowhere else.
+    // deferred_stats belongs to deletions; a lookup writing into it made
+    // successfully_processed and failed_to_delete move for two unrelated
+    // reasons, so neither number described anything.
     struct {
         uint64_t cache_hits = 0;
         uint64_t cache_misses = 0;
@@ -2947,11 +2951,9 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     // have been. Only now is absence a fact.
 #ifdef UTXOZ_STATISTICS_ENABLED
     // The resolution completed, so what it did is now a fact and can be published.
-    ++deferred_stats_.processing_runs;
     for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
     for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
     for (auto const depth : tally.resolved_depths) {
-        ++deferred_stats_.lookups_by_depth[depth];
         resolution_stats_.record_resolved(depth);
     }
 #endif
@@ -2960,16 +2962,9 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     for (auto const idx : pending) {
         resolved.absent.push_back(requests[idx]);
     }
-    resolution_stats_.record_unresolved(pending.size());
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    auto const end_time = std::chrono::steady_clock::now();
-    deferred_stats_.total_processing_time +=
-        std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-
-    deferred_stats_.successfully_processed += resolved.found.size();
-    deferred_stats_.failed_to_delete += resolved.absent.size();
-#endif
+    // Absence, not "unsettled". Reached only here, on the completed path, where
+    // every version that could have held these was read.
+    resolution_stats_.record_absent(pending.size());
 
     log::debug("Full resolution complete: {} found, {} absent",
                resolved.found.size(), resolved.absent.size());
@@ -3056,10 +3051,6 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
 
     reference_resolution resolved;
 
-#ifdef UTXOZ_STATISTICS_ENABLED
-    auto const start_time = std::chrono::steady_clock::now();
-#endif
-
     // The same contract as full_resolve(), case for case: indices into the
     // caller's batch, nothing taken, nothing kept.
     auto pending = working_set_of(requests);
@@ -3071,6 +3062,11 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
 #ifdef UTXOZ_STATISTICS_ENABLED
     // Accumulated here and published only if the resolution completes; a retried
     // attempt would otherwise be counted twice.
+    //
+    // Everything published below lands in resolution_stats_ and nowhere else.
+    // deferred_stats belongs to deletions; a lookup writing into it made
+    // successfully_processed and failed_to_delete move for two unrelated
+    // reasons, so neither number described anything.
     struct {
         uint64_t cache_hits = 0;
         uint64_t cache_misses = 0;
@@ -3169,11 +3165,9 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
 
 #ifdef UTXOZ_STATISTICS_ENABLED
     // The resolution completed, so what it did is now a fact and can be published.
-    ++deferred_stats_.processing_runs;
     for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
     for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
     for (auto const depth : tally.resolved_depths) {
-        ++deferred_stats_.lookups_by_depth[depth];
         resolution_stats_.record_resolved(depth);
     }
 #endif
@@ -3182,16 +3176,9 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
     for (auto const idx : pending) {
         resolved.absent.push_back(requests[idx]);
     }
-    resolution_stats_.record_unresolved(pending.size());
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    auto const end_time = std::chrono::steady_clock::now();
-    deferred_stats_.total_processing_time +=
-        std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-
-    deferred_stats_.successfully_processed += resolved.found.size();
-    deferred_stats_.failed_to_delete += resolved.absent.size();
-#endif
+    // Absence, not "unsettled". Reached only here, on the completed path, where
+    // every version that could have held these was read.
+    resolution_stats_.record_absent(pending.size());
 
     log::debug("Reference resolution complete: {} found, {} absent",
                resolved.found.size(), resolved.absent.size());
