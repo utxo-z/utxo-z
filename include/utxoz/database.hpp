@@ -104,25 +104,33 @@ struct reference_resolution {
  * @par Threading
  * A database instance supports ONE mutating operation at a time, with no other
  * operation of any kind in flight. Mutating means insert(), erase(),
- * process_pending_deletions(), resolve(), compact_all() and close().
- * Serialising them is the caller's job.
+ * process_pending_deletions(), compact_all() and close(). Serialising those is
+ * the caller's job.
  *
- * resolve() is const and still belongs on that list. Const here means it does
- * not change what is stored; it does move the LRU file cache, which owns the
- * memory mappings and has no synchronisation. Two threads resolving at once is
- * a use-after-unmap, not a slow path. What resolve() being caller-owned buys is
- * that batches cannot mix — not that they may run concurrently.
+ * The read path is different, and only the read path:
  *
- * find() is the one exception, and only a partial one: concurrent find() calls
- * are permitted strictly while no insert, erase, rotation, resolution,
- * compaction or cache operation can run. Providing that reader/writer barrier is
- * the caller's responsibility — this library has no lock to lean on.
+ * - **resolve() may be called concurrently.** The library serialises
+ *   resolutions against each other with a lock of its own, held for the whole
+ *   call rather than around the cache lookups — long enough to cover the
+ *   lifetime of every mapping reference the call obtains, because the file
+ *   cache hands out references into segments it destroys on eviction and a
+ *   second resolution evicting one mid-read is a use-after-unmap. Callers need
+ *   arrange nothing.
+ * - **find() may run alongside resolve().** They touch disjoint state: find()
+ *   reads the active containers and writes only its own sharded probe counters,
+ *   while a resolution reads the older versions through the file cache and
+ *   writes only the resolution counters. Eviction inside the cache cannot reach
+ *   the active containers, which are separate mappings. Demonstrated rather than
+ *   assumed — see the ThreadSanitizer cases in tests/test_lookup_ownership.cpp,
+ *   which run both pairings with no lock of the caller's.
  *
- * What makes find() eligible at all is that it reads the active maps and writes
- * nothing but sharded atomic counters. It holds no queue and registers no key:
- * a miss is reported to the caller and forgotten. That removes the internal
- * writer; it does NOT make the active map safe against modification. Nothing
- * here does.
+ * That is the whole of it. The lock covers resolve-vs-resolve; it does not make
+ * the database thread-safe. Nothing above permits running either read
+ * concurrently with insert(), a deletion, compaction, close(), or anything else
+ * that mutates the active maps or writes through the cache's mappings — a
+ * rotation inside insert() unmaps the active segment outright, and
+ * process_pending_deletions() writes through the very mappings a resolution
+ * reads.
  *
  * Statistics are operations too, not free reads. get_statistics() is not const
  * — it recomputes the fragmentation counters as it goes — and
@@ -134,10 +142,12 @@ struct reference_resolution {
  * recording is also not consistent across fields; see probe_stats.
  *
  * The restriction on everything else is structural, not incidental:
- * - The LRU file cache has no synchronisation, and it owns the memory mappings.
- *   Evicting an entry unmaps the segment, so a second thread reading a
+ * - The LRU file cache has no synchronisation of its own, and it owns the memory
+ *   mappings. Evicting an entry unmaps the segment, so a second thread reading a
  *   previously returned map is a use-after-unmap — a crash, not a torn read.
- *   The cache is touched by erase(), process_pending_deletions() and resolve().
+ *   resolve() is safe against another resolve() because it holds the lock above
+ *   across its whole use of those references; erase() and
+ *   process_pending_deletions() touch the same cache and are not covered.
  * - The entry count, per-container statistics, deferred deletions and the file
  *   metadata are plain members mutated without atomics.
  * - A rotation (triggered from inside insert()) unmaps the whole active segment
@@ -498,9 +508,11 @@ struct full_db : db_base {
      * Call this before process_pending_deletions(), which removes entries from
      * the very files a resolution still needs to read.
      *
-     * @warning const means it does not change what is stored. It is not
-     * concurrently callable: it moves the unsynchronised LRU file cache. See the
-     * threading notes on db_base.
+     * @warning const means it does not change what is stored — it does move the
+     * LRU file cache. Two threads may call it at once regardless: the library
+     * serialises resolutions internally, for the whole call. That does not
+     * extend to running it alongside insert(), a deletion, compaction or
+     * close(). See the threading notes on db_base.
      *
      * @param requests The caller's batch; borrowed for the duration of the call
      * @return full_resolution, or error_code::version_unreadable /
@@ -599,8 +611,9 @@ struct reference_db : db_base {
      * `absent` means proven absent, and version_unreadable / catalog_unreadable
      * return no lists at all so the same span can simply be retried.
      *
-     * @warning const means it does not change what is stored. It is not
-     * concurrently callable: it moves the unsynchronised LRU file cache.
+     * @warning const means it does not change what is stored. Two threads may
+     * call it at once — resolutions are serialised internally — but not
+     * alongside insert(), a deletion, compaction or close().
      *
      * @param requests The caller's batch; borrowed for the duration of the call
      * @return reference_resolution, or error_code::version_unreadable /
