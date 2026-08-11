@@ -134,16 +134,24 @@ TEST_CASE_METHOD(DatabaseFixture, "Erase operations", "[database]") {
     CHECK(db_->insert(key, value, height).value());
     CHECK(db_->size() == 1);
 
-    // Erase
-    CHECK(db_->erase(key, height) == 1);
+    // Stored and in the active version, so the batch applies it outright.
+    auto const erased = db_->apply_deletes(std::vector<utxoz::deferred_deletion_entry>{{key, height}});
+    CHECK(erased.erased.size() == 1);
+    CHECK(erased.absent.empty());
+    CHECK(erased.unresolved.empty());
 
     // Verify not found
     auto result = db_->find(key, height);
     CHECK_FALSE(result.has_value());
 
-    // Erase non-existent key
+    // A key that was never stored. One version exists, so it was looked for
+    // everywhere it could have been: this is absence, not an unfinished batch.
     auto key2 = make_test_key(2, 0);
-    CHECK(db_->erase(key2, height) == 0);
+    auto const missing = db_->apply_deletes(std::vector<utxoz::deferred_deletion_entry>{{key2, height}});
+    CHECK(missing.erased.empty());
+    CHECK(missing.absent.size() == 1);
+    CHECK(missing.unresolved.empty());
+    CHECK_FALSE(missing.error.has_value());
 }
 
 TEST_CASE_METHOD(DatabaseFixture, "Deferred deletions", "[database]") {
@@ -158,14 +166,16 @@ TEST_CASE_METHOD(DatabaseFixture, "Deferred deletions", "[database]") {
 
     CHECK(db_->size() == 10);
 
-    // Erase some - should find them in latest version
-    for (int i = 0; i < 5; ++i) {
-        CHECK(db_->erase(keys[i], 200) == 1);
-    }
+    // These are all in the latest version, so the batch applies them outright:
+    // everything in `erased`, nothing absent and nothing owed.
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (int i = 0; i < 5; ++i) batch.emplace_back(keys[i], 200);
 
-    // Process pending deletions
-    auto [deleted, failed] = db_->process_pending_deletions().value();
-    CHECK(failed.size() == 0); // No failures expected
+    auto const progress = db_->apply_deletes(batch);
+    CHECK(progress.erased.size() == 5);
+    CHECK(progress.absent.empty());
+    CHECK(progress.unresolved.empty());
+    CHECK_FALSE(progress.error.has_value());
 
     // Verify deletions
     for (int i = 0; i < 5; ++i) {

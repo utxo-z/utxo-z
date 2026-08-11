@@ -209,6 +209,10 @@ int main() {
         size_t total_insertions = 0;
         size_t total_deletions = 0;
 
+        // The deletion batch belongs to this loop. UTXO-Z stores no pending
+        // deletions, so anything not in here is not scheduled for removal.
+        std::vector<utxoz::deferred_deletion_entry> pending_deletes;
+
         // Process blocks
         for (uint32_t block_height = 0; block_height < num_blocks; ++block_height) {
             log_print("Processing block {}...\n", block_height);
@@ -260,9 +264,10 @@ int main() {
             log_print("  External deletes: {}\n", to_delete.size());
             log_print("  In-block spends: {}\n", in_block_spends);
 
-            // Delete UTXOs first
+            // Collect the block's deletions. They stay here — UTXO-Z keeps no
+            // queue of its own — and are applied below.
             for (auto const& key : to_delete) {
-                [[maybe_unused]] auto erased = db.erase(key, block_height);
+                pending_deletes.emplace_back(key, block_height);
                 ++total_deletions;
             }
 
@@ -273,15 +278,19 @@ int main() {
                 ++total_insertions;
             }
 
-            // Process pending deletions periodically
-            if (block_height % 5 == 0) {
-                log_print("Processing pending deletions...\n");
-                auto [deleted, failed] = db.process_pending_deletions().value();
-                log_print("  Deleted: {}\n", deleted);
-                log_print("  Failed: {}\n", failed.size());
+            // Apply the accumulated batch periodically.
+            if (block_height % 5 == 0 && ! pending_deletes.empty()) {
+                log_print("Applying {} deletions...\n", pending_deletes.size());
+                auto const progress = db.apply_deletes(pending_deletes);
+                log_print("  Erased: {}\n", progress.erased.size());
+                log_print("  Absent: {}\n", progress.absent.size());
+                log_print("  Unresolved: {}\n", progress.unresolved.size());
 
-                if (!failed.empty()) {
-                    log_print("  ERROR: Some deletions failed!\n");
+                // Only the unresolved may be sent again; the rest are settled.
+                pending_deletes = progress.unresolved;
+                if (progress.error) {
+                    log_print("  The batch did not complete; {} entries carried over\n",
+                              pending_deletes.size());
                 }
             }
 
@@ -302,10 +311,12 @@ int main() {
         }
 
         // Final processing
-        log_print("Processing final pending deletions...\n");
-        auto [final_deleted, final_failed] = db.process_pending_deletions().value();
-        log_print("Final deleted: {}\n", final_deleted);
-        log_print("Final failed: {}\n", final_failed.size());
+        log_print("Applying the final {} deletions...\n", pending_deletes.size());
+        auto const final_progress = db.apply_deletes(pending_deletes);
+        log_print("Final erased: {}\n", final_progress.erased.size());
+        log_print("Final absent: {}\n", final_progress.absent.size());
+        log_print("Final unresolved: {}\n", final_progress.unresolved.size());
+        pending_deletes.clear();
 
         // Final compaction
         log_print("Final compaction...\n");

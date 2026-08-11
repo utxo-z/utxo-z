@@ -799,34 +799,32 @@ TEST_CASE("full: a deletion moves only the deletion counters",
     auto db = std::move(*opened);
 
     // Inserted before the fill, so the rotation leaves it below the active
-    // version. That is deliberate: a key still in the active version is erased
-    // outright and never reaches the deferred path, so the sweep would have
-    // nothing to do and none of its counters would move — the case would pass
-    // for the wrong reason.
+    // version. That is deliberate: a key still in the active version is applied
+    // by the batch's first phase without opening a file, so the historical walk
+    // would have nothing to do and its counters would not move — the case would
+    // pass for the wrong reason.
     auto const doomed = outpoint_of(7'777'001, 2);
     REQUIRE(db.insert(doomed, utxoz::output_data_span{value_of(33, 0x11)}, 1).value());
     fill_until_rotations(db, 1);
 
     auto const before = db.get_statistics();
 
-    auto const erased = db.erase(doomed, 70'001);
-    REQUIRE(erased.has_value());
-    REQUIRE(*erased == 0);            // deferred, as the case needs
-    auto const swept = db.process_pending_deletions();
-    REQUIRE(swept.has_value());
-    REQUIRE(swept->first == 1u);      // and the sweep actually applied it
+    std::vector<utxoz::deferred_deletion_entry> const batch{{doomed, 70'001}};
+    auto const progress = db.apply_deletes(batch);
+    REQUIRE(progress.erased.size() == 1);   // the walk actually applied it
+    REQUIRE(progress.absent.empty());
+    REQUIRE(progress.unresolved.empty());
 
     auto const after = db.get_statistics();
 
 #ifdef UTXOZ_STATISTICS_ENABLED
-    // The deletion path moved — whether through the queueing or the sweep, at
-    // least one of its counters has to have changed, or this case would be
+    // The deletion path moved — at least one of its counters has to have
+    // changed, or this case would be
     // asserting that the resolution family stayed still while nothing happened
     // at all. With statistics off every counter is zero by construction and
     // there is nothing to move, which is why this half is guarded and the half
     // below is not.
     CHECK((after.deferred.processing_runs != before.deferred.processing_runs
-           || after.deferred.total_deferred != before.deferred.total_deferred
            || after.deferred.successfully_processed != before.deferred.successfully_processed));
 #endif
 

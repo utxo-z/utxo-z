@@ -125,14 +125,23 @@ TEST_CASE_METHOD(ReferenceFixture, "Reference: erase operations", "[reference]")
     CHECK(db_->insert(key, 1, 100, height).value());
     CHECK(db_->size() == 1);
 
-    CHECK(db_->erase(key, height) == 1);
+    // Stored and in the active version, so the batch applies it outright.
+    auto const erased = db_->apply_deletes(std::vector<utxoz::deferred_deletion_entry>{{key, height}});
+    CHECK(erased.erased.size() == 1);
+    CHECK(erased.absent.empty());
+    CHECK(erased.unresolved.empty());
 
     auto result = db_->find(key, height);
     CHECK_FALSE(result.has_value());
 
-    // Erase non-existent key
+    // A key that was never stored. One version exists, so it was looked for
+    // everywhere it could have been: this is absence, not an unfinished batch.
     auto key2 = make_test_key(2, 0);
-    CHECK(db_->erase(key2, height) == 0);
+    auto const missing = db_->apply_deletes(std::vector<utxoz::deferred_deletion_entry>{{key2, height}});
+    CHECK(missing.erased.empty());
+    CHECK(missing.absent.size() == 1);
+    CHECK(missing.unresolved.empty());
+    CHECK_FALSE(missing.error.has_value());
 }
 
 TEST_CASE("Reference: close and reopen", "[reference]") {
@@ -225,13 +234,13 @@ TEST_CASE_METHOD(ReferenceFixture, "Reference: deferred deletions", "[reference]
 
     CHECK(db_->size() == 10);
 
-    // Erase some - should find them in latest version
-    for (int i = 0; i < 5; ++i) {
-        CHECK(db_->erase(keys[i], 200) == 1);
-    }
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (int i = 0; i < 5; ++i) batch.emplace_back(keys[i], 200);
 
-    auto [deleted, failed] = db_->process_pending_deletions().value();
-    CHECK(failed.size() == 0);
+    auto const progress = db_->apply_deletes(batch);
+    CHECK(progress.erased.size() == 5);
+    CHECK(progress.absent.empty());
+    CHECK(progress.unresolved.empty());
 
     for (int i = 0; i < 5; ++i) {
         auto result = db_->find(keys[i], 200);
@@ -303,11 +312,14 @@ TEST_CASE_METHOD(ReferenceFixture, "Reference: compaction", "[reference]") {
     }
 
     // Erase half
+    std::vector<utxoz::deferred_deletion_entry> batch;
     for (int i = 0; i < 50; ++i) {
-        CHECK(db_->erase(make_test_key(static_cast<uint32_t>(i), 0), 200) == 1);
+        batch.emplace_back(make_test_key(static_cast<uint32_t>(i), 0), 200);
     }
-    auto [deleted, failed] = db_->process_pending_deletions().value();
-    CHECK(failed.empty());
+    auto const progress = db_->apply_deletes(batch);
+    CHECK(progress.erased.size() == 50);
+    CHECK(progress.absent.empty());
+    CHECK(progress.unresolved.empty());
 
     // Compact
     REQUIRE(db_->compact_all().has_value());

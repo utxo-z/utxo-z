@@ -170,12 +170,14 @@ TEST_CASE("sync() covers every generation written to, not the ones still mapped"
 
     // Erase across all of them. These defer and the sweep applies them file by
     // file, evicting as it goes.
-    for (uint64_t i = 0; i < next; i += 2) {
-        REQUIRE(db.erase(make_key(i), 400));
-    }
-    auto const [deleted, failed] = db.process_pending_deletions().value();
-    INFO("deleted " << deleted << ", " << failed.size() << " unresolved");
-    REQUIRE(deleted > 0);
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
+    auto const progress = db.apply_deletes(batch);
+    INFO("erased " << progress.erased.size()
+         << ", absent " << progress.absent.size()
+         << ", unresolved " << progress.unresolved.size());
+    REQUIRE(progress.unresolved.empty());
+    REQUIRE(progress.erased.size() > 0);
 
     // The cache is holding at most one of them — the default size — which is
     // exactly why walking it is not enough.
@@ -234,10 +236,9 @@ TEST_CASE("a failed sync discharges nothing", "[database][sync][failpoint]") {
     }
     REQUIRE(db.sync());
 
-    for (uint64_t i = 0; i < next; i += 2) {
-        REQUIRE(db.erase(make_key(i), 400));
-    }
-    REQUIRE(db.process_pending_deletions());
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
+    REQUIRE(db.apply_deletes(batch).unresolved.empty());
 
     failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
     auto const failed_sync = db.sync();

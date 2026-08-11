@@ -114,17 +114,35 @@ struct failpoints {
     /// spellings of the same constant are two places to get it wrong.
     static constexpr uint64_t no_version = ~uint64_t{0};
 
-    /// Fails the deferred-lookup sweep's attempt to open one specific version.
+    /// Fails a historical walk — resolution or deletion alike — as it opens one
+    /// specific version.
     /// A specific version and not a blanket switch, because what has to be shown
     /// is a sweep that reads some files and then cannot read one — the case
     /// where a partial result exists and must not be handed back as absence. A
     /// blanket failure stops at the first file and never reaches it.
     static inline std::atomic<uint64_t> fail_lookup_open_version{no_version};
 
-    /// Fails the sweep's attempt to enumerate which versions exist. A different
+    /// Fails a historical walk's attempt to enumerate which versions exist. A different
     /// failure from a file that will not open, reported with a different code,
     /// so the two cannot be shown to work by the same test.
     static inline std::atomic<bool> fail_lookup_catalog{false};
+
+    /// Sentinel meaning "never throw": zero is a real count — throw before
+    /// applying anything — so it cannot also mean "off".
+    static constexpr uint64_t no_applied_count = ~uint64_t{0};
+
+    /// Throws inside a deletion batch once this many deletions have been applied
+    /// within the call, between the map changing and the bookkeeping that
+    /// follows it.
+    ///
+    /// A deletion writes as it walks, so the dangerous exception is not the one
+    /// that stops a file from opening — fail_lookup_open_version already covers
+    /// that, and it fires before anything in the file has changed. It is the one
+    /// raised after a key is gone from the map: dirty tracking, metadata, a
+    /// vector growing. Without a seam that reaches that point, nothing shows
+    /// whether an applied deletion can end up reported as still owed, or as
+    /// neither applied nor owed.
+    static inline std::atomic<uint64_t> fail_delete_after_applied{no_applied_count};
 
 
     /// Where to stop the process dead, for the tests that check what a crash at
@@ -195,6 +213,7 @@ struct failpoints {
         fail_source_unlink.store(false, std::memory_order_relaxed);
         fail_lookup_open_version.store(no_version, std::memory_order_relaxed);
         fail_lookup_catalog.store(false, std::memory_order_relaxed);
+        fail_delete_after_applied.store(no_applied_count, std::memory_order_relaxed);
         crash_at.store(crash_point::none, std::memory_order_relaxed);
         fail_directory_barrier_at.store(dir_barrier::none, std::memory_order_relaxed);
         fail_container_open.store(false, std::memory_order_relaxed);

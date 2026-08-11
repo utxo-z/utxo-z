@@ -7,40 +7,42 @@
 namespace bench {
 
 void register_erase_benchmarks(ankerl::nanobench::Bench& bench) {
-    // Erase hit (pre-populated with enough entries for many iterations)
+    // One-key batch, hit (pre-populated with enough entries for many iterations)
     {
         BenchFixture f;
         f.populate(100'000);
         uint32_t id = 0;
-        bench.run("erase hit", [&] {
-            ankerl::nanobench::doNotOptimizeAway(
-                f.db->erase(make_test_key(id++, 0), 200)
-            );
+        std::vector<utxoz::deferred_deletion_entry> one(1, {make_test_key(0, 0), 200});
+        bench.run("apply_deletes hit (1 entry)", [&] {
+            one[0] = utxoz::deferred_deletion_entry{make_test_key(id++, 0), 200};
+            ankerl::nanobench::doNotOptimizeAway(f.db->apply_deletes(one));
         });
     }
 
-    // Erase miss
+    // One-key batch, miss
     {
         BenchFixture f;
         f.populate(10'000);
         uint32_t id = 100'000;
-        bench.run("erase miss", [&] {
-            ankerl::nanobench::doNotOptimizeAway(
-                f.db->erase(make_test_key(id++, 0), 200)
-            );
+        std::vector<utxoz::deferred_deletion_entry> one(1, {make_test_key(0, 0), 200});
+        bench.run("apply_deletes miss (1 entry)", [&] {
+            one[0] = utxoz::deferred_deletion_entry{make_test_key(id++, 0), 200};
+            ankerl::nanobench::doNotOptimizeAway(f.db->apply_deletes(one));
         });
     }
 
-    // Erase + process_pending_deletions cycle
+    // One batch of deletions, built by the caller and applied in one call.
     {
         BenchFixture f;
         f.populate(100'000);
         uint32_t id = 0;
-        bench.run("erase + process_pending_deletions (100 entries)", [&] {
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        bench.run("apply_deletes (100 entries)", [&] {
+            batch.clear();
             for (uint32_t i = 0; i < 100; ++i) {
-                (void)f.db->erase(make_test_key(id++, 0), 200);
+                batch.emplace_back(make_test_key(id++, 0), 200);
             }
-            ankerl::nanobench::doNotOptimizeAway(f.db->process_pending_deletions());
+            ankerl::nanobench::doNotOptimizeAway(f.db->apply_deletes(batch));
         });
     }
 
@@ -49,10 +51,11 @@ void register_erase_benchmarks(ankerl::nanobench::Bench& bench) {
         BenchFixture f;
         f.populate(100'000);
         uint32_t id = 0;
-        bench.run("batch erase 1K", [&] {
-            for (uint32_t i = 0; i < 1000; ++i) {
-                (void)f.db->erase(make_test_key(id++, 0), 200);
-            }
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        bench.run("apply_deletes 1K", [&] {
+            batch.clear();
+            for (uint32_t i = 0; i < 1000; ++i) batch.emplace_back(make_test_key(id++, 0), 200);
+            ankerl::nanobench::doNotOptimizeAway(f.db->apply_deletes(batch));
         });
     }
 }

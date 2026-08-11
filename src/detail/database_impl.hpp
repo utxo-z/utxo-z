@@ -40,6 +40,18 @@ namespace utxoz::detail {
 
 namespace fs = std::filesystem;
 
+/// The result a closed or latched instance returns for a batch of deletions:
+/// nothing applied, nothing proven absent, everything still owed.
+///
+/// Deduplicated exactly the way a completed call deduplicates, keeping the first
+/// occurrence of each key. Without that, a refusal is the one path where the
+/// contract on deletion_progress — every distinct key in exactly one list, once
+/// — does not hold, and a caller that trusts it would count one repeated
+/// outpoint as several still owed.
+[[nodiscard]]
+deletion_progress refuse_deletions(std::span<deferred_deletion_entry const> requests,
+                                   error_code why);
+
 /// @internal
 struct database_impl {
     database_impl() = default;
@@ -59,10 +71,8 @@ struct database_impl {
 
     result<bool> insert(raw_outpoint const& key, output_data_span value, uint32_t height);
     std::optional<find_result> find(raw_outpoint const& key, uint32_t height) const;
-    size_t erase(raw_outpoint const& key, uint32_t height);
 
-    std::pair<uint32_t, std::vector<deferred_deletion_entry>> process_pending_deletions();
-    size_t deferred_deletions_size() const;
+    deletion_progress apply_deletes(std::span<deferred_deletion_entry const> requests);
 
     result<> compact_all();
 
@@ -122,9 +132,6 @@ private:
 
     // Erase helpers
     size_t erase_in_latest_version(raw_outpoint const& key, uint32_t height);
-    size_t erase_from_cached_files_only(raw_outpoint const& key, uint32_t height, size_t& search_depth);
-    void add_to_deferred_deletions(raw_outpoint const& key, uint32_t height);
-    size_t process_deferred_deletions_in_file(size_t container_index, size_t version, bool is_cached);
 
     // Deferred lookup helpers
 
@@ -272,7 +279,6 @@ private:
     result<bool> reference_insert(raw_outpoint const& key, output_data_span value, uint32_t height);
     std::optional<find_result> reference_find(raw_outpoint const& key, uint32_t height) const;
     std::optional<find_result> reference_find_in_latest(raw_outpoint const& key, uint32_t height) const;
-    size_t reference_erase(raw_outpoint const& key, uint32_t height);
     size_t reference_erase_in_latest(raw_outpoint const& key, uint32_t height);
 
     void reference_open_or_create(size_t version);
@@ -335,7 +341,7 @@ private:
     // from overlapping at all does. Measured before this existed: 90
     // ThreadSanitizer races in file_cache::get_or_open_file and exit 139 (#120).
     //
-    // resolve-vs-resolve only. insert(), erase(), process_pending_deletions()
+    // resolve-vs-resolve only. insert(), apply_deletes()
     // and compact_all() touch the same cache and remain the caller's to
     // serialise, exactly as db_base documents.
     //
@@ -345,7 +351,6 @@ private:
     // Statistics (mutable to allow const find and resolve operations)
     mutable probe_stats probe_stats_;
     mutable resolution_stats resolution_stats_;
-    boost::unordered_flat_set<deferred_deletion_entry> deferred_deletions_;
     std::array<container_stats, container_count> container_stats_;
     height_range_stats height_range_stats_;
     deferred_stats deferred_stats_;

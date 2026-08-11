@@ -36,20 +36,19 @@ size_t db_base::size() const {
     return impl_ ? impl_->size() : 0;
 }
 
-result<size_t> db_base::erase(raw_outpoint const& key, uint32_t height) {
-    if ( ! impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    return impl_->erase(key, height);
-}
-
-result<std::pair<uint32_t, std::vector<deferred_deletion_entry>>> db_base::process_pending_deletions() {
-    if ( ! impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
-    return impl_->process_pending_deletions();
-}
-
-size_t db_base::deferred_deletions_size() const {
-    return impl_ ? impl_->deferred_deletions_size() : 0;
+deletion_progress db_base::apply_deletes(std::span<deferred_deletion_entry const> requests) {
+    // No result<> to carry these, so they arrive the same way any other
+    // incomplete batch does: everything still owed, and why.
+    //
+    // Through the same deduplication the applying path uses. Copying the span
+    // verbatim made a refusal the one place where a repeated outpoint came back
+    // more than once, so the contract on deletion_progress held everywhere
+    // except where a caller is most likely to be looping over the result.
+    if ( ! impl_) return detail::refuse_deletions(requests, error_code::closed);
+    if ( ! impl_->refuse_if_recovery_pending()) {
+        return detail::refuse_deletions(requests, error_code::recovery_required);
+    }
+    return impl_->apply_deletes(requests);
 }
 
 durability_level platform_durability() noexcept {

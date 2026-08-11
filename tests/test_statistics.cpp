@@ -421,9 +421,9 @@ TEST_CASE("erases do not contaminate the probe age", "[statistics][contract]") {
         CHECK(db.get_statistics().probes.avg_age_answered == 500.0);
 
         // Erasing at a very different height must not move it.
-        for (size_t i = 0; i < 50; ++i) {
-            CHECK(db.erase(make_key(i), 9'000).value() == 1);
-        }
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        for (size_t i = 0; i < 50; ++i) batch.emplace_back(make_key(i), 9'000);
+        CHECK(db.apply_deletes(batch).erased.size() == 50);
         auto const after = db.get_statistics();
         CHECK(after.probes.probes == 100);
         CHECK(after.probes.avg_age_answered == 500.0);

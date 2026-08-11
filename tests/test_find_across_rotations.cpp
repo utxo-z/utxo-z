@@ -11,7 +11,7 @@
  * version of each container is mapped, and find()/erase() look there (plus, for
  * erase, the cached files). Anything left behind in a previous version is NOT
  * reported by find()/erase(); it is queued and answered definitively by
- * resolve() / process_pending_deletions().
+ * resolve() / apply_deletes().
  *
  * This means a not_found from find() (or a 0 from erase()) is not authoritative
  * once a container has rotated. Integrators that treat it as authoritative see
@@ -157,12 +157,11 @@ size_t fill_until_container0_rotates(utxoz::full_db& db,
             // Spend ~60% of what the previous batch created, so the live set
             // keeps growing while the erase/deferred-deletion path is exercised.
             size_t const to_spend = spendable.size() * 6 / 10;
-            for (size_t i = 0; i < to_spend; ++i) {
-                (void)db.erase(spendable[i], height);
-            }
-            auto const [deleted, failed] = db.process_pending_deletions().value();
-            (void)deleted;
-            (void)failed;
+            std::vector<utxoz::deferred_deletion_entry> batch;
+            batch.reserve(to_spend);
+            for (size_t i = 0; i < to_spend; ++i) batch.emplace_back(spendable[i], height);
+            auto const progress = db.apply_deletes(batch);
+            (void)progress;
             spendable = created;
         }
 
@@ -343,7 +342,7 @@ TEST_CASE("find(): a key that exists nowhere comes back in the failed list",
     std::filesystem::remove_all(path);
 }
 
-TEST_CASE("erase(): after rotation it defers, process_pending_deletions() is definitive",
+TEST_CASE("apply_deletes(): reaches keys the active version no longer holds",
           "[database][rotation][deferred][contract]") {
     auto const path = make_unique_path("erase");
     std::filesystem::remove_all(path);
@@ -374,19 +373,18 @@ TEST_CASE("erase(): after rotation it defers, process_pending_deletions() is def
             REQUIRE(scan_contains(db, key));
         }
 
-        // ...but erase() cannot see them, so it defers. A 0 here is not "absent".
-        size_t erased_inline = 0;
-        for (auto const& key : early) {
-            auto const erased = db.erase(key, height);
-            REQUIRE(erased);   // value_or would swallow closed and recovery_required
-            erased_inline += *erased;
-        }
-        CHECK(db.deferred_deletions_size() == early.size() - erased_inline);
+        // ...and the active version no longer holds them, so applying the batch
+        // has to reach the older files. Every key was stored, so all of them end
+        // in `erased` — none absent, none owed.
+        std::vector<utxoz::deferred_deletion_entry> delete_batch;
+        delete_batch.reserve(early.size());
+        for (auto const& key : early) delete_batch.emplace_back(key, height);
 
-        auto const [deleted, failed] = db.process_pending_deletions().value();
-        CHECK(failed.empty());
-        CHECK(erased_inline + deleted == early.size());
-        CHECK(db.deferred_deletions_size() == 0);
+        auto const progress = db.apply_deletes(delete_batch);
+        CHECK(progress.unresolved.empty());
+        CHECK(progress.absent.empty());
+        CHECK(progress.erased.size() == early.size());
+        CHECK_FALSE(progress.error.has_value());
 
         // Now they are really gone, through both paths.
         std::vector<utxoz::lookup_request> gone;
@@ -425,12 +423,12 @@ TEST_CASE("lookups must be processed before deletions within a batch",
         REQUIRE(fill_until_container0_rotates(db, rng, height, 5'000, 400,
                                               size_profile::wide, false) > 0);
 
-        // Same batch: the key is read and spent. The read is the caller's to
-        // keep; the delete still goes on the library's own queue.
+        // Same batch: the key is read and spent. Both batches are the caller's
+        // now — the ordering between them is the caller's too, and it still
+        // matters.
         CHECK_FALSE(db.find(key, height).has_value());
-        CHECK(db.erase(key, height).value() == 0);
         std::vector<utxoz::lookup_request> const batch{{key, height}};
-        CHECK(db.deferred_deletions_size() == 1);
+        std::vector<utxoz::deferred_deletion_entry> const deletes{{key, height}};
 
         // Lookups first: the value is still readable.
         auto const [found, missing] = db.resolve(batch).value();
@@ -439,9 +437,10 @@ TEST_CASE("lookups must be processed before deletions within a batch",
         CHECK(found.at(key).data == value);
 
         // Deletions second: now it is removed.
-        auto const [deleted, failed] = db.process_pending_deletions().value();
-        CHECK(failed.empty());
-        CHECK(deleted == 1u);
+        auto const progress = db.apply_deletes(deletes);
+        CHECK(progress.unresolved.empty());
+        CHECK(progress.absent.empty());
+        CHECK(progress.erased.size() == 1);
         CHECK_FALSE(scan_contains(db, key));
 
         db.close();
@@ -567,10 +566,12 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         for (auto const& v : by_version) REQUIRE(v.size() >= survivors);
 
         auto const erase_all = [&](std::vector<utxoz::raw_outpoint> const& keys) {
-            for (auto const& k : keys) (void)db.erase(k, height);
-            auto const [deleted, failed] = db.process_pending_deletions().value();
-            (void)deleted;
-            CHECK(failed.empty());
+            std::vector<utxoz::deferred_deletion_entry> batch;
+            batch.reserve(keys.size());
+            for (auto const& k : keys) batch.emplace_back(k, height);
+            auto const progress = db.apply_deletes(batch);
+            CHECK(progress.unresolved.empty());
+            CHECK(progress.erased.size() == keys.size());
         };
 
         // Free most of version 1 so that compaction actually has work to do:
@@ -629,15 +630,14 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         CHECK(found_inline + found.size() == probes.size());
 
         // Deletions applied after compaction must land on the real files.
-        size_t erased_inline = 0;
-        for (auto const& k : probes) {
-            auto const erased = db.erase(k, height);
-            REQUIRE(erased);   // value_or would swallow closed and recovery_required
-            erased_inline += *erased;
-        }
-        auto const [deleted, failed] = db.process_pending_deletions().value();
-        CHECK(failed.empty());
-        CHECK(erased_inline + deleted == probes.size());
+        std::vector<utxoz::deferred_deletion_entry> delete_batch;
+        delete_batch.reserve(probes.size());
+        for (auto const& k : probes) delete_batch.emplace_back(k, height);
+
+        auto const delete_progress = db.apply_deletes(delete_batch);
+        CHECK(delete_progress.unresolved.empty());
+        CHECK(delete_progress.absent.empty());
+        CHECK(delete_progress.erased.size() == probes.size());
         for (auto const& k : probes) {
             CHECK_FALSE(scan_contains(db, k));
         }

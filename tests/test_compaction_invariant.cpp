@@ -126,13 +126,15 @@ TEST_CASE("compaction reports a duplicate key instead of dropping one",
         // entries into a target that has room — with none, it would move nothing
         // and never compare a key against the target at all. Free most of
         // version 0, leaving the duplicate itself in place.
-        for (auto const& k : v0_keys) {
-            (void)db.erase(k, 300);
-        }
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        for (auto const& k : v0_keys) batch.emplace_back(k, 300);
         {
-            auto const [deleted, failed] = db.process_pending_deletions().value();
-            CHECK(failed.empty());
-            CHECK(deleted > 0);
+            auto const progress = db.apply_deletes(batch);
+            // Every key was stored, so all of them must be applied: nothing owed
+            // and nothing proven absent.
+            CHECK(progress.unresolved.empty());
+            CHECK(progress.absent.empty());
+            CHECK(progress.erased.size() == batch.size());
         }
         REQUIRE(count_occurrences(db, dup) == 2);
 
@@ -199,13 +201,15 @@ TEST_CASE("reference-mode compaction reports a duplicate key too",
         REQUIRE(count_occurrences(db, dup) == 2);
 
         // Make room in version 0, as in the full-mode case.
-        for (auto const& k : v0_keys) {
-            (void)db.erase(k, 300);
-        }
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        for (auto const& k : v0_keys) batch.emplace_back(k, 300);
         {
-            auto const [deleted, failed] = db.process_pending_deletions().value();
-            CHECK(failed.empty());
-            CHECK(deleted > 0);
+            auto const progress = db.apply_deletes(batch);
+            // Every key was stored, so all of them must be applied: nothing owed
+            // and nothing proven absent.
+            CHECK(progress.unresolved.empty());
+            CHECK(progress.absent.empty());
+            CHECK(progress.erased.size() == batch.size());
         }
         REQUIRE(count_occurrences(db, dup) == 2);
 
@@ -332,11 +336,14 @@ TEST_CASE("a failed compaction leaves the database exactly as it was",
 
         // Empty version 0 so compaction drains it away completely, and free
         // room in version 1 so the walk reaches the duplicate in version 2.
-        for (auto const& k : v0_keys) (void)db.erase(k, 300);
-        for (auto const& k : v1_keys) (void)db.erase(k, 300);
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        for (auto const& k : v0_keys) batch.emplace_back(k, 300);
+        for (auto const& k : v1_keys) batch.emplace_back(k, 300);
         {
-            auto const [deleted, failed] = db.process_pending_deletions().value();
-            CHECK(failed.empty());
+            auto const progress = db.apply_deletes(batch);
+            CHECK(progress.unresolved.empty());
+            CHECK(progress.absent.empty());
+            CHECK(progress.erased.size() == batch.size());
         }
         REQUIRE(count_occurrences(db, dup) == 2);
 
@@ -406,7 +413,8 @@ TEST_CASE("compact_all stops at the first inconsistent container",
             if (before == rot(0)) c0_keys.insert(c0_keys.end(), chunk.begin(), chunk.end());
         }
         REQUIRE(db.insert(dup, make_value(33, 0x22), 300).value());
-        for (auto const& k : c0_keys) (void)db.erase(k, 300);
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        for (auto const& k : c0_keys) batch.emplace_back(k, 300);
 
         // Container 3: several versions with room, so it is compactable — and
         // must be left untouched because container 0 fails first.
@@ -416,10 +424,12 @@ TEST_CASE("compact_all stops at the first inconsistent container",
             REQUIRE(db.insert(k, make_value(200, 2), 200).has_value());
             c3_keys.push_back(k);
         }
-        for (size_t i = 0; i < c3_keys.size() / 2; ++i) (void)db.erase(c3_keys[i], 300);
+        for (size_t i = 0; i < c3_keys.size() / 2; ++i) batch.emplace_back(c3_keys[i], 300);
         {
-            auto const [deleted, failed] = db.process_pending_deletions().value();
-            CHECK(failed.empty());
+            auto const progress = db.apply_deletes(batch);
+            CHECK(progress.unresolved.empty());
+            CHECK(progress.absent.empty());
+            CHECK(progress.erased.size() == batch.size());
         }
 
         auto const c3_files_before = count_files(path, "cont_3_v");
@@ -582,10 +592,13 @@ TEST_CASE("compaction over a numbering with a hole in it",
     // anything to and the run below would pass without merging a single file.
     auto const live = all_keys(db);
     REQUIRE(live.size() > keys.size() / 2);
-    for (size_t i = 0; i < live.size(); i += 2) {
-        (void)db.erase(live[i], 400);
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (size_t i = 0; i < live.size(); i += 2) batch.emplace_back(live[i], 400);
+    {
+        auto const progress = db.apply_deletes(batch);
+        CHECK(progress.unresolved.empty());
+        CHECK(progress.erased.size() == batch.size());
     }
-    (void)db.process_pending_deletions();
 
     auto before = all_keys(db);
     REQUIRE_FALSE(before.empty());
@@ -637,10 +650,13 @@ TEST_CASE("a directory that cannot be written stops compaction before it changes
     // reaches a removal at all.
     auto const live = all_keys(db);
     REQUIRE(live.size() > keys.size() / 2);
-    for (size_t i = 0; i < live.size(); i += 2) {
-        (void)db.erase(live[i], 400);
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (size_t i = 0; i < live.size(); i += 2) batch.emplace_back(live[i], 400);
+    {
+        auto const progress = db.apply_deletes(batch);
+        CHECK(progress.unresolved.empty());
+        CHECK(progress.erased.size() == batch.size());
     }
-    (void)db.process_pending_deletions();
 
     auto before = all_keys(db);
     std::sort(before.begin(), before.end());
