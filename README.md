@@ -175,22 +175,23 @@ Rules to follow:
 
 #### Threading
 
-A database instance supports **one mutating operation at a time**, with no other operation of any kind in flight. Mutating means `insert()`, `erase()`, `process_pending_deletions()`, `resolve()`, `compact_all()` and `close()`. Serialising them is the caller's job.
+A database instance supports **one mutating operation at a time**, with no other operation of any kind in flight. Mutating means `insert()`, `erase()`, `process_pending_deletions()`, `compact_all()` and `close()`. Serialising those is the caller's job.
 
-`resolve()` is `const` and still on that list. Const means it does not change what is *stored*; it does move the LRU file cache. Caller-owned batches make two resolutions independent, not concurrent.
+The read path is different, and only the read path:
 
-`find()` is the one exception, and only a partial one: **concurrent `find()` calls are permitted strictly while no insert, erase, rotation, resolution, compaction or cache operation can run.** Providing that reader/writer barrier is the caller's responsibility — this library has no lock to lean on.
+- **`resolve()` may be called concurrently.** The library serialises resolutions against each other with a lock of its own, held for the **whole call** rather than around the cache lookups — long enough to cover the lifetime of every mapping reference the call obtains. The file cache hands out references into segments it destroys on eviction, so a second resolution evicting one mid-read is a use-after-unmap. You arrange nothing.
+- **`find()` may run alongside `resolve()`.** They touch disjoint state: `find()` reads the active containers and writes only its own sharded probe counters, while a resolution reads the older versions through the file cache and writes only the resolution counters. Eviction inside the cache cannot reach the active containers — those are separate mappings. This is demonstrated rather than assumed: `tests/test_lookup_ownership.cpp` runs both pairings under ThreadSanitizer with **no lock of the caller's**.
 
-What makes `find()` eligible at all is that it reads the active maps and writes nothing but sharded atomic counters. It holds no queue and registers no key — a miss is reported and forgotten. That removes the internal writer; it does **not** make the active map safe against modification. Nothing here does.
+That is the whole of it. The lock covers **resolve-vs-resolve**; it does not make the database thread-safe. None of the above permits running either read concurrently with `insert()`, a deletion, compaction, `close()`, or anything else that mutates the active maps or writes through the cache's mappings.
 
 **Statistics are operations too, not free reads.** `get_statistics()` is not const — it recomputes the fragmentation counters as it goes — and `reset_search_stats()` / `reset_all_statistics()` write by definition; the const accessors read plain counters that `insert()` and `erase()` write. All of them may overlap with `find()`, which writes nothing they look at beyond its own sharded counters, but not with any mutation, and `get_statistics()` and the reset calls not with each other either. A summary taken while `find()` is recording is also not consistent across fields — numerators can sit an increment ahead of their denominators, so take it while nothing is recording if you need exact cross-field numbers.
 
 The restriction on everything else is structural rather than incidental:
 
-- The LRU file cache owns the memory mappings and has no synchronisation. Evicting an entry unmaps the segment, so a second thread reading a map it obtained earlier is a use-after-unmap: a crash, not a torn read. `erase()`, `process_pending_deletions()` and `resolve()` all touch that cache.
+- The LRU file cache owns the memory mappings and has no synchronisation of its own. Evicting an entry unmaps the segment, so a second thread reading a map it obtained earlier is a use-after-unmap: a crash, not a torn read. `resolve()` is safe against another `resolve()` because it holds the lock above across its whole use of those references; `erase()` and `process_pending_deletions()` touch the same cache and are **not** covered.
 - The deferred-**deletion** queue is still **global, not per caller**. `process_pending_deletions()` drains all of it, so two callers steal each other's keys. Exactly one component may own that call. Lookups used to work this way too; they no longer do.
 - The deferred-deletion queue, the entry count, the per-container statistics and the file metadata are plain members mutated without atomics.
-- A rotation — triggered from inside `insert()` — unmaps the whole active segment and briefly leaves the container pointer null. A concurrent `find()` would be reading unmapped memory, which is why "no mutation in flight" is a condition of the exception above and not a nicety.
+- A rotation — triggered from inside `insert()` — unmaps the whole active segment and briefly leaves the container pointer null. A concurrent `find()` would be reading unmapped memory, which is why "no mutation in flight" bounds the read path above and is not a nicety.
 
 #### When the first rotation happens
 

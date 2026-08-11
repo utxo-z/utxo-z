@@ -13,6 +13,7 @@
 #include <array>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <utility>
 #include <variant>
@@ -321,6 +322,25 @@ private:
     // Sparse: version numbers are identities, never positions.
     std::array<version_catalog, container_count> catalogs_;
     std::unique_ptr<file_cache> file_cache_;
+
+    // Serialises resolutions against each other.
+    //
+    // Held for the whole of full_resolve() / reference_resolve(), not merely
+    // around the cache's bookkeeping. The bookkeeping race is the smaller half
+    // of the problem: file_cache hands out a *reference* into a
+    // managed_mapped_file that it owns and destroys on eviction, so a second
+    // resolution evicting a segment the first one is still reading unmaps that
+    // memory underneath it. That is a SIGSEGV, not a torn read, and no amount of
+    // locking the contents would prevent it — only keeping the two resolutions
+    // from overlapping at all does. Measured before this existed: 90
+    // ThreadSanitizer races in file_cache::get_or_open_file and exit 139 (#120).
+    //
+    // resolve-vs-resolve only. insert(), erase(), process_pending_deletions()
+    // and compact_all() touch the same cache and remain the caller's to
+    // serialise, exactly as db_base documents.
+    //
+    // mutable because resolve() is const: it does not change what is stored.
+    mutable std::mutex resolve_mutex_;
 
     // Statistics (mutable to allow const find and resolve operations)
     mutable probe_stats probe_stats_;

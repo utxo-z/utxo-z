@@ -2788,6 +2788,12 @@ std::vector<size_t> working_set_of(std::span<lookup_request const> requests) {
 } // namespace
 
 result<full_resolution> database_impl::full_resolve(std::span<lookup_request const> requests) const {
+    // Taken before anything is read and held to the return, because what has
+    // to be protected is not just the cache's bookkeeping but the lifetime of
+    // every map reference this call obtains from it: a concurrent eviction
+    // unmaps the segment being read (#120).
+    std::scoped_lock const resolution_lock(resolve_mutex_);
+
     if (requests.empty()) return full_resolution{};
 
     full_resolution resolved;
@@ -3047,6 +3053,12 @@ std::optional<reference_find_result> database_impl::reference_find_typed(raw_out
 }
 
 result<reference_resolution> database_impl::reference_resolve(std::span<lookup_request const> requests) const {
+    // Taken before anything is read and held to the return, because what has
+    // to be protected is not just the cache's bookkeeping but the lifetime of
+    // every map reference this call obtains from it: a concurrent eviction
+    // unmaps the segment being read (#120).
+    std::scoped_lock const resolution_lock(resolve_mutex_);
+
     if (requests.empty()) return reference_resolution{};
 
     reference_resolution resolved;
