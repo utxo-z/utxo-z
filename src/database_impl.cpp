@@ -868,102 +868,144 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     // applied something.
     uint64_t applied_in_call = 0;
 
-    auto const erase_in_file = [&]<size_t Index>(std::integral_constant<size_t, Index>,
-                                                 size_t container_index, size_t version) {
-        // The walk over one file, written so that `pending` and the map never
-        // disagree — not even for the span of one statement, and not even if
-        // something throws between them.
-        //
-        // The shape this replaces compacted `pending` only after the loop. An
-        // exception raised after a key was gone from the map therefore left its
-        // index still in `pending`, so the same key came back both applied and
-        // still owed; and if the throw happened before the key was recorded, it
-        // was deleted and reported nowhere. Neither is a state a caller can act
-        // on, and "deleted but reported as owed" is the one that loses data on
-        // the retry.
-        //
-        // So: the erase is the first thing, recording it is the next thing and
-        // cannot allocate — progress.erased is reserved before any mutation — and
-        // the compaction of `pending` is finished by a scope guard that runs on
-        // the exception path too.
-        auto step_over_file = [&](auto& map) {
-            size_t keep = 0;
-            size_t i = 0;
-            bool current_applied = false;
+    // One file's worth of the walk, over whatever map it is handed.
+    //
+    // Written so that `pending` and the map never disagree — not even for the
+    // span of one statement, and not even if something throws between them.
+    //
+    // The shape this replaces compacted `pending` only after the loop. An
+    // exception raised after a key was gone from the map therefore left its index
+    // still in `pending`, so the same key came back both applied and still owed;
+    // and if the throw happened before the key was recorded, it was deleted and
+    // reported nowhere. Neither is a state a caller can act on, and "deleted but
+    // reported as owed" is the one that loses data on the retry.
+    //
+    // So: the erase is the first thing, recording it is the next thing and cannot
+    // allocate — progress.erased is reserved before any mutation — and the
+    // compaction of `pending` is finished by a scope guard that runs on the
+    // exception path too.
+    //
+    // The bookkeeping is a parameter rather than a branch inside. Which catalogue
+    // a deletion belongs to is a property of the file being walked, and passing it
+    // in is what keeps that decision next to the code that opened the file.
+    auto const step_over_file = [&](auto& map, auto const& record_deletion) {
+        size_t keep = 0;
+        size_t i = 0;
+        bool current_applied = false;
 
-            scope_exit const settle([&] {
-                // Indices below `i` are decided: the applied ones dropped, the
-                // rest already moved down into [0, keep). Index `i` is decided
-                // only if its own erase went through. Everything above is
-                // untouched and copied down as it stands.
-                size_t const tail = current_applied ? i + 1 : i;
-                for (size_t j = tail; j < pending.size(); ++j) pending[keep++] = pending[j];
-                pending.resize(keep);
-            });
+        scope_exit const settle([&] {
+            // Indices below `i` are decided: the applied ones dropped, the rest
+            // already moved down into [0, keep). Index `i` is decided only if its
+            // own erase went through. Everything above is untouched and copied
+            // down as it stands.
+            size_t const tail = current_applied ? i + 1 : i;
+            for (size_t j = tail; j < pending.size(); ++j) pending[keep++] = pending[j];
+            pending.resize(keep);
+        });
 
-            for (; i < pending.size(); ++i) {
-                current_applied = false;
-                auto const idx = pending[i];
+        for (; i < pending.size(); ++i) {
+            current_applied = false;
+            auto const idx = pending[i];
 
-                if (map.erase(requests[idx].key) == 0) {
-                    pending[keep++] = idx;
-                    continue;
-                }
-
-                // The map has changed. Record it before anything that can throw.
-                progress.erased.push_back(requests[idx]);
-                --entries_count_;
-                current_applied = true;
-
-                if (failpoints::fail_delete_after_applied.load(std::memory_order_relaxed)
-                        == ++applied_in_call) {
-                    throw std::runtime_error("failpoint: threw after applying a deletion");
-                }
-
-                if constexpr (Index == SIZE_MAX) {
-                    note_dirty(reference_sentinel_index, version);
-                    if (auto* meta = reference_catalog_.find_metadata(version)) meta->update_on_delete();
-                } else {
-                    note_dirty(container_index, version);
-                    update_metadata_on_delete(Index, version);
-                }
+            if (map.erase(requests[idx].key) == 0) {
+                pending[keep++] = idx;
+                continue;
             }
-        };
 
+            // The map has changed. Record it before anything that can throw.
+            progress.erased.push_back(requests[idx]);
+            --entries_count_;
+            current_applied = true;
+
+            if (failpoints::fail_delete_after_applied.load(std::memory_order_relaxed)
+                    == ++applied_in_call) {
+                throw std::runtime_error("failpoint: threw after applying a deletion");
+            }
+
+            record_deletion();
+        }
+    };
+
+    // The reference walk is its own function rather than the full one with a
+    // sentinel threaded through it.
+    //
+    // It used to share erase_in_file<Index>, reached through a switch whose
+    // default mapped the sentinel onto Index 0. The guard inside was
+    // `if constexpr (Index == SIZE_MAX)`, which that dispatch can never satisfy,
+    // so a historical reference deletion erased the right entry, marked the right
+    // file dirty — note_dirty takes the runtime index — and then updated the
+    // metadata of *full container 0*. The reference catalogue never heard about
+    // the deletion, and container 0's said an entry left a file it was never in.
+    //
+    // Two functions cost less than one that has to be told which of two shapes it
+    // is, and neither can be instantiated for a sentinel that is not a container
+    // index.
+    auto const erase_in_reference_file = [&](size_t version) {
         try {
             if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
 
-            if (container_index == reference_sentinel_index) {
-                auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
-                (void) cache_hit;
-                step_over_file(map);
-            } else {
-                auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(container_index, version);
-                (void) cache_hit;
-                step_over_file(map);
+            auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
+            (void) cache_hit;
+            step_over_file(map, [&] {
+                note_dirty(reference_sentinel_index, version);
+                if (auto* meta = reference_catalog_.find_metadata(version)) meta->update_on_delete();
+                failpoints::reference_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
+            });
+        } catch (std::exception const& e) {
+            log::error("Could not apply deletions in reference v{}: {}. The batch is incomplete.",
+                       version, e.what());
+            complete = false;
+        }
+    };
+
+    auto const erase_in_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>,
+                                                     size_t version) {
+        try {
+            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+                    == static_cast<uint64_t>(version)) {
+                throw std::runtime_error("failpoint: version file refused to open");
             }
+
+            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
+            (void) cache_hit;
+            step_over_file(map, [&] {
+                note_dirty(Index, version);
+                update_metadata_on_delete(Index, version);
+                failpoints::full_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
+            });
         } catch (std::exception const& e) {
             // This file could hold any of the keys still pending, so none of them
-            // can be called absent. What was already erased stays erased and
-            // stays reported — that is the difference from a resolution, and the
-            // guard above is what makes it true even here.
+            // can be called absent. What was already erased stays erased and stays
+            // reported — that is the difference from a resolution, and the guard
+            // in step_over_file is what makes it true even here.
             log::error("Could not apply deletions in ({}, v{}): {}. The batch is incomplete.",
-                       container_index, version, e.what());
+                       Index, version, e.what());
             complete = false;
         }
     };
 
     auto const walk = [&](size_t container_index, size_t version) {
+        if (container_index == reference_sentinel_index) {
+            erase_in_reference_file(version);
+            return;
+        }
         switch (container_index) {
-            case 0: erase_in_file(std::integral_constant<size_t, 0>{}, container_index, version); break;
-            case 1: erase_in_file(std::integral_constant<size_t, 1>{}, container_index, version); break;
-            case 2: erase_in_file(std::integral_constant<size_t, 2>{}, container_index, version); break;
-            case 3: erase_in_file(std::integral_constant<size_t, 3>{}, container_index, version); break;
-            case 4: erase_in_file(std::integral_constant<size_t, 4>{}, container_index, version); break;
-            default: erase_in_file(std::integral_constant<size_t, 0>{}, container_index, version); break;
+            case 0: erase_in_full_file(std::integral_constant<size_t, 0>{}, version); break;
+            case 1: erase_in_full_file(std::integral_constant<size_t, 1>{}, version); break;
+            case 2: erase_in_full_file(std::integral_constant<size_t, 2>{}, version); break;
+            case 3: erase_in_full_file(std::integral_constant<size_t, 3>{}, version); break;
+            case 4: erase_in_full_file(std::integral_constant<size_t, 4>{}, version); break;
+            default:
+                // Not a container this build has. Silently walking it as index 0
+                // is how the sentinel came to update the wrong catalogue, so an
+                // index nobody recognises stops the batch instead.
+                log::error("Deletion batch asked for container {}, which does not exist. "
+                           "The batch is incomplete.", container_index);
+                complete = false;
+                break;
         }
     };
 

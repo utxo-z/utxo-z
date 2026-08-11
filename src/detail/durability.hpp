@@ -144,6 +144,21 @@ struct failpoints {
     /// neither applied nor owed.
     static inline std::atomic<uint64_t> fail_delete_after_applied{no_applied_count};
 
+    /// Which catalogue a historical deletion updated, counted per call.
+    ///
+    /// Observable because the thing that went wrong is not: entry_count has no
+    /// runtime consumer today — it is serialised and nothing reads it back
+    /// during a run — and a historical version's metadata is not persisted after
+    /// a deletion, so a deletion charged to the wrong catalogue produces
+    /// identical answers, identical files and an identical database. The defect
+    /// is real and silent, which is precisely why it needs a seam rather than a
+    /// behavioural assertion.
+    ///
+    /// Same shape as sync_file_calls: counters the production path bumps and
+    /// only a test looks at.
+    static inline std::atomic<uint64_t> reference_metadata_deletes{0};
+    static inline std::atomic<uint64_t> full_metadata_deletes{0};
+
 
     /// Where to stop the process dead, for the tests that check what a crash at
     /// each barrier leaves behind. Named after the step that has just finished.
@@ -214,6 +229,8 @@ struct failpoints {
         fail_lookup_open_version.store(no_version, std::memory_order_relaxed);
         fail_lookup_catalog.store(false, std::memory_order_relaxed);
         fail_delete_after_applied.store(no_applied_count, std::memory_order_relaxed);
+        reference_metadata_deletes.store(0, std::memory_order_relaxed);
+        full_metadata_deletes.store(0, std::memory_order_relaxed);
         crash_at.store(crash_point::none, std::memory_order_relaxed);
         fail_directory_barrier_at.store(dir_barrier::none, std::memory_order_relaxed);
         fail_container_open.store(false, std::memory_order_relaxed);

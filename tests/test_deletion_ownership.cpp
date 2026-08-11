@@ -504,6 +504,77 @@ TEST_CASE("full: an incomplete batch counts what it applied and no completed run
     std::filesystem::remove_all(f.path);
 }
 
+/**
+ * A historical reference deletion is charged to the reference catalogue.
+ *
+ * The dispatch used to reach the reference walk through the same
+ * erase_in_file<Index> the full containers use, via a switch whose `default`
+ * mapped reference_sentinel_index onto Index 0. The branch inside was guarded by
+ * `if constexpr (Index == SIZE_MAX)`, which that dispatch can never satisfy — so
+ * a historical reference deletion erased the right entry, marked the right file
+ * dirty (note_dirty takes the runtime index), and then called
+ * update_metadata_on_delete(0, version): the metadata of *full container 0*.
+ *
+ * Nothing about the answers changed, which is the point. entry_count has no
+ * runtime consumer today and a historical version's metadata is not persisted
+ * after a deletion, so the wrong catalogue produces identical results, identical
+ * files and an identical database. That is why this case reads the seam rather
+ * than a behaviour: there is no behaviour to read, and the bookkeeping is wrong
+ * the moment anything starts trusting it.
+ */
+TEST_CASE("reference: a historical deletion updates the reference catalogue, not container 0",
+          "[deletion][reference][negative]") {
+    failpoint_guard guard;
+    auto const f = build_reference("ref_meta");
+    {
+        auto db = std::move(*utxoz::reference_db::open_for_testing(f.path, false));
+
+        REQUIRE(failpoints::reference_metadata_deletes.load(std::memory_order_relaxed) == 0);
+        REQUIRE(failpoints::full_metadata_deletes.load(std::memory_order_relaxed) == 0);
+
+        // Historical, so it is applied by the file walk rather than by the
+        // active-version phase, which is the path the dispatch is on.
+        auto const batch = batch_of(f.historical, 60'000);
+        auto const progress = db.apply_deletes(batch);
+
+        REQUIRE(progress.erased.size() == f.historical.size());
+        CHECK(progress.absent.empty());
+        CHECK(progress.unresolved.empty());
+
+        // Every one of them went to the reference catalogue...
+        CHECK(failpoints::reference_metadata_deletes.load(std::memory_order_relaxed)
+              == f.historical.size());
+        // ...and none to a full container's, which this database does not even
+        // have. Restoring the old dispatch makes this the non-zero one.
+        CHECK(failpoints::full_metadata_deletes.load(std::memory_order_relaxed) == 0);
+
+        db.close();
+    }
+    std::filesystem::remove_all(f.path);
+}
+
+TEST_CASE("full: a historical deletion updates its own container's catalogue",
+          "[deletion][full]") {
+    failpoint_guard guard;
+    auto const f = build_full("full_meta");
+    {
+        auto db = std::move(*utxoz::full_db::open_for_testing(f.path, false));
+
+        auto const batch = batch_of(f.historical, 60'000);
+        auto const progress = db.apply_deletes(batch);
+        REQUIRE(progress.erased.size() == f.historical.size());
+
+        // The mirror of the case above: a full database charges its own
+        // catalogue and never the reference one.
+        CHECK(failpoints::full_metadata_deletes.load(std::memory_order_relaxed)
+              == f.historical.size());
+        CHECK(failpoints::reference_metadata_deletes.load(std::memory_order_relaxed) == 0);
+
+        db.close();
+    }
+    std::filesystem::remove_all(f.path);
+}
+
 // =============================================================================
 // A refusal partitions the batch too
 // =============================================================================
