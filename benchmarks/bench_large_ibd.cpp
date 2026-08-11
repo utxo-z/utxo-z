@@ -147,7 +147,10 @@ void run_ibd_simulation() {
         if ((i + 1) % deferred_interval == 0) {
             auto const progress = db.apply_deletes(batch);
             deferred_total += progress.erased.size();
-            batch.clear();
+            // Carried, not dropped. Clearing the batch would discard whatever the
+            // call could not finish, which is the one category that has to be
+            // sent again.
+            batch = progress.unresolved;
         }
 
         if ((i + 1) % progress_interval == 0) {

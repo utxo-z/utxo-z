@@ -340,10 +340,18 @@ TEST_CASE("a failed compaction leaves the database exactly as it was",
         for (auto const& k : v0_keys) batch.emplace_back(k, 300);
         for (auto const& k : v1_keys) batch.emplace_back(k, 300);
         {
+            // Against the distinct keys, not the request count: the batch is two
+            // key lists concatenated, and apply_deletes() partitions unique keys.
+            // Comparing with batch.size() would assert something the contract
+            // does not promise, and would break the day the two lists overlap.
+            std::vector<utxoz::raw_outpoint> distinct;
+            for (auto const& e : batch) {
+                if (std::ranges::find(distinct, e.key) == distinct.end()) distinct.push_back(e.key);
+            }
             auto const progress = db.apply_deletes(batch);
             CHECK(progress.unresolved.empty());
             CHECK(progress.absent.empty());
-            CHECK(progress.erased.size() == batch.size());
+            CHECK(progress.erased.size() == distinct.size());
         }
         REQUIRE(count_occurrences(db, dup) == 2);
 

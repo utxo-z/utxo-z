@@ -14,7 +14,7 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 - **Type-safe API**: `full_db` and `reference_db` with compile-time mode safety — no runtime dispatch
 - **Multi-container architecture**: 5 size-optimized containers (48B, 94B, 128B, 256B, 10KB) in full mode
 - **Memory-mapped files**: Automatic file rotation and OS-managed I/O
-- **Deferred lookups and deletions**: Reads and deletes that miss the mapped version are batched — see [Deferred lookups and deletions](#deferred-lookups-and-deletions)
+- **Caller-owned batches**: Reads and deletes that miss the active versions are collected by you and handed back explicitly — see [Batched reads and deletes](#batched-reads-and-deletes)
 - **Generational storage**: Recent outputs are faster to access
 - **Cache-optimized**: Open addressing hash tables for CPU cache efficiency
 
@@ -122,14 +122,14 @@ int main() {
 }
 ```
 
-### Deferred lookups and deletions
+### Batched reads and deletes
 
 Containers are **generational**: each one keeps writing to its latest version file and rotates to a new one when that file fills up. Only the latest version is memory-mapped.
 
 `find()` and `erase()` work on that mapped version (`erase()` also checks the cached files). Anything left behind in a previous version is not answered there, so their immediate result is **not authoritative**:
 
 - `find()` returning `not_resolved` means "not in the active versions, and nothing else was consulted". It is not absence, and nothing was recorded: **you keep the request**.
-- `erase()` returning `0` means "not in the mapped version — queued as a pending deletion". Deletions still use an internal queue.
+- `apply_deletes()` applies what it can reach and reports the rest. Nothing is queued inside the database: what is not in your batch is not being deleted.
 
 The definitive answer for a lookup comes from `resolve()`, which walks the cached files and every previous version for exactly the batch you hand it:
 
@@ -292,7 +292,7 @@ db_base                    — shared methods (close, size, erase, statistics, .
 |--------|-------------|
 | `close()` | Close and flush all data. Idempotent; also called by destructor |
 | `size()` | Total UTXO count |
-| `apply_deletes(span<deferred_deletion_entry const>)` | Apply your batch. Returns `deletion_progress` (`erased`, `absent`, `unresolved`, `error`) — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `apply_deletes(span<deferred_deletion_entry const>)` | Apply your batch. Returns `deletion_progress` (`erased`, `absent`, `unresolved`, `error`) — see [Batched reads and deletes](#batched-reads-and-deletes) |
 | `for_each_key(callback)` | Iterate over all stored keys |
 | `compact_all()` | Optimize storage |
 | `get_statistics()` | Get performance stats |
@@ -308,7 +308,7 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `open(path, remove_existing)` | Static: open database, returns `result<full_db>` |
 | `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, value, height)` | Insert UTXO with byte data |
-| `find(key, height)` | Returns `result<full_find_result>` (`data`, `block_height`). `not_resolved` is not absence — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `find(key, height)` | Returns `result<full_find_result>` (`data`, `block_height`). `not_resolved` is not absence — see [Batched reads and deletes](#batched-reads-and-deletes) |
 | `resolve(span<lookup_request const>)` | Definitive answer for your batch: `full_resolution` (`found`, `absent`) |
 | `for_each_entry(callback)` | Callback: `(key, height, span<uint8_t const>)` |
 
@@ -319,7 +319,7 @@ db_base                    — shared methods (close, size, erase, statistics, .
 | `open(path, remove_existing)` | Static: open database, returns `result<reference_db>` |
 | `open_for_testing(path, remove_existing)` | Static: open with smaller file sizes |
 | `insert(key, file_number, offset, height)` | Insert UTXO with typed fields |
-| `find(key, height)` | Returns `result<reference_find_result>` (`block_height`, `file_number`, `offset`). `not_resolved` is not absence — see [Deferred lookups and deletions](#deferred-lookups-and-deletions) |
+| `find(key, height)` | Returns `result<reference_find_result>` (`block_height`, `file_number`, `offset`). `not_resolved` is not absence — see [Batched reads and deletes](#batched-reads-and-deletes) |
 | `resolve(span<lookup_request const>)` | Definitive answer for your batch: `reference_resolution` (`found`, `absent`) |
 | `for_each_entry(callback)` | Callback: `(key, height, file_number, offset)` |
 

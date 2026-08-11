@@ -127,8 +127,12 @@ struct failpoints {
     /// so the two cannot be shown to work by the same test.
     static inline std::atomic<bool> fail_lookup_catalog{false};
 
-    /// Sentinel meaning "never throw": zero is a real count — throw before
-    /// applying anything — so it cannot also mean "off".
+    /// Sentinel meaning "never throw".
+    ///
+    /// The check below is `== ++applied_in_call`, so the first deletion tests
+    /// against 1 and zero can never match — it is already unreachable as a
+    /// setting. A distinct sentinel is still what the field is initialised to,
+    /// rather than leaning on that.
     static constexpr uint64_t no_applied_count = ~uint64_t{0};
 
     /// Throws inside a deletion batch once this many deletions have been applied

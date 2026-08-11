@@ -182,7 +182,6 @@ struct container_stats {
     size_t total_deletes = 0;        ///< Total deletions
     size_t current_size = 0;         ///< Current number of entries
     size_t failed_deletes = 0;       ///< Failed deletion attempts
-    size_t deferred_deletes = 0;     ///< Deferred deletions
     size_t rehash_count = 0;         ///< Number of hash table rehashes
     boost::unordered_flat_map<size_t, size_t> value_size_distribution; ///< Value size -> count
 };

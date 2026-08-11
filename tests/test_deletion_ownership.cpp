@@ -505,6 +505,65 @@ TEST_CASE("full: an incomplete batch counts what it applied and no completed run
 }
 
 /**
+ * A historical deletion reaches the per-container counters, not only the batch.
+ *
+ * The walk over older files was rewritten to consolidate each deletion as it
+ * happens, and the rewrite silently dropped every statistic the queue-draining
+ * path used to record: deletions_by_depth, current_size, total_deletes and the
+ * height-range histogram. The active-version phase kept recording its own, so
+ * the two halves of the same call disagreed — and by container.
+ *
+ * Nothing caught it. The batch-level assertions all still passed, because
+ * `erased` was right; it was only the numbers an operator reads that were wrong.
+ * This case exists so the next rewrite of that loop cannot repeat it.
+ */
+TEST_CASE("full: a historical deletion records the per-container statistics",
+          "[deletion][full][statistics]") {
+    failpoint_guard guard;
+    auto const f = build_full("hist_stats");
+    {
+        auto db = std::move(*utxoz::full_db::open_for_testing(f.path, false));
+
+        auto const before = db.get_statistics();
+
+        auto const batch = batch_of(f.historical, 60'000);
+        auto const progress = db.apply_deletes(batch);
+        REQUIRE(progress.erased.size() == f.historical.size());
+        REQUIRE(progress.unresolved.empty());
+
+        auto const after = db.get_statistics();
+
+#ifdef UTXOZ_STATISTICS_ENABLED
+        // Every applied deletion is one delete somewhere, and the totals across
+        // containers have to move by exactly the number applied — not by less,
+        // which is what dropping the historical half looked like.
+        size_t before_deletes = 0, after_deletes = 0;
+        for (size_t i = 0; i < utxoz::container_count; ++i) {
+            before_deletes += before.containers[i].total_deletes;
+            after_deletes += after.containers[i].total_deletes;
+        }
+        CHECK(after_deletes == before_deletes + progress.erased.size());
+
+        // And the depth histogram gained the same number of entries, at depths
+        // below the active version — these keys are all in older files.
+        size_t before_by_depth = 0, after_by_depth = 0;
+        for (auto const& [depth, count] : before.deferred.deletions_by_depth) {
+            (void) depth; before_by_depth += count;
+        }
+        for (auto const& [depth, count] : after.deferred.deletions_by_depth) {
+            (void) depth; after_by_depth += count;
+        }
+        CHECK(after_by_depth == before_by_depth + progress.erased.size());
+#else
+        CHECK(after.deferred.deletions_by_depth.size() == before.deferred.deletions_by_depth.size());
+#endif
+
+        db.close();
+    }
+    std::filesystem::remove_all(f.path);
+}
+
+/**
  * A historical reference deletion is charged to the reference catalogue.
  *
  * The dispatch used to reach the reference walk through the same

@@ -922,7 +922,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 throw std::runtime_error("failpoint: threw after applying a deletion");
             }
 
-            record_deletion();
+            record_deletion(requests[idx].height);
         }
     };
 
@@ -949,10 +949,20 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
 
             auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
             (void) cache_hit;
-            step_over_file(map, [&] {
+            step_over_file(map, [&]([[maybe_unused]] uint32_t height) {
                 note_dirty(reference_sentinel_index, version);
                 if (auto* meta = reference_catalog_.find_metadata(version)) meta->update_on_delete();
                 failpoints::reference_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
+#ifdef UTXOZ_STATISTICS_ENABLED
+                // The same counters the queue-draining path kept. Reference mode
+                // reports through container 0's slot, as it does everywhere else.
+                auto const depth =
+                    static_cast<uint32_t>(reference_current_version_ - version);
+                ++deferred_stats_.deletions_by_depth[depth];
+                --container_stats_[0].current_size;
+                ++container_stats_[0].total_deletes;
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
+#endif
             });
         } catch (std::exception const& e) {
             log::error("Could not apply deletions in reference v{}: {}. The batch is incomplete.",
@@ -971,10 +981,25 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
 
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
             (void) cache_hit;
-            step_over_file(map, [&] {
+            step_over_file(map, [&]([[maybe_unused]] uint32_t height) {
                 note_dirty(Index, version);
                 update_metadata_on_delete(Index, version);
                 failpoints::full_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
+#ifdef UTXOZ_STATISTICS_ENABLED
+                // Restored with the rest of the historical path. Dropping these
+                // made a deletion that reached an older file invisible to every
+                // per-container number while the active-version phase kept
+                // recording its own — so the two halves of the same call
+                // disagreed, and by container.
+                //
+                // deferred_deletes is deliberately not among them: it counted how
+                // much was sitting in the queue, and there is no queue to sit in.
+                auto const depth = static_cast<uint32_t>(current_versions_[Index] - version);
+                ++deferred_stats_.deletions_by_depth[depth];
+                --container_stats_[Index].current_size;
+                ++container_stats_[Index].total_deletes;
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[Index];
+#endif
             });
         } catch (std::exception const& e) {
             // This file could hold any of the keys still pending, so none of them
