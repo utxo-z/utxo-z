@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786438804939,
+  "lastUpdate": 1786441926902,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -14256,6 +14256,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 54.54,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0e8958d4f3fdd9792c09d7e38cb138da9ad0eea0",
+          "message": "fix: report the release gate apart from the checks below it (#114)\n\n* fix: report the release gate apart from the checks below it\n\nThe 0.9.1 Windows publish job failed a release that had published. The recipe\nrevision reached kth-verify, a clean cache downloaded it and the Windows binary\nwith --build=never, and then the verification consumer would not compile:\ntest_package.cpp includes <fmt/format.h> while its CMakeLists.txt declares one\npackage, utxoz. On Linux and macOS that include resolved anyway, through fmt\nreaching the compiler as a dependency of utxoz rather than as anything the\nconsumer asked for. On Windows it did not. The run read as a lost release.\n\nThree questions were being answered as one. A release is published when its\nexact recipe revision is on the remote and comes back from an empty cache. A\nprebuilt binary is an acceleration — a consumer without one builds from the\nrecipe. A consumer that compiles and runs is a diagnostic. They now have their\nown exit codes and their own line in a verdict that is printed on every path:\n3 and 4 keep meaning absence and not-knowing, 5 is a revision the remote lists\nand will not hand over, 6 is a missing binary and 7 a failed consumer. Every one\nof them is still red. What changed is that 6 and 7 say, in the same breath, that\nthe recipe published.\n\nThe required gate now retrieves rather than only asks. Listing a revision and\nserving it are different claims, and a release rests on the second, so the\nrecipe is downloaded into the empty cache and its presence there checked.\n\nThe consumer no longer reaches for a package it does not declare. Nothing under\ninclude/utxoz includes fmt, so it was never part of the contract this test\nexists to measure; the printing moved to <iostream>, which every toolchain that\ncan build the package already has. A diagnostic that fails because a compiler's\nC++23 library is incomplete would report utxoz as broken when it is not.\n\nThe consumer stage moved to ci/verify_consumer.sh so it can be run against a\nlocally created package, which is what makes the new control non-vacuous: the\npull-request job builds the same consumer twice against the same package, as it\nships and with its utxoz dependency stripped out, and fails if the second one\nsucceeds. Until now nothing had established that this check could fail at all.\n\nci/test_verify_published.sh drives the script against a conan and a cmake that\nanswer on cue, because a remote cannot be asked to serve a recipe and withhold a\nbinary. Every failing case asserts that the verdict does not say the recipe is\nabsent. A real unreachable remote is exercised too, and required to report not\nknowing rather than absence.\n\nThe Conan options are scoped to utxoz/*. Bare options are ambiguous once the\nroot is a requirement rather than the recipe in this directory, and Conan says\nso on every install; scoping them keeps the package id identical and the warning\ngone.\n\n* fix: build the verification consumer in the configuration the package has\n\nThe Windows dry run failed on the consumer check with\n\n    error C1083: Cannot open include file: 'utxoz/config.hpp'\n\nwhich reads as a package that ships no headers. It ships them. CMake picks a\nmulti-config generator by default on Windows, and a multi-config generator\nignores CMAKE_BUILD_TYPE and builds Debug when `cmake --build` is given no\n--config. The package installed for the check has Release binaries only, so\nCMakeDeps has no data file for the Debug configuration and the utxoz target\ncomes out with no include directories at all.\n\nSo the build asks for the configuration that was installed. Single-config\ngenerators, which is everything the Linux and macOS jobs use, ignore the flag —\nwhich is why this only ever surfaced on Windows, and only once the consumer\ncheck was run somewhere that reached the compiler.\n\n* fix: identify the consumer executable exactly, and keep the search's own status\n\nTwo ways the consumer check could report the wrong fault, both from review of\nthe post-upload verification.\n\n`find`'s status was collected inside a process substitution, which inherits\nerrexit. A find that exited non-zero — an unreadable directory, a bad predicate\n— terminated the subshell before the status was written; reading the missing\nfile then failed, set -e exited 1, and verify_published.sh maps 1 to \"the\nconsumer does not configure\". A search that could not run was reported as a\npackage that does not build, which is the conflation that block was written to\nprevent, reintroduced by the machinery meant to prevent it.\n\nThe results now go to a file and the status comes from find itself, so the\ncapture is `|| find_status=$?` in this shell rather than something that has to\nsurvive errexit in a subshell. Disabling errexit inside the substitution would\nalso work; not having the subshell is simpler to be sure about.\n\nThe name is now exact. `test_package*` also matches what the build leaves beside\nthe executable — test_package.cpp.o, test_package.lib, test_package.pdb, the\ntest_package.dir tree — and Git Bash on Windows reports ordinary files as\nexecutable, so `-perm -u+x` does not exclude them there. The check could pick an\nobject file and \"run\" it. The CMake target is test_package and the only platform\nvariation is the .exe suffix, so both are named and nothing else matches.\n\nTwo candidates is now its own refusal rather than a first-match. A build tree\nholding two things called test_package means the search is not identifying what\nit thinks it is, and picking one would hide that behind a pass.\n\nci/test_verify_consumer.sh covers what had no test: an object file, an import\nlibrary, a PDB and a build subdirectory are each rejected while the real\nexecutable beside them is chosen; the Windows name is accepted; two candidates\nare refused; a consumer that runs and fails keeps exit 4; and an unreadable\nbuild tree comes back as the search fault with its diagnostic, asserted not to\nbe either of the two codes that blame the package.\n\nBoth fixes were checked by reverting them: restoring the wildcard fails the five\nidentification cases, and restoring the process substitution fails the\nunreadable-tree case with exit 1 — exactly the reported conflation.\n\nThe workflow now greps for the success line rather than only checking the exit\nstatus, because on Windows \"it exited 0\" is not by itself evidence that what ran\nwas the consumer.\n\n* fix: resolve the consumer's directories before deriving anything from them\n\nBUILD_DIR is derived from INSTALL_DIR, and `find` prints paths that begin with\nthe directory it was given, so a relative INSTALL_DIR produced a relative\ncandidate. The run then happens from a scratch directory on purpose — the\nconsumer creates databases under its working directory — and a relative path\nresolved from there names nothing. The exec failed with 127 and arrived as\nEXIT_RAN_AND_FAILED: \"it built and then did not work\", reported about a consumer\nthat was never started.\n\nCI passes paths built from $RUNNER_TEMP and never hit this. A caller working\nfrom its own directory would have, and would have been told the package was\nbroken.\n\nBoth arguments are now made absolute before TOOLCHAIN or BUILD_DIR are derived,\nwith `cd && pwd` rather than `realpath`, which is GNU coreutils and not on a\nstock macOS. That needs the directories to exist, so both are checked first and\nthe install directory gets its own diagnostic instead of being discovered later\nthrough a missing toolchain file. The exit codes and every existing message are\nunchanged.\n\nThe new case calls the script from another directory with both arguments\nrelative, and asserts a token the emitted executable prints rather than its exit\nstatus. Exit 0 alone cannot tell \"the consumer ran\" from \"nothing ran and\nnothing noticed\", which is the failure being fixed — so every success case now\nasserts the token too.\n\nChecked by removing the normalisation: the case fails with exit 4, and the run\nunderneath it reports `install/consumer-build/test_package: No such file or\ndirectory` followed by \"the consumer built but exited 127\" — the reported\nmisattribution, reproduced exactly.",
+          "timestamp": "2026-08-11T11:48:33+02:00",
+          "tree_id": "c6d2761fce2af9b3e6a07c4c13466bd51bc0c953",
+          "url": "https://github.com/utxo-z/utxo-z/commit/0e8958d4f3fdd9792c09d7e38cb138da9ad0eea0"
+        },
+        "date": 1786441926556,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 280532.04,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 350066.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 264019.87,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 438938.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 373.44,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 430.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 11976115.24,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 12516439.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11312275.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12156.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase hit",
+            "value": 13751251.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase miss",
+            "value": 13592089.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "erase + process_pending_deletions (100 entries)",
+            "value": 127848.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch erase 1K",
+            "value": 13517.63,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2448.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3083.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2837.9,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 55.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 55.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.35,
             "unit": "ops/sec"
           }
         ]
