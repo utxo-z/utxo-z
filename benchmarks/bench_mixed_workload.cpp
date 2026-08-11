@@ -18,6 +18,8 @@ void register_mixed_workload_benchmarks(ankerl::nanobench::Bench& bench) {
         auto val_89  = make_test_value(89);
         uint32_t next_id = 0;
         uint32_t spent_id = 0;
+        // The caller's batch: spends accumulate here between applications.
+        std::vector<utxoz::deferred_deletion_entry> pending_deletes;
         uint32_t block_num = 0;
 
         bench.run("simulated IBD (100 blocks)", [&] {
@@ -39,7 +41,7 @@ void register_mixed_workload_benchmarks(ankerl::nanobench::Bench& bench) {
 
                 // Spend some older UTXOs (if available)
                 for (uint32_t i = 0; i < 10 && spent_id < next_id - 20; ++i) {
-                    (void)f.db->erase(make_test_key(spent_id++, 0), height);
+                    pending_deletes.emplace_back(make_test_key(spent_id++, 0), height);
                 }
 
                 // Lookup some random UTXOs
@@ -50,9 +52,13 @@ void register_mixed_workload_benchmarks(ankerl::nanobench::Bench& bench) {
                     );
                 }
 
-                // Process pending deletions periodically
-                if (block % 10 == 9) {
-                    (void)f.db->process_pending_deletions();
+                // Apply the block's deletions periodically. The batch is this
+                // loop's, so nothing accumulates inside the database.
+                if (block % 10 == 9 && ! pending_deletes.empty()) {
+                    auto const progress = f.db->apply_deletes(pending_deletes);
+                    // Carried, not cleared: whatever the call could not finish is
+                    // the one category that has to be sent again.
+                    pending_deletes = progress.unresolved;
                 }
             }
         });

@@ -157,6 +157,11 @@ int run_adapted_benchmark() {
         // Run benchmark simulation
         size_t height = 0;
 
+        // The caller's deletion batch. This skeleton only inserts, so it stays
+        // empty — which is the point worth showing: with no internal queue,
+        // "nothing to delete" is visible here rather than hidden in the store.
+        std::vector<utxoz::deferred_deletion_entry> pending_deletes;
+
         // Generate some mock data and process
         for (int block = 0; block < 10; ++block) {
             fmt::println("Processing block {}...", block);
@@ -173,10 +178,13 @@ int run_adapted_benchmark() {
                 (void)db.insert(key, value, static_cast<uint32_t>(height));
             }
 
-            // Process pending deletions
-            if (height % 5 == 0) {
-                auto [deleted, failed] = db.process_pending_deletions().value();
-                fmt::println("Processed deletions: {} successful, {} failed", deleted, failed.size());
+            // Apply the accumulated deletions
+            if (height % 5 == 0 && ! pending_deletes.empty()) {
+                auto const progress = db.apply_deletes(pending_deletes);
+                fmt::println("Applied deletions: {} erased, {} absent, {} unresolved",
+                             progress.erased.size(), progress.absent.size(),
+                             progress.unresolved.size());
+                pending_deletes = progress.unresolved;
             }
 
             // Compact periodically

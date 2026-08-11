@@ -103,23 +103,26 @@ int main() {
         fmt::println("Testing UTXO deletion...");
         size_t erased_count = 0;
 
+        // The batch is built here and handed over in one call. UTXO-Z keeps no
+        // queue of its own, so what is not in this vector is not being deleted.
+        std::vector<utxoz::deferred_deletion_entry> batch;
         for (size_t i = 0; i < std::min(size_t(100), inserted_keys.size()); i += 2) {
-            auto const erased = db.erase(inserted_keys[i], 800000);
-            if ( ! erased) {
-                fmt::println("erase refused: the database is not serving");
-                return 1;
-            }
-            erased_count += *erased;
+            batch.emplace_back(inserted_keys[i], 800000);
         }
 
-        fmt::println("Erased {} UTXOs", erased_count);
-        fmt::println("Database size after erasure: {} UTXOs\n", db.size());
+        fmt::println("Applying {} deletions...", batch.size());
+        auto const progress = db.apply_deletes(batch);
+        erased_count = progress.erased.size();
 
-        // Process pending deletions
-        fmt::println("Processing pending deletions...");
-        auto [deleted, failed] = db.process_pending_deletions().value();
-        fmt::println("Successfully deleted: {}", deleted);
-        fmt::println("Failed deletions: {}\n", failed.size());
+        fmt::println("Erased: {}", progress.erased.size());
+        // Proven absent, which is a fact about the database.
+        fmt::println("Absent: {}", progress.absent.size());
+        // Still owed: only these may be sent again.
+        fmt::println("Unresolved: {}", progress.unresolved.size());
+        if (progress.error) {
+            fmt::println("The batch did not complete; retry the unresolved entries.");
+        }
+        fmt::println("Database size after erasure: {} UTXOs\n", db.size());
 
         // Show statistics
         fmt::println("Database Statistics:");

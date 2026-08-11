@@ -83,5 +83,10 @@ coverage/
 
 .boost-unordered-ref/
 test_storage_*/
+# Left behind only when a case fails before its cleanup — which is exactly when
+# somebody is most likely to run `git add -A` while debugging.
+test_unres_*/
+test_own_*/
+test_del_*/
 scripts/__pycache__/
 ci/__pycache__/

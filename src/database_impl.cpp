@@ -26,6 +26,59 @@
 
 namespace utxoz::detail {
 
+namespace {
+
+/// The working set for a batch: indices into the caller's requests, one per
+/// distinct key.
+///
+/// Indices rather than copies. The requests belong to the caller and outlive the
+/// call, so there is nothing here to own; copying them would buy a second copy of
+/// data already sitting in memory, once per key, on the path every block takes.
+///
+/// Distinct keys, because a batch naming one outpoint twice is asking one
+/// question. Without this the duplicate is probed again in every file and comes
+/// back twice in the result, which reads as two missing inputs where there is
+/// one. The first occurrence is the one kept, and the index type is size_t
+/// because that is what it indexes — a narrower one would silently truncate a
+/// batch larger than it can count.
+///
+/// Generic over the request type: a lookup and a deletion carry different
+/// payloads but the same key, and both need the same deduplication. The closed
+/// and recovery paths use it too, so that a refusal partitions the batch exactly
+/// the way a completed call does.
+template <typename Request>
+std::vector<size_t> working_set_of(std::span<Request const> requests) {
+    std::vector<size_t> pending;
+    pending.reserve(requests.size());
+
+    boost::unordered_flat_set<raw_outpoint> seen;
+    seen.reserve(requests.size());
+
+    for (size_t i = 0; i < requests.size(); ++i) {
+        if (seen.insert(requests[i].key).second) pending.push_back(i);
+    }
+    return pending;
+}
+
+} // namespace
+
+deletion_progress refuse_deletions(std::span<deferred_deletion_entry const> requests,
+                                   error_code why) {
+    deletion_progress refused;
+    refused.error = why;
+    if (requests.empty()) return refused;
+
+    // The same working set the applying path builds, so a refusal partitions the
+    // batch the same way a completed call does.
+    auto const pending = working_set_of<deferred_deletion_entry>(requests);
+    refused.unresolved.reserve(pending.size());
+    for (auto const idx : pending) {
+        refused.unresolved.push_back(requests[idx]);
+    }
+    return refused;
+}
+
+
 // =============================================================================
 // Template helpers for compile-time dispatch
 // =============================================================================
@@ -704,38 +757,6 @@ std::optional<find_result> database_impl::find_in_latest_version(raw_outpoint co
 // database_impl - Erase
 // =============================================================================
 
-size_t database_impl::erase(raw_outpoint const& key, uint32_t height) {
-    if (mode_ == storage_mode::reference) {
-        return reference_erase(key, height);
-    }
-
-    size_t search_depth = 0;
-
-    // Try current version first
-    if (auto res = erase_in_latest_version(key, height); res > 0) {
-        entries_count_ -= res;
-        return res;
-    }
-    ++search_depth;
-
-    // Try cached files only
-    if (auto res = erase_from_cached_files_only(key, height, search_depth); res > 0) {
-        entries_count_ -= res;
-        return res;
-    }
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    // Track not found
-    ++not_found_stats_.total_not_found;
-    not_found_stats_.total_search_depth += search_depth;
-    not_found_stats_.max_search_depth = std::max(not_found_stats_.max_search_depth, search_depth);
-    ++not_found_stats_.depth_distribution[search_depth];
-#endif
-
-    // Defer deletion
-    add_to_deferred_deletions(key, height);
-    return 0;
-}
 
 size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t height) {
     size_t result = 0;
@@ -772,268 +793,346 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
     return result;
 }
 
-size_t database_impl::erase_from_cached_files_only(raw_outpoint const& key, uint32_t height,
-                                                    size_t& search_depth) {
-    size_t result = 0;
-
-    auto cached_files = file_cache_->get_cached_files();
-
-    for (auto const& [container_index, version] : cached_files) {
-        ++search_depth;
-
-        auto process_file = [&]<size_t Index>(std::integral_constant<size_t, Index>) {
-            if (file_cache_->is_cached(container_index, version)) {
-                try {
-                    auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(container_index, version);
-
-                    if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
-                        uint32_t age = height - it->second.block_height;
-                        ++lifetime_stats_.age_distribution[age];
-                        lifetime_stats_.max_age = std::max(lifetime_stats_.max_age, age);
-                        ++lifetime_stats_.total_spent;
-                        lifetime_stats_.average_age =
-                            (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
-                            / lifetime_stats_.total_spent;
-
-#endif
-                        map.erase(it);
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-                        --container_stats_[Index].current_size;
-                        ++container_stats_[Index].total_deletes;
-                        ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[Index];
-#endif
-
-                        // A historical file written to outside the sweep. The
-                        // obligation is the same, and so is the reason: the
-                        // mapping can be evicted before the next sync.
-                        note_dirty(container_index, version);
-                        update_metadata_on_delete(Index, version);
-                        result = 1;
-                    }
-                } catch (std::exception const& e) {
-                    log::error("Error accessing cached file ({}, v{}): {}",
-                              container_index, version, e.what());
-                }
-            }
-        };
-
-        switch (container_index) {
-            case 0: process_file(std::integral_constant<size_t, 0>{}); break;
-            case 1: process_file(std::integral_constant<size_t, 1>{}); break;
-            case 2: process_file(std::integral_constant<size_t, 2>{}); break;
-            case 3: process_file(std::integral_constant<size_t, 3>{}); break;
-            case 4: process_file(std::integral_constant<size_t, 4>{}); break;
-        }
-
-        if (result > 0) break;
-    }
-
-    return result;
-}
 
 // =============================================================================
 // database_impl - Deferred deletions
 // =============================================================================
 
-void database_impl::add_to_deferred_deletions(raw_outpoint const& key, uint32_t height) {
-    [[maybe_unused]] auto [it, inserted] = deferred_deletions_.emplace(key, height);
-#ifdef UTXOZ_STATISTICS_ENABLED
-    if (inserted) {
-        ++deferred_stats_.total_deferred;
-        deferred_stats_.max_queue_size = std::max(deferred_stats_.max_queue_size,
-                                                   deferred_deletions_.size());
 
-        for (size_t i = 0; i < container_count; ++i) {
-            ++container_stats_[i].deferred_deletes;
-        }
-    }
-#endif
-}
+deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry const> requests) {
+    deletion_progress progress;
+    if (requests.empty()) return progress;
 
-size_t database_impl::deferred_deletions_size() const {
-    return deferred_deletions_.size();
-}
+    // Indices into the caller's batch, deduplicated by key and shrinking as
+    // deletions are applied. Nothing is taken: the requests stay in the caller's
+    // span and are still the caller's when this returns (#119).
+    auto pending = working_set_of<deferred_deletion_entry>(requests);
 
-std::pair<uint32_t, std::vector<deferred_deletion_entry>> database_impl::process_pending_deletions() {
-    if (deferred_deletions_.empty()) return {};
+    // Reserved before anything is erased. progress.erased is written while the
+    // maps are being changed, and a vector growing at that moment is an
+    // allocation that can fail — which would make "we ran out of memory" the
+    // reason a deletion that really happened went unreported. The other two are
+    // filled after all mutation, and are reserved here for the same reason
+    // rather than a different one.
+    progress.erased.reserve(pending.size());
+    progress.absent.reserve(pending.size());
+    progress.unresolved.reserve(pending.size());
+
+    // Everything that is still owed at the end, whatever the reason. Filled once,
+    // at the end, from whatever survived — so a key can never be in two lists and
+    // can never be missing from all three.
+    auto const classify_remainder = [&](std::vector<deferred_deletion_entry>& into) {
+        into.reserve(into.size() + pending.size());
+        for (auto const idx : pending) into.push_back(requests[idx]);
+    };
 
 #ifdef UTXOZ_STATISTICS_ENABLED
     auto const start_time = std::chrono::steady_clock::now();
-    ++deferred_stats_.processing_runs;
 #endif
+    log::debug("Applying {} deletions ({} distinct)...", requests.size(), pending.size());
 
-    size_t initial_size = deferred_deletions_.size();
-    log::debug("Processing {} deferred deletions...", initial_size);
+    // Unlike a resolution, this cannot be transactional: every erase below writes
+    // to a mapped file immediately. So a fault partway through leaves earlier
+    // deletions applied, and the contract is to enumerate them rather than to
+    // pretend they did not happen. What must never happen is calling the
+    // remainder absent — a version that would not open could hold any of them.
+    bool complete = true;
+    error_code failure = error_code::version_unreadable;
 
-    size_t successful_deletions = 0;
+    // Phase 0: the active versions. This is what the old single-key erase() did
+    // inline before queueing, and it is the common case: an output spent soon
+    // after it was created has not been rotated away yet.
+    {
+        size_t keep = 0;
+        for (size_t i = 0; i < pending.size(); ++i) {
+            auto const idx = pending[i];
+            auto const& request = requests[idx];
+            size_t const applied = (mode_ == storage_mode::reference)
+                ? reference_erase_in_latest(request.key, request.height)
+                : erase_in_latest_version(request.key, request.height);
+            if (applied > 0) {
+                entries_count_ -= applied;
+                progress.erased.push_back(request);
+                continue;
+            }
+            pending[keep++] = idx;
+        }
+        pending.resize(keep);
+    }
 
-    // Phase 1: Process cached files first
+    // Applied so far by the historical walk, for the seam below. Counted across
+    // files rather than per file, so a case can aim the throw at a file that has
+    // already applied something.
+    //
+    // The active-version phase above is deliberately not counted. It has no throw
+    // point — the seam lives inside the per-file loop — so including it would
+    // only shift the numbering by however many keys happened to still be in the
+    // active version, which is not something a case can know.
+    uint64_t applied_in_walk = 0;
+
+    // One file's worth of the walk, over whatever map it is handed.
+    //
+    // Written so that `pending` and the map never disagree — not even for the
+    // span of one statement, and not even if something throws between them.
+    //
+    // The shape this replaces compacted `pending` only after the loop. An
+    // exception raised after a key was gone from the map therefore left its index
+    // still in `pending`, so the same key came back both applied and still owed;
+    // and if the throw happened before the key was recorded, it was deleted and
+    // reported nowhere. Neither is a state a caller can act on, and "deleted but
+    // reported as owed" is the one that loses data on the retry.
+    //
+    // So: the erase is the first thing, recording it is the next thing and cannot
+    // allocate — progress.erased is reserved before any mutation — and the
+    // compaction of `pending` is finished by a scope guard that runs on the
+    // exception path too.
+    //
+    // The bookkeeping is a parameter rather than a branch inside. Which catalogue
+    // a deletion belongs to is a property of the file being walked, and passing it
+    // in is what keeps that decision next to the code that opened the file.
+    auto const step_over_file = [&](auto& map, auto const& record_deletion) {
+        size_t keep = 0;
+        size_t i = 0;
+        bool current_applied = false;
+
+        scope_exit const settle([&] {
+            // Indices below `i` are decided: the applied ones dropped, the rest
+            // already moved down into [0, keep). Index `i` is decided only if its
+            // own erase went through. Everything above is untouched and copied
+            // down as it stands.
+            size_t const tail = current_applied ? i + 1 : i;
+            for (size_t j = tail; j < pending.size(); ++j) pending[keep++] = pending[j];
+            pending.resize(keep);
+        });
+
+        for (; i < pending.size(); ++i) {
+            current_applied = false;
+            auto const idx = pending[i];
+
+            if (map.erase(requests[idx].key) == 0) {
+                pending[keep++] = idx;
+                continue;
+            }
+
+            // The map has changed. Record it before anything that can throw.
+            progress.erased.push_back(requests[idx]);
+            --entries_count_;
+            current_applied = true;
+
+            if (failpoints::fail_delete_after_applied.load(std::memory_order_relaxed)
+                    == ++applied_in_walk) {
+                throw std::runtime_error("failpoint: threw after applying a deletion");
+            }
+
+            record_deletion(requests[idx].height);
+        }
+    };
+
+    // The reference walk is its own function rather than the full one with a
+    // sentinel threaded through it.
+    //
+    // It used to share erase_in_file<Index>, reached through a switch whose
+    // default mapped the sentinel onto Index 0. The guard inside was
+    // `if constexpr (Index == SIZE_MAX)`, which that dispatch can never satisfy,
+    // so a historical reference deletion erased the right entry, marked the right
+    // file dirty — note_dirty takes the runtime index — and then updated the
+    // metadata of *full container 0*. The reference catalogue never heard about
+    // the deletion, and container 0's said an entry left a file it was never in.
+    //
+    // Two functions cost less than one that has to be told which of two shapes it
+    // is, and neither can be instantiated for a sentinel that is not a container
+    // index.
+    auto const erase_in_reference_file = [&](size_t version) {
+        try {
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
+                    == static_cast<uint64_t>(version)) {
+                throw std::runtime_error("failpoint: version file refused to open");
+            }
+
+            auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
+            (void) cache_hit;
+            step_over_file(map, [&]([[maybe_unused]] uint32_t height) {
+                note_dirty(reference_sentinel_index, version);
+                if (auto* meta = reference_catalog_.find_metadata(version)) meta->update_on_delete();
+                failpoints::reference_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
+#ifdef UTXOZ_STATISTICS_ENABLED
+                // The same counters the queue-draining path kept. Reference mode
+                // reports through container 0's slot, as it does everywhere else.
+                auto const depth =
+                    static_cast<uint32_t>(reference_current_version_ - version);
+                ++deferred_stats_.deletions_by_depth[depth];
+                --container_stats_[0].current_size;
+                ++container_stats_[0].total_deletes;
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
+#endif
+            });
+        } catch (std::exception const& e) {
+            log::error("Could not apply deletions in reference v{}: {}. The batch is incomplete.",
+                       version, e.what());
+            complete = false;
+        }
+    };
+
+    auto const erase_in_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>,
+                                                     size_t version) {
+        try {
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
+                    == static_cast<uint64_t>(version)) {
+                throw std::runtime_error("failpoint: version file refused to open");
+            }
+
+            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
+            (void) cache_hit;
+            step_over_file(map, [&]([[maybe_unused]] uint32_t height) {
+                note_dirty(Index, version);
+                update_metadata_on_delete(Index, version);
+                failpoints::full_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
+#ifdef UTXOZ_STATISTICS_ENABLED
+                // Restored with the rest of the historical path. Dropping these
+                // made a deletion that reached an older file invisible to every
+                // per-container number while the active-version phase kept
+                // recording its own — so the two halves of the same call
+                // disagreed, and by container.
+                //
+                // deferred_deletes is deliberately not among them: it counted how
+                // much was sitting in the queue, and there is no queue to sit in.
+                auto const depth = static_cast<uint32_t>(current_versions_[Index] - version);
+                ++deferred_stats_.deletions_by_depth[depth];
+                --container_stats_[Index].current_size;
+                ++container_stats_[Index].total_deletes;
+                ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[Index];
+#endif
+            });
+        } catch (std::exception const& e) {
+            // This file could hold any of the keys still pending, so none of them
+            // can be called absent. What was already erased stays erased and stays
+            // reported — that is the difference from a resolution, and the guard
+            // in step_over_file is what makes it true even here.
+            log::error("Could not apply deletions in ({}, v{}): {}. The batch is incomplete.",
+                       Index, version, e.what());
+            complete = false;
+        }
+    };
+
+    auto const walk = [&](size_t container_index, size_t version) {
+        if (container_index == reference_sentinel_index) {
+            erase_in_reference_file(version);
+            return;
+        }
+        switch (container_index) {
+            case 0: erase_in_full_file(std::integral_constant<size_t, 0>{}, version); break;
+            case 1: erase_in_full_file(std::integral_constant<size_t, 1>{}, version); break;
+            case 2: erase_in_full_file(std::integral_constant<size_t, 2>{}, version); break;
+            case 3: erase_in_full_file(std::integral_constant<size_t, 3>{}, version); break;
+            case 4: erase_in_full_file(std::integral_constant<size_t, 4>{}, version); break;
+            default:
+                // Not a container this build has. Silently walking it as index 0
+                // is how the sentinel came to update the wrong catalogue, so an
+                // index nobody recognises stops the batch instead.
+                log::error("Deletion batch asked for container {}, which does not exist. "
+                           "The batch is incomplete.", container_index);
+                complete = false;
+                break;
+        }
+    };
+
+    // Phase 1: cached files first — already mapped, so they cost nothing to visit.
     auto cached_files = file_cache_->get_cached_files();
-    if (!cached_files.empty()) {
+    if ( ! cached_files.empty()) {
         std::ranges::sort(cached_files, [](auto const& a, auto const& b) {
             if (a.first != b.first) return a.first < b.first;
             return a.second > b.second;
         });
-
         for (auto const& [container_index, version] : cached_files) {
-            if (deferred_deletions_.empty()) break;
-            successful_deletions += process_deferred_deletions_in_file(container_index, version, true);
+            if (pending.empty()) break;
+            if (mode_ == storage_mode::reference) {
+                if (container_index == reference_sentinel_index) walk(container_index, version);
+            } else if (container_index != reference_sentinel_index) {
+                walk(container_index, version);
+            }
         }
     }
 
-    // Phase 2: Process remaining files
-    if (!deferred_deletions_.empty()) {
+    // Phase 2: every remaining version below the current one.
+    if ( ! pending.empty()) {
         if (mode_ == storage_mode::reference) {
-            std::set<size_t> processed_versions_reference;
+            std::set<size_t> seen;
             for (auto const& [ci, version] : cached_files) {
-                if (ci == reference_sentinel_index) {
-                    processed_versions_reference.insert(version);
-                }
+                if (ci == reference_sentinel_index) seen.insert(version);
             }
-
-            // Nearest generation first, over the versions that exist. Walking
-            // a range down from the active one would visit every number ever
-            // rotated through, and those never come back.
-            for (auto const v : reference_catalog_.below(reference_current_version_)) {
-                if (deferred_deletions_.empty()) break;
-                if (processed_versions_reference.contains(v)) continue;
-
-                successful_deletions += process_deferred_deletions_in_file(reference_sentinel_index, v, false);
+            try {
+                if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
+                    throw std::runtime_error("failpoint: catalogue refused to be listed");
+                }
+                for (auto const v : reference_catalog_.below(reference_current_version_)) {
+                    if (pending.empty()) break;
+                    if (seen.contains(v)) continue;
+                    walk(reference_sentinel_index, v);
+                }
+            } catch (std::exception const& e) {
+                log::error("Could not enumerate reference versions: {}. The batch is incomplete.", e.what());
+                complete = false;
+                failure = error_code::catalog_unreadable;
             }
         } else {
-            std::array<std::set<size_t>, container_count> processed_versions;
-            for (auto const& [container_index, version] : cached_files) {
-                processed_versions[container_index].insert(version);
+            std::array<std::set<size_t>, container_count> seen;
+            for (auto const& [ci, version] : cached_files) {
+                if (ci < container_count) seen[ci].insert(version);
             }
-
             for_each_index<container_count>([&](auto I) {
-                if (deferred_deletions_.empty()) return;
-
-                for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
-                    if (deferred_deletions_.empty()) break;
-                    if (processed_versions[I.value].contains(v)) continue;
-
-                    successful_deletions += process_deferred_deletions_in_file(I.value, v, false);
+                if (pending.empty()) return;
+                try {
+                    if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
+                        throw std::runtime_error("failpoint: catalogue refused to be listed");
+                    }
+                    for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
+                        if (pending.empty()) break;
+                        if (seen[I.value].contains(v)) continue;
+                        walk(I.value, v);
+                    }
+                } catch (std::exception const& e) {
+                    log::error("Could not enumerate versions of container {}: {}. The batch is incomplete.",
+                               I.value, e.what());
+                    complete = false;
+                    failure = error_code::catalog_unreadable;
                 }
             });
         }
     }
 
-    // Collect failed deletions (includes key and block height that requested it)
-    std::vector<deferred_deletion_entry> failed_deletions;
-    failed_deletions.reserve(deferred_deletions_.size());
-    for (auto const& entry : deferred_deletions_) {
-        failed_deletions.push_back(entry);
+    if ( ! complete) {
+        // Owed, not absent. Every one of these could be in the file that would
+        // not open, and reporting them as absent is the mistake this design
+        // exists to make impossible.
+        classify_remainder(progress.unresolved);
+        progress.error = failure;
+        log::error("Deletion batch incomplete: {} applied, {} still owed and none of them absent",
+                   progress.erased.size(), progress.unresolved.size());
+    } else {
+        // Every version that could hold them was read, so what is left was looked
+        // for everywhere it could have been. Only now is absence a fact.
+        classify_remainder(progress.absent);
     }
 
-    deferred_deletions_.clear();
-
 #ifdef UTXOZ_STATISTICS_ENABLED
+    // Applied deletions are counted whether or not the batch finished: they
+    // happened, and the entry count already reflects them. `processing_runs` is
+    // not, because it means a run that completed — an incomplete batch that
+    // counted one would make the averages describe work that was never done.
+    deferred_stats_.successfully_processed += progress.erased.size();
+    deferred_stats_.failed_to_delete += progress.unresolved.size();
+    if (complete) ++deferred_stats_.processing_runs;
+
     auto const end_time = std::chrono::steady_clock::now();
     deferred_stats_.total_processing_time +=
         std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-
-    deferred_stats_.successfully_processed += successful_deletions;
-    deferred_stats_.failed_to_delete += failed_deletions.size();
 #endif
 
-    entries_count_ -= successful_deletions;
-
-    log::debug("Deferred deletion complete: {} successful, {} failed",
-              successful_deletions, failed_deletions.size());
-
-    return {static_cast<uint32_t>(successful_deletions), std::move(failed_deletions)};
+    log::debug("Deletion batch: {} erased, {} absent, {} unresolved",
+               progress.erased.size(), progress.absent.size(), progress.unresolved.size());
+    return progress;
 }
 
-size_t database_impl::process_deferred_deletions_in_file(size_t container_index,
-                                                          size_t version,
-                                                          [[maybe_unused]] bool is_cached) {
-    if (deferred_deletions_.empty()) return 0;
-
-    size_t successful_deletions = 0;
-
-    auto process_with_container = [&]<size_t Index>(std::integral_constant<size_t, Index>) -> size_t {
-        try {
-            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(container_index, version);
-
-            auto it = deferred_deletions_.begin();
-            while (it != deferred_deletions_.end()) {
-                auto erased_count = map.erase(it->key);
-                if (erased_count > 0) {
-                    // Written to. The obligation outlives the mapping, which
-                    // the LRU may evict before this sweep is over.
-                    note_dirty(container_index, version);
-                    update_metadata_on_delete(Index, version);
-#ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(current_versions_[Index] - version);
-
-                    ++deferred_stats_.deletions_by_depth[depth];
-                    --container_stats_[Index].deferred_deletes;
-                    --container_stats_[Index].current_size;
-                    ++container_stats_[Index].total_deletes;
-                    ++height_range_stats_.ranges[it->height / height_range_stats::range_size].deletes[Index];
-#endif
-
-                    it = deferred_deletions_.erase(it);
-                    ++successful_deletions;
-                } else {
-                    ++it;
-                }
-            }
-
-            return successful_deletions;
-
-        } catch (std::exception const& e) {
-            log::error("Error processing file ({}, v{}): {}", container_index, version, e.what());
-            return 0;
-        }
-    };
-
-    if (container_index == reference_sentinel_index) {
-        // Reference mode deferred deletions
-        try {
-            auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
-
-            auto it = deferred_deletions_.begin();
-            while (it != deferred_deletions_.end()) {
-                auto erased_count = map.erase(it->key);
-                if (erased_count > 0) {
-                    note_dirty(reference_sentinel_index, version);
-                    if (auto* meta = reference_catalog_.find_metadata(version)) {
-                        meta->update_on_delete();
-                    }
-#ifdef UTXOZ_STATISTICS_ENABLED
-                    auto depth = static_cast<uint32_t>(reference_current_version_ - version);
-                    ++deferred_stats_.deletions_by_depth[depth];
-                    --container_stats_[0].deferred_deletes;
-                    --container_stats_[0].current_size;
-                    ++container_stats_[0].total_deletes;
-                    ++height_range_stats_.ranges[it->height / height_range_stats::range_size].deletes[0];
-#endif
-                    it = deferred_deletions_.erase(it);
-                    ++successful_deletions;
-                } else {
-                    ++it;
-                }
-            }
-            return successful_deletions;
-        } catch (std::exception const& e) {
-            log::error("Error processing reference file v{}: {}", version, e.what());
-            return 0;
-        }
-    }
-
-    switch (container_index) {
-        case 0: return process_with_container(std::integral_constant<size_t, 0>{});
-        case 1: return process_with_container(std::integral_constant<size_t, 1>{});
-        case 2: return process_with_container(std::integral_constant<size_t, 2>{});
-        case 3: return process_with_container(std::integral_constant<size_t, 3>{});
-        case 4: return process_with_container(std::integral_constant<size_t, 4>{});
-        default: return 0;
-    }
-}
 
 // =============================================================================
 // database_impl - Compaction
@@ -2404,64 +2503,6 @@ std::optional<find_result> database_impl::reference_find_in_latest(raw_outpoint 
     return std::nullopt;
 }
 
-size_t database_impl::reference_erase(raw_outpoint const& key, uint32_t height) {
-    // Try current version first
-    if (auto res = reference_erase_in_latest(key, height); res > 0) {
-        entries_count_ -= res;
-        return res;
-    }
-
-    // Try cached files
-    size_t search_depth = 1;
-    auto cached_files = file_cache_->get_cached_files();
-    for (auto const& [ci, version] : cached_files) {
-        if (ci != reference_sentinel_index) continue;
-        ++search_depth;
-
-        if (file_cache_->is_cached(reference_sentinel_index, version)) {
-            try {
-                auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
-
-                if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
-                    uint32_t age = height - it->second.height;
-                    ++lifetime_stats_.age_distribution[age];
-                    lifetime_stats_.max_age = std::max(lifetime_stats_.max_age, age);
-                    ++lifetime_stats_.total_spent;
-                    lifetime_stats_.average_age =
-                        (lifetime_stats_.average_age * (lifetime_stats_.total_spent - 1) + age)
-                        / lifetime_stats_.total_spent;
-
-                    --container_stats_[0].current_size;
-                    ++container_stats_[0].total_deletes;
-                    ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
-#endif
-                    map.erase(it);
-
-                    note_dirty(reference_sentinel_index, version);   // see the full-mode path
-                    if (auto* meta = reference_catalog_.find_metadata(version)) {
-                        meta->update_on_delete();
-                    }
-
-                    --entries_count_;
-                    return 1;
-                }
-            } catch (std::exception const& e) {
-                log::error("Error accessing cached reference file v{}: {}", version, e.what());
-            }
-        }
-    }
-
-#ifdef UTXOZ_STATISTICS_ENABLED
-    ++not_found_stats_.total_not_found;
-    not_found_stats_.total_search_depth += search_depth;
-    not_found_stats_.max_search_depth = std::max(not_found_stats_.max_search_depth, search_depth);
-    ++not_found_stats_.depth_distribution[search_depth];
-#endif
-
-    add_to_deferred_deletions(key, height);
-    return 0;
-}
 
 size_t database_impl::reference_erase_in_latest(raw_outpoint const& key, uint32_t height) {
     auto& map = reference_map();
@@ -2757,35 +2798,6 @@ std::optional<full_find_result> database_impl::full_find(raw_outpoint const& key
     return std::nullopt;
 }
 
-namespace {
-
-/// The working set for a resolution: indices into the caller's batch, one per
-/// distinct key.
-///
-/// Indices rather than copies. The requests belong to the caller and outlive the
-/// call, so there is nothing here to own; copying them would buy a second copy of
-/// data already sitting in memory, once per key, on the path every block takes.
-///
-/// Distinct keys, because a batch naming one outpoint twice is asking one
-/// question. Without this the duplicate is probed again in every file and comes
-/// back twice in `absent`, which reads as two missing inputs where there is one.
-/// The first occurrence is the one kept, and the index type is size_t because
-/// that is what it indexes — a narrower one would silently truncate a batch
-/// larger than it can count.
-std::vector<size_t> working_set_of(std::span<lookup_request const> requests) {
-    std::vector<size_t> pending;
-    pending.reserve(requests.size());
-
-    boost::unordered_flat_set<raw_outpoint> seen;
-    seen.reserve(requests.size());
-
-    for (size_t i = 0; i < requests.size(); ++i) {
-        if (seen.insert(requests[i].key).second) pending.push_back(i);
-    }
-    return pending;
-}
-
-} // namespace
 
 result<full_resolution> database_impl::full_resolve(std::span<lookup_request const> requests) const {
     // Taken before anything is read and held to the return, because what has
@@ -2803,7 +2815,7 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     // stay in the caller's span and are still the caller's when this returns.
     // That is what makes two batches unable to mix — there is no shared
     // container for them to mix in (#116).
-    auto pending = working_set_of(requests);
+    auto pending = working_set_of<lookup_request>(requests);
     log::debug("Resolving {} full lookups ({} distinct)...", requests.size(), pending.size());
 
     // A resolution either covers everything it needed to, or it says so.
@@ -2846,7 +2858,7 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
 
     auto probe_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>, size_t version) {
         try {
-            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
@@ -2923,7 +2935,7 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
             // Enumerating the versions can fail too, and not knowing which files
             // exist is the same problem as not being able to read one.
             try {
-            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+            if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                 throw std::runtime_error("failpoint: catalogue refused to be listed");
             }
             for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
@@ -3065,7 +3077,7 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
 
     // The same contract as full_resolve(), case for case: indices into the
     // caller's batch, nothing taken, nothing kept.
-    auto pending = working_set_of(requests);
+    auto pending = working_set_of<lookup_request>(requests);
     log::debug("Resolving {} reference lookups ({} distinct)...", requests.size(), pending.size());
 
     // A resolution either covers everything it needed to, or it says so. Every
@@ -3091,7 +3103,7 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
 
     auto probe_reference_file = [&](size_t version) {
         try {
-            if (failpoints::fail_lookup_open_version.load(std::memory_order_relaxed)
+            if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
@@ -3152,7 +3164,7 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
         }
 
         try {
-            if (failpoints::fail_lookup_catalog.load(std::memory_order_relaxed)) {
+            if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                 throw std::runtime_error("failpoint: catalogue refused to be listed");
             }
             for (auto const v : reference_catalog_.below(reference_current_version_)) {

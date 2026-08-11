@@ -178,10 +178,9 @@ std::vector<utxoz::raw_outpoint> build_mergeable(std::string const& path, size_t
 
     // Free half of it, so the survivors fit into fewer files than they occupy.
     auto const keys = all_keys(db);
-    for (size_t i = 0; i < keys.size(); i += 2) {
-        (void)db.erase(keys[i], 400);
-    }
-    (void)db.process_pending_deletions();
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (size_t i = 0; i < keys.size(); i += 2) batch.emplace_back(keys[i], 400);
+    REQUIRE(db.apply_deletes(batch).unresolved.empty());
 
     auto const remaining = all_keys(db);
     db.close();
@@ -246,10 +245,9 @@ std::vector<utxoz::raw_outpoint> build_mergeable_reference(std::string const& pa
 
     std::vector<utxoz::raw_outpoint> keys;
     REQUIRE(db.for_each_key([&](utxoz::raw_outpoint const& k) { keys.push_back(k); }));
-    for (size_t i = 0; i < keys.size(); i += 2) {
-        REQUIRE(db.erase(keys[i], 400));
-    }
-    (void)db.process_pending_deletions();
+    std::vector<utxoz::deferred_deletion_entry> batch;
+    for (size_t i = 0; i < keys.size(); i += 2) batch.emplace_back(keys[i], 400);
+    REQUIRE(db.apply_deletes(batch).unresolved.empty());
 
     std::vector<utxoz::raw_outpoint> remaining;
     REQUIRE(db.for_each_key([&](utxoz::raw_outpoint const& k) { remaining.push_back(k); }));
@@ -283,8 +281,8 @@ void require_sound_after_recovery(std::string const& path,
     REQUIRE(inserted);
     REQUIRE(*inserted);
     REQUIRE(db.find(fresh, 500));
-    REQUIRE(db.erase(fresh, 600).value() == 1);
-    (void)db.process_pending_deletions();
+    REQUIRE(db.apply_deletes(std::vector<utxoz::deferred_deletion_entry>{{fresh, 600}})
+                .erased.size() == 1);
     REQUIRE(db.compact_all());
 
     db.close();
@@ -421,9 +419,18 @@ TEST_CASE("a partial retirement latches the instance until it is reopened",
         auto const key = make_key(9'100'000);
         require_latched(db.insert(key, make_value(8, 1), 700));
         require_latched(db.find(expected.front(), 700));
-        require_latched(db.erase(expected.front(), 700));
-        require_latched(db.process_pending_deletions());
         require_latched(db.resolve(std::vector<utxoz::lookup_request>{{expected.front(), 700}}));
+        // apply_deletes() carries its refusal in the progress rather than in a
+        // result<>, so the latch shows up as the whole batch still owed.
+        {
+            std::vector<utxoz::deferred_deletion_entry> const owed{{expected.front(), 700}};
+            auto const refused = db.apply_deletes(owed);
+            CHECK(refused.erased.empty());
+            CHECK(refused.absent.empty());
+            CHECK(refused.unresolved.size() == 1);
+            REQUIRE(refused.error.has_value());
+            CHECK(*refused.error == utxoz::error_code::recovery_required);
+        }
         require_latched(db.compact_all());
         require_latched(db.for_each_key([](utxoz::raw_outpoint const&) {}));
 
@@ -690,10 +697,9 @@ TEST_CASE("a latched reference instance refuses its own operations too",
         }
 
         // Room to merge into.
-        for (uint64_t i = 0; i < next; i += 2) {
-            REQUIRE(db.erase(make_key(i), 400));
-        }
-        (void)db.process_pending_deletions();
+        std::vector<utxoz::deferred_deletion_entry> batch;
+        for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
+        REQUIRE(db.apply_deletes(batch).unresolved.empty());
         db.close();
     }
 
@@ -711,9 +717,15 @@ TEST_CASE("a latched reference instance refuses its own operations too",
 
     require_latched(db.insert(make_key(9'300'000), 1, 2, 700));
     require_latched(db.find(witness, 700));
-    require_latched(db.erase(witness, 700));
     require_latched(db.resolve(std::vector<utxoz::lookup_request>{{witness, 700}}));
-    require_latched(db.process_pending_deletions());
+    {
+        std::vector<utxoz::deferred_deletion_entry> const owed{{witness, 700}};
+        auto const refused = db.apply_deletes(owed);
+        CHECK(refused.erased.empty());
+        CHECK(refused.unresolved.size() == 1);
+        REQUIRE(refused.error.has_value());
+        CHECK(*refused.error == utxoz::error_code::recovery_required);
+    }
     require_latched(db.compact_all());
     require_latched(db.for_each_key([](utxoz::raw_outpoint const&) {}));
 
@@ -757,8 +769,9 @@ TEST_CASE("an uncertain merge record stops before the target and does not undo i
                 ++next;
                 REQUIRE(next < 3'000'000);
             }
-            for (uint64_t i = 0; i < next; i += 2) REQUIRE(db.erase(make_key(i), 400));
-            (void)db.process_pending_deletions();
+            std::vector<utxoz::deferred_deletion_entry> batch;
+            for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
+            REQUIRE(db.apply_deletes(batch).unresolved.empty());
             db.close();
         } else {
             REQUIRE_FALSE(build_mergeable(path, 3).empty());
@@ -1262,8 +1275,9 @@ TEST_CASE("a target whose name is not durable retires nothing",
                 ++next;
                 REQUIRE(next < 3'000'000);
             }
-            for (uint64_t i = 0; i < next; i += 2) REQUIRE(db.erase(make_key(i), 400));
-            (void)db.process_pending_deletions();
+            std::vector<utxoz::deferred_deletion_entry> batch;
+            for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
+            REQUIRE(db.apply_deletes(batch).unresolved.empty());
             db.close();
         } else {
             REQUIRE_FALSE(build_mergeable(path, 3).empty());
@@ -1436,8 +1450,9 @@ TEST_CASE("a compaction that cannot reopen its active container says so",
                 ++next;
                 REQUIRE(next < 3'000'000);
             }
-            for (uint64_t i = 0; i < next; i += 2) REQUIRE(db.erase(make_key(i), 400));
-            (void)db.process_pending_deletions();
+            std::vector<utxoz::deferred_deletion_entry> batch;
+            for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
+            REQUIRE(db.apply_deletes(batch).unresolved.empty());
             db.close();
         } else {
             REQUIRE_FALSE(build_mergeable(path, 3).empty());
@@ -1876,8 +1891,8 @@ TEST_CASE("a crash at any barrier of a reference-mode merge leaves a state reope
             // The count, not merely the absence of an error: a successful
             // delete of nothing satisfies the latter, and a database that
             // accepts writes but silently deletes none of them would pass.
-            REQUIRE(db.erase(fresh, 600).value() == 1);
-            (void)db.process_pending_deletions();
+            REQUIRE(db.apply_deletes(std::vector<utxoz::deferred_deletion_entry>{{fresh, 600}})
+                        .erased.size() == 1);
             CHECK_FALSE(db.find(fresh, 700));
 
             REQUIRE(db.compact_all());

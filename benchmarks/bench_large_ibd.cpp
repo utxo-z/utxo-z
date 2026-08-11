@@ -137,13 +137,20 @@ void run_ibd_simulation() {
     size_t deferred_total = 0;
     t.reset();
 
+    // The batch is the caller's: keys accumulate here, not inside the database,
+    // and are handed over every `deferred_interval` deletions.
+    std::vector<utxoz::deferred_deletion_entry> batch;
     for (size_t i = 0; i < keys_to_erase.size(); ++i) {
         auto key = bench::make_test_key(keys_to_erase[i], 0);
-        (void)db.erase(key, static_cast<uint32_t>(total_inserts / 1000 + i / 1000));
+        batch.emplace_back(key, static_cast<uint32_t>(total_inserts / 1000 + i / 1000));
 
         if ((i + 1) % deferred_interval == 0) {
-            auto [processed, failed] = db.process_pending_deletions().value();
-            deferred_total += processed;
+            auto const progress = db.apply_deletes(batch);
+            deferred_total += progress.erased.size();
+            // Carried, not dropped. Clearing the batch would discard whatever the
+            // call could not finish, which is the one category that has to be
+            // sent again.
+            batch = progress.unresolved;
         }
 
         if ((i + 1) % progress_interval == 0) {
@@ -162,10 +169,10 @@ void run_ibd_simulation() {
     // =========================================================================
     fmt::println("\n--- Phase 3: Process remaining deferred deletions ---");
     t.reset();
-    auto [processed, failed] = db.process_pending_deletions().value();
+    auto const progress = db.apply_deletes(batch);
     double deferred_s = t.elapsed_s();
-    fmt::println("  Processed: {:L}, Failed: {:L}, Time: {:.3f}s",
-        processed, failed.size(), deferred_s);
+    fmt::println("  Erased: {:L}, absent: {:L}, unresolved: {:L}, Time: {:.3f}s",
+        progress.erased.size(), progress.absent.size(), progress.unresolved.size(), deferred_s);
 
     // =========================================================================
     // Phase 4: Find throughput on the resulting database

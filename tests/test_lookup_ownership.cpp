@@ -448,7 +448,7 @@ TEST_CASE("full: an unreadable version yields no partial results and no absences
     // Version 1 is neither the first file walked nor the only one, so the
     // failure lands after entries have already been resolved into the local
     // result. None of that may escape.
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
 
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
@@ -500,7 +500,7 @@ TEST_CASE("full: an unlistable catalogue keeps its own cause and consumes nothin
 
     auto const batch = batch_of(c.a_stored, 100'000);
 
-    failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+    failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
     // Not version_unreadable: not knowing which files exist sends an operator
@@ -530,7 +530,7 @@ TEST_CASE("full: one owner's failed resolution leaves another's batch resolvable
     auto const batch_a = batch_of(c.a_stored, 100'000);
     auto const batch_b = batch_of(c.b_stored, 100'000);
 
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
     REQUIRE_FALSE(db.resolve(batch_a).has_value());
     failpoints::clear();
 
@@ -688,7 +688,7 @@ TEST_CASE("reference: an unreadable version yields no partial results, and the r
 
     auto const before = db.get_statistics();
 
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
     CHECK(failed.error() == utxoz::error_code::version_unreadable);
@@ -715,7 +715,7 @@ TEST_CASE("reference: an unlistable catalogue keeps its own cause and consumes n
 
     auto const batch = batch_of(c.a_stored, 100'000);
 
-    failpoints::fail_lookup_catalog.store(true, std::memory_order_relaxed);
+    failpoints::fail_historical_catalog.store(true, std::memory_order_relaxed);
     auto const failed = db.resolve(batch);
     REQUIRE_FALSE(failed.has_value());
     CHECK(failed.error() == utxoz::error_code::catalog_unreadable);
@@ -778,7 +778,6 @@ TEST_CASE("full: a resolution moves only the resolution counters",
     CHECK(after.deferred.processing_runs == before.deferred.processing_runs);
     CHECK(after.deferred.successfully_processed == before.deferred.successfully_processed);
     CHECK(after.deferred.failed_to_delete == before.deferred.failed_to_delete);
-    CHECK(after.deferred.total_deferred == before.deferred.total_deferred);
     CHECK(after.deferred.total_processing_time == before.deferred.total_processing_time);
     CHECK(after.deferred.deletions_by_depth == before.deferred.deletions_by_depth);
 
@@ -799,34 +798,32 @@ TEST_CASE("full: a deletion moves only the deletion counters",
     auto db = std::move(*opened);
 
     // Inserted before the fill, so the rotation leaves it below the active
-    // version. That is deliberate: a key still in the active version is erased
-    // outright and never reaches the deferred path, so the sweep would have
-    // nothing to do and none of its counters would move — the case would pass
-    // for the wrong reason.
+    // version. That is deliberate: a key still in the active version is applied
+    // by the batch's first phase without opening a file, so the historical walk
+    // would have nothing to do and its counters would not move — the case would
+    // pass for the wrong reason.
     auto const doomed = outpoint_of(7'777'001, 2);
     REQUIRE(db.insert(doomed, utxoz::output_data_span{value_of(33, 0x11)}, 1).value());
     fill_until_rotations(db, 1);
 
     auto const before = db.get_statistics();
 
-    auto const erased = db.erase(doomed, 70'001);
-    REQUIRE(erased.has_value());
-    REQUIRE(*erased == 0);            // deferred, as the case needs
-    auto const swept = db.process_pending_deletions();
-    REQUIRE(swept.has_value());
-    REQUIRE(swept->first == 1u);      // and the sweep actually applied it
+    std::vector<utxoz::deferred_deletion_entry> const batch{{doomed, 70'001}};
+    auto const progress = db.apply_deletes(batch);
+    REQUIRE(progress.erased.size() == 1);   // the walk actually applied it
+    REQUIRE(progress.absent.empty());
+    REQUIRE(progress.unresolved.empty());
 
     auto const after = db.get_statistics();
 
 #ifdef UTXOZ_STATISTICS_ENABLED
-    // The deletion path moved — whether through the queueing or the sweep, at
-    // least one of its counters has to have changed, or this case would be
+    // The deletion path moved — at least one of its counters has to have
+    // changed, or this case would be
     // asserting that the resolution family stayed still while nothing happened
     // at all. With statistics off every counter is zero by construction and
     // there is nothing to move, which is why this half is guarded and the half
     // below is not.
     CHECK((after.deferred.processing_runs != before.deferred.processing_runs
-           || after.deferred.total_deferred != before.deferred.total_deferred
            || after.deferred.successfully_processed != before.deferred.successfully_processed));
 #endif
 
@@ -848,7 +845,7 @@ TEST_CASE("full: an incomplete resolution moves neither family",
     auto const before = db.get_statistics();
 
     auto const batch = batch_of(c.a_stored, 100'000);
-    failpoints::fail_lookup_open_version.store(1, std::memory_order_relaxed);
+    failpoints::fail_historical_open_version.store(1, std::memory_order_relaxed);
     REQUIRE_FALSE(db.resolve(batch).has_value());
 
     auto const after = db.get_statistics();

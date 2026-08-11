@@ -18,6 +18,7 @@ add_executable(utxoz_tests
     test_statistics.cpp
     test_unresolved_vs_absent.cpp
     test_lookup_ownership.cpp
+    test_deletion_ownership.cpp
     test_compaction_invariant.cpp
     test_version_catalog.cpp
     test_file_metadata_io.cpp

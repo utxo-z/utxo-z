@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -97,15 +98,73 @@ struct reference_resolution {
 };
 
 /**
+ * @brief What a batch of deletions actually did.
+ *
+ * Three lists, and every distinct key of the request span appears in exactly
+ * one of them. They are separate because they are separate facts, and a caller
+ * acts on each differently:
+ *
+ *  - `erased`     — the deletion was applied during this call.
+ *  - `absent`     — the key is not stored, established after every version that
+ *                   could hold it was read. It never stands for a file that
+ *                   could not be opened, a catalogue that could not be listed,
+ *                   or any other operational fault; those are `unresolved`.
+ *  - `unresolved` — the obligation could not be completed. This is the only
+ *                   category that may be resent.
+ *
+ * Not a `result<>`. A deletion mutates files as it goes, so a call that meets an
+ * unreadable version has already applied part of its batch, and that part is a
+ * fact the caller needs. Returning `unexpected` would hide it behind an error
+ * and leave the caller unable to tell which keys are gone. `error` carries the
+ * cause when there is one; the lists are always readable.
+ *
+ * @par The partition is over distinct keys, not requests
+ * The batch is deduplicated by key, keeping the **first** occurrence of each —
+ * its height included, so a caller that sent one outpoint at two heights gets
+ * back the earlier one. Therefore
+ *
+ *     erased.size() + absent.size() + unresolved.size()
+ *
+ * is the number of **distinct keys** in the span, not `requests.size()`. Match
+ * results back **by key**: the lists are not positional, are not parallel to the
+ * span, and their sizes do not add up to the number of requests submitted.
+ *
+ * This holds on every path, including the ones that apply nothing: a closed or
+ * recovery-latched instance returns the same deduplicated batch in
+ * `unresolved`, because a refusal is still an answer about the same set of keys.
+ *
+ * @par erased is a fact, even when error is set
+ * A deletion writes as it walks, so an error partway through leaves earlier
+ * deletions applied. Those are enumerated exactly, in `erased`, and stay there:
+ * an exception raised after a key left the map does not move it to `unresolved`
+ * and does not drop it from the report. `erased` and `unresolved` never name the
+ * same key.
+ *
+ * @par Resending
+ * Resend `unresolved`, and **only** `unresolved`. This library keeps no record of
+ * what a caller has already asked for, so an entry taken from `erased` and sent
+ * again describes a key that is now genuinely not stored, and comes back in
+ * `absent`. That is `absent` reporting the state of the database correctly; it
+ * is not a signal that the earlier deletion failed. What a caller concludes from
+ * `absent` is the caller's policy, and depends on how it recovers from an
+ * interrupted operation.
+ */
+struct deletion_progress {
+    std::vector<deferred_deletion_entry> erased;      ///< Applied during this call
+    std::vector<deferred_deletion_entry> absent;      ///< Proven not stored
+    std::vector<deferred_deletion_entry> unresolved;  ///< Not completed; resend these
+    std::optional<error_code> error;                  ///< Why, when something stopped it
+};
+
+/**
  * @brief Base class with methods common to both storage modes.
  *
  * Not intended to be instantiated directly — use full_db::open() or reference_db::open().
  *
  * @par Threading
  * A database instance supports ONE mutating operation at a time, with no other
- * operation of any kind in flight. Mutating means insert(), erase(),
- * process_pending_deletions(), compact_all() and close(). Serialising those is
- * the caller's job.
+ * operation of any kind in flight. Mutating means insert(), apply_deletes(),
+ * compact_all() and close(). Serialising those is the caller's job.
  *
  * The read path is different, and only the read path:
  *
@@ -124,18 +183,23 @@ struct reference_resolution {
  *   assumed — see the ThreadSanitizer cases in tests/test_lookup_ownership.cpp,
  *   which run both pairings with no lock of the caller's.
  *
+ * apply_deletes() is on neither list. It mutates: it erases from the active
+ * containers and writes through the cache's mappings, so it needs exclusion from
+ * resolve(), find(), insert(), compaction and close() alike. The resolve lock
+ * does not extend to it — that lock serialises resolutions against each other
+ * and knows nothing about a deletion writing through the same segments.
+ *
  * That is the whole of it. The lock covers resolve-vs-resolve; it does not make
  * the database thread-safe. Nothing above permits running either read
  * concurrently with insert(), a deletion, compaction, close(), or anything else
  * that mutates the active maps or writes through the cache's mappings — a
  * rotation inside insert() unmaps the active segment outright, and
- * process_pending_deletions() writes through the very mappings a resolution
- * reads.
+ * apply_deletes() writes through the very mappings a resolution reads.
  *
  * Statistics are operations too, not free reads. get_statistics() is not const
  * — it recomputes the fragmentation counters as it goes — and
  * reset_search_stats() / reset_all_statistics() write by definition; the const
- * accessors read plain counters that insert() and erase() write. All of them
+ * accessors read plain counters that insert() and apply_deletes() write. All of them
  * may overlap with find(), which writes nothing they look at beyond its own
  * sharded counters, but not with any mutation, and get_statistics() and the
  * reset calls not with each other either. A summary taken while find() is
@@ -146,22 +210,22 @@ struct reference_resolution {
  *   mappings. Evicting an entry unmaps the segment, so a second thread reading a
  *   previously returned map is a use-after-unmap — a crash, not a torn read.
  *   resolve() is safe against another resolve() because it holds the lock above
- *   across its whole use of those references; erase() and
- *   process_pending_deletions() touch the same cache and are not covered.
- * - The entry count, per-container statistics, deferred deletions and the file
- *   metadata are plain members mutated without atomics.
+ *   across its whole use of those references. apply_deletes() writes through the
+ *   same mappings and is not covered by that lock, so it stays the caller's to
+ *   exclude.
+ * - The entry count, the per-container statistics and the file metadata are
+ *   plain members mutated without atomics.
  * - A rotation (triggered from inside insert()) unmaps the whole active segment
  *   and briefly leaves the container pointer null. A concurrent find() would be
  *   reading unmapped memory — which is why "no mutation in flight" is a
  *   condition of the exception above, not a nicety.
  *
  * @par Ownership
- * Lookups have no ownership rule any more, because they have no shared state to
- * own. resolve() answers the batch it is handed and nothing else, so two
- * components can each keep their own batch without arranging which of them is
- * allowed to sweep. Deferred *deletions* still work the old way: the queue is
- * global and process_pending_deletions() drains all of it, so that one call
- * still needs a single owner.
+ * Neither lookups nor deletions have an ownership rule any more, because neither
+ * has shared state to own. resolve() and apply_deletes() each answer the batch
+ * they are handed and nothing else, so two components can keep their own batches
+ * without arranging which of them is allowed to sweep, and neither can receive
+ * or consume the other's requests.
  */
 struct db_base {
     // Non-copyable
@@ -186,58 +250,38 @@ struct db_base {
     /// keeps answering after a failed cleanup has latched the instance, and in
     /// that state it counts entries that several files hold at once. Every
     /// operation that reads or changes what is stored reports
-    /// error_code::recovery_required instead; this one, the queue sizes and the
-    /// statistics do not, because they exist to describe a database that is in
-    /// trouble.
+    /// error_code::recovery_required instead; this one and the statistics do
+    /// not, because they exist to describe a database that is in trouble.
     size_t size() const;
 
     /**
-     * @brief Erase a UTXO by key
+     * @brief Apply a caller's batch of deletions
      *
-     * @warning A return value of 0 is NOT authoritative. Like find(), erase()
-     * only looks at the currently mapped (latest) version plus the cached
-     * files; anything else is queued as a deferred deletion, and
-     * process_pending_deletions() is what applies it.
+     * The one mutating entry point for removing entries. Each request is tried
+     * against the active versions first, then the cached files, then every
+     * version below the current one, and keys are dropped from the working set
+     * as they are applied — so each further file is searched for fewer of them.
      *
-     * @warning The keys that call reports as failed are UNRESOLVED, not proven
-     * absent: a version file that could not be read is logged and skipped, and
-     * its keys land in the same list. This is the deletion path, and it still
-     * carries that ambiguity — resolve() no longer does.
+     * The batch belongs to the caller throughout. This call reads the span and
+     * keeps nothing: no request survives the return, so two components can each
+     * apply their own batch without agreeing which of them is allowed to, and
+     * neither can receive — or consume — a request the other made.
      *
-     * @param key UTXO key to erase
-     * @param height Current block height
-     * @return 1 if erased right away, 0 if the deletion was deferred (or the
-     *         key does not exist)
-     * @see process_pending_deletions()
+     * See deletion_progress for what the three lists mean and which of them may
+     * be resent. In short: every distinct key is classified exactly once,
+     * `absent` is established only after full coverage and never stands for an
+     * operational fault, and `unresolved` is the only category to send again.
+     *
+     * @warning Unlike resolve(), this cannot be transactional. It writes as it
+     * goes, so a fault partway through leaves earlier deletions applied. That is
+     * why progress is returned rather than an error: the applied part is
+     * enumerated in `erased`, exactly, including on the failure path.
+     *
+     * @param requests The caller's batch; borrowed for the duration of the call
+     * @return What was applied, what is proven absent, and what is still owed
      */
     [[nodiscard]]
-    result<size_t> erase(raw_outpoint const& key, uint32_t height);
-
-    /**
-     * @brief Process all pending deferred deletions
-     *
-     * Sweeps the cached files and every previous version, applying the
-     * deletions queued by erase(). Drains the queue: after this call nothing is
-     * pending, so the returned values are the only report you get.
-     *
-     * @warning Single owner. The sweep is not partitioned per caller: it takes
-     * the entire queue, including keys queued by other threads, and reports
-     * them to whoever called. Exactly one component may own this call.
-     *
-     * @warning A version file that cannot be read is logged and skipped, so its
-     * keys come back as failed — indistinguishable from genuinely absent. Do
-     * not treat "failed" as proof of absence if the log shows read errors.
-     *
-     * @return Pair of (successful_deletions_count, failed_deletions).
-     */
-    [[nodiscard]]
-    result<std::pair<uint32_t, std::vector<deferred_deletion_entry>>> process_pending_deletions();
-
-    /**
-     * @brief Get the number of pending deferred deletions
-     */
-    [[nodiscard]]
-    size_t deferred_deletions_size() const;
+    deletion_progress apply_deletes(std::span<deferred_deletion_entry const> requests);
 
     /**
      * @brief Compact all containers
@@ -272,7 +316,7 @@ struct db_base {
      *
      * Returns once the entries this database holds have reached the disk: the
      * active container of each size class, the older generations a batch's
-     * deferred deletions reached through the file cache, and the directory
+     * deletions reached through the file cache, and the directory
      * entries that name them. Until it returns, a power cut can lose writes
      * that every earlier call reported as successful — that is not a defect,
      * it is what buffered I/O is, and this is the call that ends it.
@@ -505,7 +549,7 @@ struct full_db : db_base {
      * storage fault into a missing input, and rejects a block that may be
      * perfectly valid.
      *
-     * Call this before process_pending_deletions(), which removes entries from
+     * Call this before apply_deletes(), which removes entries from
      * the very files a resolution still needs to read.
      *
      * @warning const means it does not change what is stored — it does move the
