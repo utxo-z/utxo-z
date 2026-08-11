@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -22,6 +23,48 @@ namespace utxoz {
 namespace detail {
 struct database_impl;
 } // namespace detail
+
+/**
+ * @page utxoz_path_contract Database paths
+ *
+ * `open()` and `open_for_testing()` take a `std::filesystem::path` by value,
+ * and the path reaches the operating system in its native form. On Windows that
+ * means `wchar_t`; nothing in this library converts a path through the active
+ * code page, so a database directory named in any script the filesystem accepts
+ * opens, and reopens, as itself.
+ *
+ * It used to take `std::string_view`. On POSIX that was exact — a path is bytes
+ * and `path::string()` hands those bytes back — but on Windows a
+ * `std::filesystem::path` holds `wchar_t`, and `path::string()` converts through
+ * the active code page: characters outside that page are replaced or the
+ * conversion throws. A user whose data directory was named outside the machine's
+ * code page could not open the database, and the failure arrived as a path that
+ * did not exist rather than as an encoding problem (#109).
+ *
+ * @par What callers pass
+ * `std::filesystem::path` is implicitly constructible from string literals,
+ * `const char*`, `std::string` and `std::string_view`, so every call that
+ * compiled against the old signature still compiles. There is deliberately no
+ * second overload: a `std::string_view` overload alongside a
+ * `std::filesystem::path` one makes `open("literal")` ambiguous, which would
+ * break exactly the callers this is trying not to break.
+ *
+ * @par Migrating a caller that holds a path
+ * Code that had to narrow a path to satisfy the old signature should stop:
+ *
+ * @code
+ * db.open(dir.string());   // before — lossy on Windows outside the code page
+ * db.open(dir);            // after  — the path is carried natively
+ * @endcode
+ *
+ * @par Narrow strings
+ * A `std::string` or `const char*` is still interpreted the way
+ * `std::filesystem::path` interprets it, which on Windows is the native narrow
+ * encoding rather than UTF-8. That is unchanged behaviour, and it is why a
+ * caller holding a real path should pass the path rather than a string made
+ * from it. To pass UTF-8 explicitly, build the path with
+ * `std::filesystem::path(std::u8string(...))`.
+ */
 
 // =============================================================================
 // db_base — shared methods for both storage modes
@@ -297,18 +340,19 @@ struct full_db : db_base {
 
     /**
      * @brief Open or create a database in full mode
-     * @param path Database directory path
+     * @param path Database directory path. See @ref utxoz_path_contract.
      * @param remove_existing If true, remove existing database files
      * @return full_db on success, error on failure
      */
     [[nodiscard]]
-    static result<full_db> open(std::string_view path, bool remove_existing = false);
+    static result<full_db> open(std::filesystem::path path, bool remove_existing = false);
 
     /**
      * @brief Open for testing with smaller file sizes (full mode)
+     * @param path Database directory path. See @ref utxoz_path_contract.
      */
     [[nodiscard]]
-    static result<full_db> open_for_testing(std::string_view path, bool remove_existing = false);
+    static result<full_db> open_for_testing(std::filesystem::path path, bool remove_existing = false);
 
     /**
      * @brief Insert a new UTXO with variable-size data
@@ -448,18 +492,19 @@ struct reference_db : db_base {
 
     /**
      * @brief Open or create a database in reference mode
-     * @param path Database directory path
+     * @param path Database directory path. See @ref utxoz_path_contract.
      * @param remove_existing If true, remove existing database files
      * @return reference_db on success, error on failure
      */
     [[nodiscard]]
-    static result<reference_db> open(std::string_view path, bool remove_existing = false);
+    static result<reference_db> open(std::filesystem::path path, bool remove_existing = false);
 
     /**
      * @brief Open for testing with smaller file sizes (reference mode)
+     * @param path Database directory path. See @ref utxoz_path_contract.
      */
     [[nodiscard]]
-    static result<reference_db> open_for_testing(std::string_view path, bool remove_existing = false);
+    static result<reference_db> open_for_testing(std::filesystem::path path, bool remove_existing = false);
 
     /**
      * @brief Insert a new UTXO with typed reference fields

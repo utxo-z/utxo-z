@@ -34,6 +34,7 @@
 #include <utxoz/types.hpp>
 
 #include "file_metadata.hpp"
+#include "path_display.hpp"
 
 namespace utxoz::detail {
 
@@ -236,7 +237,14 @@ inline result<std::vector<size_t>> enumerate_versions(fs::path const& dir, std::
         if (ec) return std::unexpected(error_code::catalog_unreadable);
 
         if (fs::is_regular_file(entry_status)) {
-            if (auto const v = parse_canonical_version(it->path().filename().string(), prefix, suffix)) {
+            // path_display(), not filename().string(). The names this catalogue
+            // recognises are ASCII, but the directory may hold anything, and on
+            // Windows string() throws for a name the code page cannot spell.
+            // Thrown from here it would leave a result-typed, fail-closed
+            // enumeration by exception, over a file it was going to ignore.
+            // The prefixes and suffixes matched below are ASCII, so comparing
+            // UTF-8 answers the same question.
+            if (auto const v = parse_canonical_version(path_display(it->path().filename()), prefix, suffix)) {
                 versions.push_back(*v);
             }
         }

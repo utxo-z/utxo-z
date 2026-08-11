@@ -22,6 +22,7 @@
 #include <fmt/format.h>
 
 #include "detail/log.hpp"
+#include "detail/path_display.hpp"
 
 namespace utxoz::detail {
 
@@ -96,7 +97,7 @@ size_t database_impl::get_index_from_size(size_t size) const {
 // =============================================================================
 
 template<size_t Index>
-size_t database_impl::find_optimal_buckets(std::string const& file_path,
+size_t database_impl::find_optimal_buckets(fs::path const& file_path,
                                            size_t file_size,
                                            size_t initial_buckets) {
     log::debug("Finding optimal buckets for container {} (file size: {})...", Index, file_size);
@@ -108,7 +109,7 @@ size_t database_impl::find_optimal_buckets(std::string const& file_path,
     while (left <= right) {
         size_t mid = left + (right - left) / 2;
 
-        std::string temp_file = fmt::format("{}/temp_{}_{}.dat", file_path, file_size, mid);
+        fs::path const temp_file = file_path / fmt::format("temp_{}_{}.dat", file_size, mid);
         try {
             bip::managed_mapped_file segment(bip::open_or_create, temp_file.c_str(), file_size);
 
@@ -142,7 +143,7 @@ size_t database_impl::find_optimal_buckets(std::string const& file_path,
 
 template<size_t Index>
 void database_impl::open_or_create_container(size_t version) {
-    auto file_name = fmt::format(data_file_format, db_path_.string(), Index, version);
+    auto file_name = db_path_ / fmt::format(data_file_format, Index, version);
 
     segments_[Index] = std::make_unique<bip::managed_mapped_file>(
         bip::open_or_create, file_name.c_str(), active_file_sizes_[Index]);
@@ -314,7 +315,7 @@ void database_impl::save_metadata_to_disk(size_t index, size_t version) noexcept
     // from the reporting itself, and including whatever a formatting or
     // allocation failure would raise.
     try {
-        auto const path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
+        auto const path = db_path_ / fmt::format("meta_{}_v{:05}.dat", index, version);
         if (auto const written = write_metadata_file(path, *meta_ptr); ! written) {
             // Derived data: failing to persist it costs a rescan later and
             // nothing else. What must not happen — a half-written record read
@@ -327,7 +328,7 @@ void database_impl::save_metadata_to_disk(size_t index, size_t version) noexcept
 }
 
 void database_impl::load_metadata_from_disk(size_t index, size_t version) {
-    auto const path = fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
+    auto const path = db_path_ / fmt::format("meta_{}_v{:05}.dat", index, version);
 
     auto record = read_metadata_file(path);
     if ( ! record) {
@@ -349,18 +350,18 @@ void database_impl::load_metadata_from_disk(size_t index, size_t version) {
 // database_impl - Public interface: configure, close, size
 // =============================================================================
 
-result<> database_impl::configure(std::string_view path, bool remove_existing, storage_mode mode) {
+result<> database_impl::configure(fs::path path, bool remove_existing, storage_mode mode) {
     active_file_sizes_ = file_sizes;
-    return configure_internal(path, remove_existing, mode);
+    return configure_internal(std::move(path), remove_existing, mode);
 }
 
-result<> database_impl::configure_for_testing(std::string_view path, bool remove_existing, storage_mode mode) {
+result<> database_impl::configure_for_testing(fs::path path, bool remove_existing, storage_mode mode) {
     active_file_sizes_ = test_file_sizes;
-    return configure_internal(path, remove_existing, mode);
+    return configure_internal(std::move(path), remove_existing, mode);
 }
 
-result<> database_impl::configure_internal(std::string_view path, bool remove_existing, storage_mode mode) {
-    db_path_ = path;
+result<> database_impl::configure_internal(fs::path path, bool remove_existing, storage_mode mode) {
+    db_path_ = std::move(path);
 
     // Every filesystem question here is asked so that "I could not tell" comes
     // back as an error. Asked the throwing way, an unreadable directory raises
@@ -443,8 +444,8 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         // No config file — check for pre-existing data files from the other mode
         if (!remove_existing) {
             auto const other_mode_file = mode == storage_mode::reference
-                ? fmt::format(data_file_format, db_path_.string(), 0, 0)
-                : fmt::format(reference_data_file_format, db_path_.string(), 0);
+                ? db_path_ / fmt::format(data_file_format, 0, 0)
+                : db_path_ / fmt::format(reference_data_file_format, 0);
 
             auto const other_exists = path_exists(other_mode_file);
             if ( ! other_exists) return std::unexpected(other_exists.error());
@@ -456,7 +457,12 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
     }
 
     // Initialize file cache
-    file_cache_ = std::make_unique<file_cache>(std::string(path));
+    //
+    // db_path_, not the parameter: the parameter is moved from on the way in,
+    // and fs::path converts implicitly to its native string type, so reading it
+    // here still compiles and hands over an empty base path. Every historical
+    // version file would then be looked for in the working directory.
+    file_cache_ = std::make_unique<file_cache>(db_path_);
 
     entries_count_ = 0;
 
@@ -472,8 +478,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
         reference_active_file_size_ = (active_file_sizes_[0] == file_sizes[0])
             ? reference_file_size : reference_test_file_size;
 
-        auto path_str = db_path_.string();
-        reference_min_buckets_ok_ = find_optimal_buckets_reference(path_str, reference_active_file_size_, 7864304);
+        reference_min_buckets_ok_ = find_optimal_buckets_reference(db_path_, reference_active_file_size_, 7864304);
 
         // Build the catalogue before anything is opened. A directory we cannot
         // read is not an empty directory: opening on that assumption would
@@ -491,7 +496,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
 
         // Count entries in previous versions (still searchable/deletable)
         for (auto const v : reference_catalog_.below(latest_version)) {
-            auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
+            auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
             try {
                 auto segment = open_existing_segment(file_name);
                 auto* map_ptr = segment->template find<reference_map_t>(map_object_name).first;
@@ -509,12 +514,11 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
     } else {
         // Full mode: 5 containers
         static_assert(container_count == 5);
-        auto path_str = db_path_.string();
-        min_buckets_ok_[0] = find_optimal_buckets<0>(path_str, active_file_sizes_[0], 7864304);
-        min_buckets_ok_[1] = find_optimal_buckets<1>(path_str, active_file_sizes_[1], 7864304);
-        min_buckets_ok_[2] = find_optimal_buckets<2>(path_str, active_file_sizes_[2], 7864304);
-        min_buckets_ok_[3] = find_optimal_buckets<3>(path_str, active_file_sizes_[3], 7864304);
-        min_buckets_ok_[4] = find_optimal_buckets<4>(path_str, active_file_sizes_[4], 7864304);
+        min_buckets_ok_[0] = find_optimal_buckets<0>(db_path_, active_file_sizes_[0], 7864304);
+        min_buckets_ok_[1] = find_optimal_buckets<1>(db_path_, active_file_sizes_[1], 7864304);
+        min_buckets_ok_[2] = find_optimal_buckets<2>(db_path_, active_file_sizes_[2], 7864304);
+        min_buckets_ok_[3] = find_optimal_buckets<3>(db_path_, active_file_sizes_[3], 7864304);
+        min_buckets_ok_[4] = find_optimal_buckets<4>(db_path_, active_file_sizes_[4], 7864304);
 
         // As above: every container's catalogue is read before any of them is
         // opened, and a failure to read one aborts the open rather than being
@@ -542,7 +546,7 @@ result<> database_impl::configure_internal(std::string_view path, bool remove_ex
 
             // Count entries in previous versions (still searchable/deletable)
             for (auto const v : catalogs_[I].below(latest_version)) {
-                auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+                auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
                 try {
                     auto segment = open_existing_segment(file_name);
                     auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>(map_object_name).first;
@@ -1060,29 +1064,31 @@ size_t database_impl::deferred_lookups_size() const {
 // between the two would leave the target and its sources all canonical with
 // nothing recording that the sources are superseded.
 
-std::string database_impl::data_path(size_t index, size_t version) const {
+fs::path database_impl::data_path(size_t index, size_t version) const {
     if (index == reference_sentinel_index) {
-        return fmt::format(reference_data_file_format, db_path_.string(), version);
+        return db_path_ / fmt::format(reference_data_file_format, version);
     }
-    return fmt::format(data_file_format, db_path_.string(), index, version);
+    return db_path_ / fmt::format(data_file_format, index, version);
 }
 
-std::string database_impl::building_path(size_t index, size_t version) const {
-    return data_path(index, version) + ".building";
+fs::path database_impl::building_path(size_t index, size_t version) const {
+    fs::path p = data_path(index, version);
+    p += ".building";
+    return p;
 }
 
-std::string database_impl::sidecar_path(size_t index, size_t version) const {
+fs::path database_impl::sidecar_path(size_t index, size_t version) const {
     if (index == reference_sentinel_index) {
-        return fmt::format("{}/compact_v{:05}.merge", db_path_.string(), version);
+        return db_path_ / fmt::format("compact_v{:05}.merge", version);
     }
-    return fmt::format("{}/cont_{}_v{:05}.merge", db_path_.string(), index, version);
+    return db_path_ / fmt::format("cont_{}_v{:05}.merge", index, version);
 }
 
-std::string database_impl::metadata_path(size_t index, size_t version) const {
+fs::path database_impl::metadata_path(size_t index, size_t version) const {
     if (index == reference_sentinel_index) {
-        return fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
+        return db_path_ / fmt::format("meta_compact_v{:05}.dat", version);
     }
-    return fmt::format("{}/meta_{}_v{:05}.dat", db_path_.string(), index, version);
+    return db_path_ / fmt::format("meta_{}_v{:05}.dat", index, version);
 }
 
 result<> database_impl::directory_barrier(failpoints::dir_barrier stage) const {
@@ -1108,16 +1114,16 @@ result<merge_marker> database_impl::read_target_marker(size_t index, size_t vers
         auto const segment = open_existing_segment(path);
         auto const found = segment->find<merge_marker>(merge_marker::object_name);
         if (found.first == nullptr) {
-            log::error("recovery: {} carries no merge marker", path);
+            log::error("recovery: {} carries no merge marker", path_display(path));
             return std::unexpected(error_code::recovery_failed);
         }
         if (found.second != 1) {
-            log::error("recovery: {} carries {} merge markers", path, found.second);
+            log::error("recovery: {} carries {} merge markers", path_display(path), found.second);
             return std::unexpected(error_code::recovery_failed);
         }
         return *found.first;
     } catch (std::exception const& e) {
-        log::error("recovery: {} could not be opened to read its merge marker: {}", path, e.what());
+        log::error("recovery: {} could not be opened to read its merge marker: {}", path_display(path), e.what());
         return std::unexpected(error_code::recovery_failed);
     }
 }
@@ -1127,7 +1133,7 @@ namespace {
 /// Removes a path, treating "it was not there" as success. Recovery has to be
 /// idempotent: a crash part way through it must leave a state it can finish.
 [[nodiscard]]
-result<> remove_if_present(std::string const& path) {
+result<> remove_if_present(fs::path const& path) {
     return remove_file(path);
 }
 
@@ -1139,7 +1145,7 @@ result<> remove_if_present(std::string const& path) {
  * Which of the two depends on a single question — did the target get its
  * canonical name — and the answer is on disk. Everything here is idempotent.
  */
-result<> database_impl::recover_one(merge_plan const& plan, std::string const& sidecar) {
+result<> database_impl::recover_one(merge_plan const& plan, fs::path const& sidecar) {
     auto const target_path = data_path(plan.container, plan.target);
 
     auto const target_exists = path_exists(target_path);
@@ -1248,7 +1254,7 @@ result<> database_impl::recover_pending_merges() {
                 return std::unexpected(error_code::recovery_failed);
             }
             if (plan->container != sc.index || plan->target != target) {
-                log::error("Recovery: the merge record at {} describes a different operation", path);
+                log::error("Recovery: the merge record at {} describes a different operation", path_display(path));
                 return std::unexpected(error_code::recovery_failed);
             }
             if (auto const r = recover_one(*plan, path); ! r) return r;
@@ -1265,7 +1271,7 @@ result<> database_impl::recover_pending_merges() {
             for (auto const version : *stray) {
                 log::info("Recovery: discarding {} of container {} v{}", describe, sc.index, version);
                 if (auto const r = remove_if_present(
-                        fmt::format("{}/{}{:05}{}", db_path_.string(), sc.prefix, version, suffix));
+                        db_path_ / fmt::format("{}{:05}{}", sc.prefix, version, suffix));
                     ! r) {
                     return r;
                 }
@@ -1552,7 +1558,7 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
     // attempted, but the operation does not report success while any of them
     // survives: until then several canonical files hold the same keys, and the
     // exclusion that keeps that unobservable ends when this call returns.
-    auto retire = [](std::string const& path) -> result<> {
+    auto retire = [](fs::path const& path) -> result<> {
         if (failpoints::fail_source_unlink.load(std::memory_order_relaxed)) {
             return std::unexpected(error_code::removal_failed);
         }
@@ -1739,7 +1745,7 @@ result<> database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&),
 
         // Previous versions
         for (auto const v : catalogs_[I].below(current_versions_[I])) {
-            auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+            auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
 
             try {
                 auto segment = open_existing_segment(file_name);
@@ -1777,7 +1783,7 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
 
         // Previous versions
         for (auto const v : catalogs_[I].below(current_versions_[I])) {
-            auto file_name = fmt::format(data_file_format, db_path_.string(), I.value, v);
+            auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
 
             try {
                 auto segment = open_existing_segment(file_name);
@@ -1964,7 +1970,7 @@ size_t database_impl::estimate_memory_usage(size_t index) const {
     }
 
     for (auto const v : catalogs_[index].below(current_versions_[index])) {
-        auto file_name = fmt::format(data_file_format, db_path_.string(), index, v);
+        auto file_name = db_path_ / fmt::format(data_file_format, index, v);
         if (fs::exists(file_name)) {
             total += fs::file_size(file_name);
         }
@@ -2265,7 +2271,7 @@ reference_map_t const& database_impl::reference_map() const {
     return *static_cast<reference_map_t const*>(reference_container_);
 }
 
-size_t database_impl::find_optimal_buckets_reference(std::string const& file_path,
+size_t database_impl::find_optimal_buckets_reference(fs::path const& file_path,
                                                     size_t file_size,
                                                     size_t initial_buckets) {
     log::debug("Finding optimal buckets for reference container (file size: {})...", file_size);
@@ -2277,7 +2283,7 @@ size_t database_impl::find_optimal_buckets_reference(std::string const& file_pat
     while (left <= right) {
         size_t mid = left + (right - left) / 2;
 
-        std::string temp_file = fmt::format("{}/temp_reference_{}_{}.dat", file_path, file_size, mid);
+        fs::path const temp_file = file_path / fmt::format("temp_reference_{}_{}.dat", file_size, mid);
         try {
             bip::managed_mapped_file segment(bip::open_or_create, temp_file.c_str(), file_size);
 
@@ -2303,7 +2309,7 @@ size_t database_impl::find_optimal_buckets_reference(std::string const& file_pat
 }
 
 void database_impl::reference_open_or_create(size_t version) {
-    auto file_name = fmt::format(reference_data_file_format, db_path_.string(), version);
+    auto file_name = db_path_ / fmt::format(reference_data_file_format, version);
 
     reference_segment_ = std::make_unique<bip::managed_mapped_file>(
         bip::open_or_create, file_name.c_str(), reference_active_file_size_);
@@ -2497,7 +2503,7 @@ result<> database_impl::reference_for_each_key(void(*cb)(void*, raw_outpoint con
 
     // Previous versions
     for (auto const v : reference_catalog_.below(reference_current_version_)) {
-        auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
+        auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
 
         try {
             auto segment = open_existing_segment(file_name);
@@ -2532,7 +2538,7 @@ result<> database_impl::reference_for_each_entry(void(*cb)(void*, raw_outpoint c
 
     // Previous versions
     for (auto const v : reference_catalog_.below(reference_current_version_)) {
-        auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
+        auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
 
         try {
             auto segment = open_existing_segment(file_name);
@@ -2600,7 +2606,7 @@ void database_impl::reference_save_metadata(size_t version) noexcept {
 
     // Same boundary as save_metadata_to_disk().
     try {
-        auto const path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
+        auto const path = db_path_ / fmt::format("meta_compact_v{:05}.dat", version);
         if (auto const written = write_metadata_file(path, *meta_ptr); ! written) {
             log::warn("Could not publish reference metadata for v{}", version);
         }
@@ -2609,7 +2615,7 @@ void database_impl::reference_save_metadata(size_t version) noexcept {
 }
 
 void database_impl::reference_load_metadata(size_t version) {
-    auto const path = fmt::format("{}/meta_compact_v{:05}.dat", db_path_.string(), version);
+    auto const path = db_path_ / fmt::format("meta_compact_v{:05}.dat", version);
 
     auto record = read_metadata_file(path);
     if ( ! record) {
@@ -2638,7 +2644,7 @@ result<> database_impl::save_config_to_disk() {
     {
         std::ofstream ofs(temp_path, std::ios::binary | std::ios::trunc);
         if ( ! ofs) {
-            log::error("Failed to write config: {}", temp_path.string());
+            log::error("Failed to write config: {}", path_display(temp_path));
             return std::unexpected(error_code::config_file_corrupt);
         }
 
@@ -2655,7 +2661,7 @@ result<> database_impl::save_config_to_disk() {
         if (ofs.fail()) {
             std::error_code cleanup;
             fs::remove(temp_path, cleanup);
-            log::error("Failed to write config: {}", temp_path.string());
+            log::error("Failed to write config: {}", path_display(temp_path));
             return std::unexpected(error_code::config_file_corrupt);
         }
     }
@@ -2672,13 +2678,13 @@ result<> database_impl::save_config_to_disk() {
     if (auto const synced = sync_file(temp_path);
         ! synced && synced.error() != error_code::sync_unsupported) {
         discard_temp();
-        log::error("Could not make the config file durable: {}", temp_path.string());
+        log::error("Could not make the config file durable: {}", path_display(temp_path));
         return std::unexpected(synced.error());
     }
 
     if (auto const replaced = replace_file_atomically(temp_path, config_path); ! replaced) {
         discard_temp();
-        log::error("Could not publish the config file: {}", config_path.string());
+        log::error("Could not publish the config file: {}", path_display(config_path));
         return std::unexpected(replaced.error());
     }
 
@@ -3209,7 +3215,7 @@ result<> database_impl::reference_for_each_entry_typed(
 
     // Previous versions
     for (auto const v : reference_catalog_.below(reference_current_version_)) {
-        auto file_name = fmt::format(reference_data_file_format, db_path_.string(), v);
+        auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
 
         try {
             auto segment = open_existing_segment(file_name);

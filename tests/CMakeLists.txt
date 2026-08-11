@@ -23,6 +23,7 @@ add_executable(utxoz_tests
     test_compaction_recovery.cpp
     test_database_lock.cpp
     test_sync.cpp
+    test_path_encoding.cpp
 )
 
 target_link_libraries(utxoz_tests
