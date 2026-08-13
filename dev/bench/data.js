@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786461739237,
+  "lastUpdate": 1786614787440,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -15368,6 +15368,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 106.35,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "36528b9b75e6b2e6f5f733ba8fc82856b4fa9196",
+          "message": "fix: refuse a version file whose named object cannot be reached (#127)\n\nBoost.Interprocess resolves a named object by name alone. `priv_generic_find<T>`\nlooks the name up in the index, checks nothing about the type beyond a\n`BOOST_ASSERT` that vanishes in release builds, and returns `static_cast<T*>` of\nthe stored address. Eleven call sites read that pointer; every one of them\ntreated a null as an empty file and carried on.\n\nThat cost three different things:\n\n- an enumeration returned a subset and reported success;\n- open() published an entry count short by whatever the unreadable file held —\n  and that count is a running total, so insert() and apply_deletes() carried the\n  error for the life of the instance;\n- a compaction dropped a source's entries from the merge and then unlinked the\n  source, because sources are retired unconditionally once the target is\n  published. That one loses data permanently, and it is why this is a fix.\n\n`find_single_named()` is now the one way to reach an object inside a segment\nthat already exists, next to `open_existing_segment()`, which is already the one\nway to open one. It refuses an absent object, and it also checks the instance\ncount `find<T>()` returns and that nothing was reading: `value_bytes /\nsizeof(T)`, which is 1 unless `sizeof(T)` has changed since the file was\nwritten. `read_target_marker()` had written that pair of checks out by hand; it\nnow shares them.\n\nThe count is a cardinality check, not a layout check, and the header says so.\nInteger division leaves it reading 1 for any `sizeof(T)` in\n`(value_bytes / 2, value_bytes]` — with today's `sizeof(utxo_map<48>) == 56`,\nanything from 29 to 56 passes. A reordering that preserves the total passes too,\nand a change to the hash or its mixing relocates every key while leaving every\nsize alone. The barrier for those is a format epoch validated before any segment\nis touched, plus fixtures written by earlier builds; this closes only what was\nalready free.\n\nThe two counting loops in configure_internal() now propagate rather than skip.\nThe catalogue is built from the directory, so a version it lists is one this\nbuild knows is there: being unable to read it is not a smaller database, it is\none this instance cannot describe. This changes what open() does with a damaged\ndatabase — it refuses where it used to succeed — which is the fail-closed\nreading and the vocabulary the store already has, since recovery_failed does not\nopen either.\n\nBoth functions in segment_open.hpp report failure as a value. Mapping a file is\nthe one operation in this path that raises, so it is caught there, once, and the\nten call sites in database_impl.cpp read as `result<>` like the rest of the\nstore; their `try` blocks shrink to the caller-supplied callback, the only thing\nleft in them that can throw. file_cache keeps its documented throwing contract\nand adapts at its own boundary: resolve() and apply_deletes() depend on\nunwinding, including a scope_exit guard that keeps the working set consistent,\nand converting them belongs with the format work rather than here.\n\nAn open failure reports `file_open_failed`; a version file that opens but holds\nno usable object reports `version_unreadable`. Keeping them apart matters — the\ntwo faults send an operator looking in different places.\n\nsegment_open.hpp now static_asserts on\nBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC. The ten-second\ncap is a compile definition on the library target and is baked into an inline\nfunction in that header, so a target including it without the definition gives\nthe program a second, slower definition of the same function; the linker keeps\none, and whichever it keeps decides how long everybody waits. The test target\nnow carries the definition and the assertion makes the mistake a compile error\nrather than a five-minute wait on one platform.\n\nEvery case is checked by mutation. Restoring `if (!source_map) continue;` in the\nmerge makes compact_all() return success over a blanked source — the data-loss\npath, reproduced. Restoring the two `continue`s in configure makes the three\nrefusal-to-open cases go red. Restoring the skip in the traversals makes them\nreport success over a partial read. Dropping the instance-count check leaves the\nthree-instance case passing.\n\nFour existing recovery cases pinned open-succeeds-then-fails-late, though not on\npurpose: they damage a historical version, open, and measure that the refusal on\nthe path reaching it is prompt rather than a five-minute wait. The property is\nthe promptness. They now damage the file after opening, which keeps them\nexercising the file cache and resolve() rather than collapsing into \"the open\nrefused\".\n\nNot in scope: the two `find_or_construct` calls that open the active containers.\nSeparating \"open existing\" from \"create new\" belongs with the format barrier,\nwhere the config has to be validated before any segment is touched.",
+          "timestamp": "2026-08-13T11:48:23+02:00",
+          "tree_id": "e5b6beefda932a18a00ff4fd5943eb4113277b03",
+          "url": "https://github.com/utxo-z/utxo-z/commit/36528b9b75e6b2e6f5f733ba8fc82856b4fa9196"
+        },
+        "date": 1786614786744,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 286788.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 403645.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 279561.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 257605.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 414.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 513.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 13560037.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 26991435.95,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 13024023.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13030.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2222942.45,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2233487.65,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 87316.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 11021,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2566.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3469.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2945.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 54.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 54.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 53.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 54.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 54.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 54.09,
             "unit": "ops/sec"
           }
         ]
