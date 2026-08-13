@@ -27,6 +27,7 @@ add_executable(utxoz_tests
     test_sync.cpp
     test_path_encoding.cpp
     test_named_object_guard.cpp
+    test_format_barrier.cpp
 )
 
 target_link_libraries(utxoz_tests

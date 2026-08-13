@@ -546,8 +546,65 @@ TEST_CASE("every version survives an interrupted renumbering",
             std::filesystem::rename(data_file(path, from), data_file(path, from - 1));
         }
 
-        // Reopen and scan. Every key that was not in the removed version must
-        // still be there, exactly once.
+        if (j == 0) {
+            // Nothing was renamed: a version was drained and the numbering has a
+            // hole in it, which is the ordinary result of compaction and which
+            // the catalogue is built to carry. This half is the original
+            // property, unchanged — every key that was not in the removed
+            // version is still there, exactly once.
+            auto reopened = utxoz::full_db::open_for_testing(path);
+            REQUIRE(reopened);
+            auto db = std::move(*reopened);
+
+            auto seen = all_keys(db);
+            std::vector<utxoz::raw_outpoint> sorted = seen;
+            std::sort(sorted.begin(), sorted.end());
+            REQUIRE(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
+
+            INFO("keys before=" << keys.size() << " after=" << seen.size());
+            REQUIRE(seen.size() > keys.size() / 2);
+            db.close();
+            std::filesystem::remove_all(path);
+            continue;
+        }
+
+        // A rename did land, and since the format barrier that is refused rather
+        // than served: every segment carries a stamp naming the generation it
+        // is, so a file moved into another generation's name is no longer the
+        // file the catalogue believes it opened.
+        //
+        // The state cannot arise in a database this build wrote — nothing
+        // renumbers, which is the invariant version_catalog states — and one
+        // renumbered by an older build carries a format-1 config and is refused
+        // before reaching here. What is pinned is that it is refused rather than
+        // misread, and that refusing it leaves every file exactly as it was.
+        auto const before = std::filesystem::file_size(data_file(path, removed));
+        auto reopened = utxoz::full_db::open_for_testing(path);
+        REQUIRE_FALSE(reopened);
+        CHECK(reopened.error() == utxoz::error_code::segment_misplaced);
+        CHECK(std::filesystem::file_size(data_file(path, removed)) == before);
+
+        std::filesystem::remove_all(path);
+    }
+}
+
+/**
+ * The same shape, left alone.
+ *
+ * Without this the case above would equally be pinning "any database with
+ * several versions fails to reopen", which is not the property.
+ */
+TEST_CASE("a numbering nobody renamed still reopens and scans",
+          "[database][compaction][recovery]") {
+    auto const path = make_unique_path("unrenamed");
+    std::filesystem::remove_all(path);
+
+    size_t versions = 0;
+    auto const keys = build_versions(path, 4, versions);
+    REQUIRE(versions == 4);
+    REQUIRE_FALSE(keys.empty());
+
+    {
         auto reopened = utxoz::full_db::open_for_testing(path);
         REQUIRE(reopened);
         auto db = std::move(*reopened);
@@ -576,8 +633,8 @@ TEST_CASE("every version survives an interrupted renumbering",
         REQUIRE(db.find(fresh, 200));
 
         db.close();
-        std::filesystem::remove_all(path);
     }
+    std::filesystem::remove_all(path);
 }
 
 TEST_CASE("compaction over a numbering with a hole in it",

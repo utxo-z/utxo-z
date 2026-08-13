@@ -89,5 +89,7 @@ test_unres_*/
 test_own_*/
 test_del_*/
 test_guard_*
+test_fmt_*
+test_ci_*
 scripts/__pycache__/
 ci/__pycache__/

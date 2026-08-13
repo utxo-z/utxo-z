@@ -333,6 +333,40 @@ auto txid = utxoz::get_txid(key);
 auto index = utxoz::get_output_index(key);
 ```
 
+## On-disk format
+
+A database keeps its hash tables inside memory-mapped files, so the internal
+layout of `boost::unordered_flat_map` *is* part of the format. Boost promises
+nothing about that layout, and Boost.Interprocess resolves a named object by name
+alone — it does not check the type — so a build whose idea of the layout differed
+from the one that wrote the files would reinterpret them rather than refuse them.
+
+Every database therefore records what it was written under, in its config and
+again in every version file, and both are checked before anything reads a map:
+
+| Field | What a mismatch means |
+|---|---|
+| `geometry_id` | the container sizing this build writes |
+| `map_layout_epoch` | the map implementation this build is certified against |
+| `hash_epoch` | the effective hash, `mulx_mix(hash_outpoint(key))` |
+| `platform_abi_id` | endianness, and the width of `size_t`, pointers and `offset_ptr` |
+| `database_id` | sixteen random bytes, so a version file from another database is caught |
+
+A mismatch is refused with a specific error rather than served. The Boost version
+is recorded too, for diagnosis, and is never compared: several Boost releases can
+share one `map_layout_epoch`.
+
+### Databases created before v0.11.0
+
+Anything written by v0.10.0 or earlier carries a config that records only the
+storage mode. What its files mean cannot be established after the fact, so it is
+**refused rather than assumed**: `open()` returns `migration_required` and nothing
+in the directory is read, repaired or upgraded.
+
+Such a database has to be rebuilt from the chain. There is deliberately no
+in-place migration: writing a new config over data whose layout was never
+recorded would be asserting the very thing that cannot be checked.
+
 ## Performance
 
 Benchmarks on consumer hardware (single thread):

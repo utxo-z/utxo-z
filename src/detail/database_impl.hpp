@@ -32,7 +32,10 @@
 #include "merge_policy.hpp"
 #include "merge_sidecar.hpp"
 #include "scope_exit.hpp"
+#include "format_identity.hpp"
 #include "segment_open.hpp"
+#include "segment_stamp.hpp"
+#include "store_config_io.hpp"
 #include "version_catalog.hpp"
 #include "utxo_value.hpp"
 
@@ -134,8 +137,17 @@ private:
     size_t erase_in_latest_version(raw_outpoint const& key, uint32_t height);
 
     // File management
+    //
+    // Opening a version that must be there and creating one that must not are
+    // separate calls, and neither can turn into the other. A single
+    // open-or-create meant that a file whose map could not be reached came back
+    // as a new empty container, which is the reinterpretation this whole barrier
+    // exists to stop.
     template<size_t Index>
-    void open_or_create_container(size_t version);
+    [[nodiscard]] result<> open_existing_container(size_t version);
+
+    template<size_t Index>
+    [[nodiscard]] result<> create_container(size_t version);
 
     template<size_t Index>
     void close_container();
@@ -279,7 +291,8 @@ private:
     std::optional<find_result> reference_find_in_latest(raw_outpoint const& key, uint32_t height) const;
     size_t reference_erase_in_latest(raw_outpoint const& key, uint32_t height);
 
-    void reference_open_or_create(size_t version);
+    [[nodiscard]] result<> reference_open_existing(size_t version);
+    [[nodiscard]] result<> reference_create(size_t version);
     void reference_close_container();
     void reference_new_version();
     bool reference_can_insert_safely() const;
@@ -295,7 +308,6 @@ private:
     // Config persistence
     [[nodiscard]]
     result<> save_config_to_disk();
-    result<> load_config_from_disk();
 
     // Reference metadata helpers
     void reference_save_metadata(size_t version) noexcept;
@@ -321,6 +333,18 @@ private:
     version_catalog reference_catalog_;
 
     size_t entries_count_ = 0;
+
+    /// This database's identity, made once when it is created and written into
+    /// the config and into every segment it owns. Read back from the config on
+    /// every later open; a segment that does not carry it belongs to a different
+    /// database and is refused before anything reads it.
+    database_id_t database_id_{};
+
+    /// What this build expects a segment of `kind` at `version` to say about
+    /// itself.
+    [[nodiscard]] segment_identity expected_identity(uint32_t kind, uint64_t version) const {
+        return local_identity(database_id_, kind, version);
+    }
 
     // The versions each container has, and the metadata describing them.
     // Sparse: version numbers are identities, never positions.
