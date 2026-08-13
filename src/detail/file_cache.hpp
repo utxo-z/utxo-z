@@ -26,6 +26,7 @@
 #include "durability.hpp"
 #include "path_display.hpp"
 #include "segment_open.hpp"
+#include "segment_stamp.hpp"
 #include "utxo_value.hpp"
 
 namespace utxoz::detail {
@@ -62,11 +63,24 @@ struct file_cache {
 
     using file_key_t = std::pair<size_t, size_t>; // (container_index, version)
 
-    explicit file_cache(fs::path path, size_t max_size = 1)
-        : base_path_(std::move(path)), max_cached_files_(max_size) {}
+    /// The cache reaches historical version files, so it validates their stamps
+    /// for the same reason the active path does: a file written under another
+    /// layout, or belonging to another database, must be refused before its map
+    /// is looked for. It is given the identity to hold them to, because it is
+    /// the only thing here that knows which file it is opening.
+    explicit file_cache(fs::path path, database_id_t const& database_id, size_t max_size = 1)
+        : database_id_(database_id), base_path_(std::move(path)), max_cached_files_(max_size) {}
 
     template<size_t Index>
     ret_t<Index> get_or_open_file(size_t container_index, size_t version) {
+        // The sentinel is reference mode's, and it is SIZE_MAX: narrowed to the
+        // uint32 a stamp carries it becomes the very value that *means*
+        // reference mode, so a full container asked for under it would be held
+        // to the wrong identity and pass. Refused instead.
+        if (container_index == reference_sentinel_index) {
+            throw std::runtime_error("the reference sentinel is not a full-mode container");
+        }
+
         file_key_t file_key{container_index, version};
 
         ++gets_;
@@ -101,8 +115,17 @@ struct file_cache {
         }
         auto segment = std::move(*opened);
 
-        auto found = find_single_named<utxo_map<container_sizes[Index]>>(
-            *segment, map_object_name, file_path);
+        // The stamp before the map. Reading the map of a file written under a
+        // different layout does not fail, it reinterprets.
+        if (auto const stamped = validate_stamp(
+                *segment, file_path,
+                local_identity(database_id_, uint32_t(container_index), uint64_t(version)));
+            ! stamped) {
+            throw std::runtime_error("version file refused by its stamp: "
+                                     + path_display(file_path));
+        }
+
+        auto found = find_single_named<utxo_map<container_sizes[Index]>>(*segment, map_object_name, file_path);
         if ( ! found) {
             throw std::runtime_error("unusable version file: " + path_display(file_path));
         }
@@ -145,6 +168,16 @@ struct file_cache {
             throw std::runtime_error("cannot open version file: " + path_display(file_path));
         }
         auto segment = std::move(*opened);
+
+        // The stamp before the map. Reading the map of a file written under a
+        // different layout does not fail, it reinterprets.
+        if (auto const stamped = validate_stamp(
+                *segment, file_path,
+                local_identity(database_id_, reference_container_kind, uint64_t(version)));
+            ! stamped) {
+            throw std::runtime_error("version file refused by its stamp: "
+                                     + path_display(file_path));
+        }
 
         auto found = find_single_named<reference_map_t>(*segment, map_object_name, file_path);
         if ( ! found) {
@@ -264,6 +297,7 @@ private:
 
     boost::unordered_flat_map<file_key_t, cached_file> cache_;
     boost::unordered_flat_map<file_key_t, size_t> access_frequency_;
+    database_id_t database_id_{};
     fs::path base_path_;
     size_t max_cached_files_;
     size_t gets_ = 0;

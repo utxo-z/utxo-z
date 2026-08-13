@@ -45,11 +45,14 @@
 
 #include <boost/interprocess/managed_mapped_file.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <fmt/format.h>
 
 #include <utxoz/database.hpp>
 
 #include "detail/segment_open.hpp"
+#include "detail/segment_stamp.hpp"
+#include "detail/store_config_io.hpp"
 
 namespace bip = boost::interprocess;
 namespace fs = std::filesystem;
@@ -88,6 +91,48 @@ constexpr size_t segment_bytes = 16u * 1024u * 1024u;
 /// not hold what the reader is going to ask for. Not truncation and not
 /// corruption: open_existing_segment() has no complaint about it, so only the
 /// guard stands between this file and a silent misread.
+/// Replaces a version file with a segment that opens perfectly, holds no map,
+/// and carries a stamp this database would accept — so what is missing is the
+/// map and only the map. Without the stamp the file would be refused one check
+/// earlier and the map-level refusal, a separate check on a separate object,
+/// would never be reached.
+void blank_the_map_keeping_the_stamp(fs::path const& dir, fs::path const& data_file,
+                                     uint32_t kind, uint64_t version) {
+    auto const config = utxoz::detail::read_config_file(dir / "utxoz_config.dat");
+    REQUIRE(config.has_value());
+
+    std::error_code ec;
+    fs::remove(data_file, ec);
+    bip::managed_mapped_file replacement(bip::create_only, data_file.c_str(), segment_bytes);
+    auto const placed = utxoz::detail::place_stamp(
+        replacement, data_file,
+        utxoz::detail::local_identity(config->database_id, kind, version));
+    REQUIRE(placed.has_value());
+}
+
+/// Rebuilds a version file as one this database would open happily: the stamp it
+/// should carry, and an empty map. Used to repair a source so a second
+/// compaction has something valid to work with.
+void rebuild_as_valid(fs::path const& dir, fs::path const& data_file, uint32_t kind,
+                      uint64_t version) {
+    auto const config = utxoz::detail::read_config_file(dir / "utxoz_config.dat");
+    REQUIRE(config.has_value());
+
+    std::error_code ec;
+    fs::remove(data_file, ec);
+    bip::managed_mapped_file segment(bip::create_only, data_file.c_str(), segment_bytes);
+    auto const placed = utxoz::detail::place_stamp(
+        segment, data_file, utxoz::detail::local_identity(config->database_id, kind, version));
+    REQUIRE(placed.has_value());
+
+    using map_t = utxoz::detail::utxo_map<utxoz::container_sizes[0]>;
+    segment.construct<map_t>(utxoz::detail::map_object_name)(
+        64, utxoz::detail::outpoint_hash{}, utxoz::detail::outpoint_equal{},
+        segment.get_allocator<map_t::value_type>());
+}
+
+/// Replaces a version file with a segment that opens and holds neither a stamp
+/// nor a map: nothing this database wrote.
 void blank_the_map(fs::path const& data_file) {
     std::error_code ec;
     fs::remove(data_file, ec);
@@ -169,19 +214,24 @@ namespace {
 /// The caller damages whichever it wants and decides when.
 struct two_versions {
     fs::path dir;
+    size_t entries = 0;
 
-    explicit two_versions(std::string_view tag, uint32_t count = 8) : dir(make_unique_path(tag)) {
-        {
-            auto db = utxoz::full_db::open_for_testing(dir, true);
-            REQUIRE(db.has_value());
-            std::vector<uint8_t> const value(20, 0xAB);
-            for (uint32_t i = 0; i < count; ++i) {
-                REQUIRE(db->insert(outpoint_of(i), value, 700000 + i).has_value());
-            }
+    /// Rotated into being, not copied. Every segment carries a stamp naming the
+    /// generation it is, so a version file duplicated under another name is
+    /// refused — which is the barrier working, and no way to build a fixture.
+    explicit two_versions(std::string_view tag) : dir(make_unique_path(tag)) {
+        auto opened = utxoz::full_db::open_for_testing(dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+
+        std::vector<uint8_t> const value(8, 0xAB);
+        uint64_t next = 0;
+        while (count_files(dir, "cont_0_v") < 2) {
+            REQUIRE(db.insert(outpoint_of(next++), value, 700000).has_value());
+            REQUIRE(next < 2'000'000);   // terminate on rotation, not on patience
         }
-        std::error_code ec;
-        fs::copy_file(dir / "cont_0_v00000.dat", dir / "cont_0_v00001.dat", ec);
-        REQUIRE_FALSE(ec);
+        entries = size_t(next);
+        db.close();
     }
 
     [[nodiscard]] fs::path historical() const { return dir / "cont_0_v00000.dat"; }
@@ -195,19 +245,21 @@ struct two_versions {
 /// The same shape in reference mode.
 struct two_reference_versions {
     fs::path dir;
+    size_t entries = 0;
 
-    explicit two_reference_versions(std::string_view tag, uint32_t count = 8)
-        : dir(make_unique_path(tag)) {
-        {
-            auto db = utxoz::reference_db::open_for_testing(dir, true);
-            REQUIRE(db.has_value());
-            for (uint32_t i = 0; i < count; ++i) {
-                REQUIRE(db->insert(outpoint_of(i), 1, i * 100, 700000 + i).has_value());
-            }
+    explicit two_reference_versions(std::string_view tag) : dir(make_unique_path(tag)) {
+        auto opened = utxoz::reference_db::open_for_testing(dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+
+        uint64_t next = 0;
+        while (count_files(dir, "compact_v") < 2) {
+            REQUIRE(db.insert(outpoint_of(next), 1, uint32_t(next), 700000).has_value());
+            ++next;
+            REQUIRE(next < 3'000'000);
         }
-        std::error_code ec;
-        fs::copy_file(dir / "compact_v00000.dat", dir / "compact_v00001.dat", ec);
-        REQUIRE_FALSE(ec);
+        entries = size_t(next);
+        db.close();
     }
 
     [[nodiscard]] fs::path historical() const { return dir / "compact_v00000.dat"; }
@@ -226,7 +278,10 @@ TEST_CASE("full: open refuses a catalogued version whose map cannot be reached",
     // would publish a size() short by whatever it held, and that count is a
     // running total for the life of the instance.
     two_versions f("open_full");
-    blank_the_map(f.historical());
+    // The stamp is kept, so what is missing is the map and only the map. Without
+    // that the file would be refused one check earlier and this case would be
+    // pinning the stamp rather than what it says it pins.
+    blank_the_map_keeping_the_stamp(f.dir, f.historical(), 0, 0);
 
     auto const db = utxoz::full_db::open_for_testing(f.dir, false);
     REQUIRE_FALSE(db.has_value());
@@ -235,7 +290,8 @@ TEST_CASE("full: open refuses a catalogued version whose map cannot be reached",
 
 TEST_CASE("reference: open refuses a catalogued version whose map cannot be reached", "[guard]") {
     two_reference_versions f("open_ref");
-    blank_the_map(f.historical());
+    blank_the_map_keeping_the_stamp(f.dir, f.historical(),
+                                    utxoz::detail::reference_container_kind, 0);
 
     auto const db = utxoz::reference_db::open_for_testing(f.dir, false);
     REQUIRE_FALSE(db.has_value());
@@ -265,7 +321,7 @@ TEST_CASE("an intact history opens and counts everything", "[guard]") {
 
     auto const db = utxoz::full_db::open_for_testing(f.dir, false);
     REQUIRE(db.has_value());
-    CHECK(db->size() == 16);   // both versions hold the same eight
+    CHECK(db->size() == f.entries);   // both generations counted, none skipped
 }
 
 // =============================================================================
@@ -281,7 +337,7 @@ TEST_CASE("for_each_key refuses a version whose map cannot be reached", "[guard]
     // After the open, because the open now refuses this state outright. The
     // traversal is a separate path with its own way of failing, and it is the
     // one a caller reaches while holding a healthy instance.
-    blank_the_map(f.historical());
+    blank_the_map_keeping_the_stamp(f.dir, f.historical(), 0, 0);
 
     // Every key is in the active version, so a traversal that skipped the
     // damaged one would return them all and report success. Its being an error
@@ -298,7 +354,7 @@ TEST_CASE("for_each_entry refuses a version whose map cannot be reached", "[guar
 
     auto db = utxoz::full_db::open_for_testing(f.dir, false);
     REQUIRE(db.has_value());
-    blank_the_map(f.historical());
+    blank_the_map_keeping_the_stamp(f.dir, f.historical(), 0, 0);
 
     auto const outcome = db->for_each_entry(
         [](utxoz::raw_outpoint const&, uint32_t, std::span<uint8_t const>) {});
@@ -316,7 +372,7 @@ TEST_CASE("an undamaged history still traverses", "[guard]") {
     size_t seen = 0;
     auto const outcome = db->for_each_key([&](utxoz::raw_outpoint const&) { ++seen; });
     CHECK(outcome.has_value());
-    CHECK(seen == 16);
+    CHECK(seen == f.entries);
 
     db->close();
 }
@@ -351,7 +407,17 @@ TEST_CASE("compaction refuses a source whose map cannot be reached", "[guard][co
     // As with the traversals: damaged after the open, since the open refuses
     // this state on its own now.
     auto const source = dir / "cont_0_v00000.dat";
-    blank_the_map(source);
+
+    auto const expected_error = GENERATE(utxoz::error_code::segment_stamp_missing,
+                                         utxoz::error_code::version_unreadable);
+    if (expected_error == utxoz::error_code::segment_stamp_missing) {
+        // Nothing this database wrote.
+        blank_the_map(source);
+    } else {
+        // Ours, and empty of the one thing the merge needs. This is the case
+        // #127 added, still reachable now that the stamp is checked first.
+        blank_the_map_keeping_the_stamp(dir, source, 0, 0);
+    }
 
     auto const compacted = db->compact_all();
 
@@ -359,9 +425,33 @@ TEST_CASE("compaction refuses a source whose map cannot be reached", "[guard][co
     // then unlinked it, which is why both halves are asserted: the refusal, and
     // the file still being there to refuse again.
     REQUIRE_FALSE(compacted.has_value());
-    CHECK(compacted.error() == utxoz::error_code::version_unreadable);
+    CHECK(compacted.error() == expected_error);
     CHECK(fs::exists(source));
 
+    // And nothing half-built survives the refusal. A `.building` left behind
+    // would be a merge's target that was never published — invisible to
+    // discovery, and in the way of whatever tries next.
+    size_t building = 0;
+    for (auto const& e : fs::directory_iterator(dir)) {
+        if (e.path().filename().string().ends_with(".building")) ++building;
+    }
+    CHECK(building == 0);
+
+    // Every source is still where it was: a refusal is not a partial merge.
+    CHECK(count_files(dir, "cont_0_v") == 3);
+
+    // And the refusal latches nothing. Repair the source into a file this
+    // database accepts and run compaction again: it has to get as far as
+    // building, which it cannot do if the first attempt's target is still
+    // sitting at the name the second one needs.
     db->close();
+    rebuild_as_valid(dir, source, 0, 0);
+
+    auto retried = utxoz::full_db::open_for_testing(dir, false);
+    REQUIRE(retried.has_value());
+    auto const again = retried->compact_all();
+    CHECK(again.has_value());
+
+    retried->close();
     fs::remove_all(dir, ec);
 }

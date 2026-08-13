@@ -202,6 +202,15 @@ struct failpoints {
     /// Fails reopening the active container after a compaction.
     static inline std::atomic<bool> fail_container_open{false};
 
+    /// The two windows inside creating a version file, between the moment the
+    /// file exists on disk and the moment the caller is told it does. Nothing
+    /// else can reach them: the file is created, stamped and filled inside one
+    /// call, and a failure part-way used to leave the name taken with nothing
+    /// usable behind it — which a rotation could never then retry, because it
+    /// would compute the same version number and find the name occupied.
+    static inline std::atomic<bool> fail_after_segment_create{false};
+    static inline std::atomic<bool> fail_after_segment_stamp{false};
+
     /// Fails the removal of the sidecar, and the barrier that confirms it.
     static inline std::atomic<bool> fail_sidecar_removal{false};
 

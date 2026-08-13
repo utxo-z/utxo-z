@@ -176,6 +176,49 @@ enum class error_code : uint8_t {
     /// on. The database does not open; nothing is guessed at or repaired.
     recovery_failed,
     metadata_write_failed,  ///< A derived metadata record could not be published
+
+    // -- The persisted-format barrier ----------------------------------------
+    //
+    // Kept apart from one another on purpose. Every one of these refuses the
+    // same operation, but they send whoever reads the log somewhere different,
+    // and collapsing them would make the difference between "your toolchain
+    // moved" and "this file is from another database" invisible.
+
+    /// The config is well formed and describes a format this build does not
+    /// know. Not corruption: the file is exactly what it says it is.
+    format_unsupported,
+    /// A database written before the format carried its own identity — anything
+    /// created up to v0.10.0. Its layout cannot be established after the fact,
+    /// so it is refused rather than assumed, and nothing about it is touched.
+    /// It has to be rebuilt from the chain.
+    migration_required,
+    /// The container sizing this build writes is not the one the file was
+    /// written under.
+    geometry_mismatch,
+    /// The map implementation this build is certified against is not the one
+    /// that wrote the file.
+    layout_mismatch,
+    /// The effective hash differs, so every key in the file is somewhere this
+    /// build would not look for it.
+    hash_mismatch,
+    /// Written on a platform whose word size, endianness or pointer
+    /// representation this build does not share.
+    abi_mismatch,
+    /// The file belongs to a different database. A version file that wandered in
+    /// from somewhere else, or a config beside data that is not its own.
+    database_identity_mismatch,
+    /// A segment carries no format stamp. It was not written by a build that
+    /// stamps, and what its bytes mean cannot be established.
+    segment_stamp_missing,
+    /// A segment's stamp is present and unusable: wrong marker, unknown format,
+    /// bad checksum, or describing a different file than the one holding it.
+    segment_stamp_corrupt,
+    /// A segment's stamp is intact and describes a different container or
+    /// generation than the one being opened — a version file moved or renamed
+    /// into a name that is not its own. Apart from segment_stamp_corrupt because
+    /// that one sends an operator looking for damage and this one for a file
+    /// that was put somewhere it does not belong.
+    segment_misplaced,
 };
 
 /**

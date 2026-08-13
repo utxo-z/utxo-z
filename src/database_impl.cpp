@@ -23,6 +23,7 @@
 
 #include "detail/log.hpp"
 #include "detail/path_display.hpp"
+#include "detail/system_entropy.hpp"
 
 namespace utxoz::detail {
 
@@ -195,21 +196,95 @@ size_t database_impl::find_optimal_buckets(fs::path const& file_path,
 // =============================================================================
 
 template<size_t Index>
-void database_impl::open_or_create_container(size_t version) {
-    auto file_name = db_path_ / fmt::format(data_file_format, Index, version);
+result<> database_impl::open_existing_container(size_t version) {
+    auto const file_name = db_path_ / fmt::format(data_file_format, Index, version);
 
-    segments_[Index] = std::make_unique<bip::managed_mapped_file>(
-        bip::open_or_create, file_name.c_str(), active_file_sizes_[Index]);
+    auto opened = open_existing_segment(file_name);
+    if ( ! opened) return std::unexpected(opened.error());
 
-    auto* segment = segments_[Index].get();
-    containers_[Index] = segment->find_or_construct<utxo_map<container_sizes[Index]>>(map_object_name)(
+    // The stamp before the map, always. find<utxo_map> on a file written under a
+    // different layout does not fail, it reinterprets, and there is no later
+    // point at which that becomes visible.
+    if (auto const stamped = validate_stamp(**opened, file_name,
+                                            expected_identity(uint32_t(Index), version));
+        ! stamped) {
+        return std::unexpected(stamped.error());
+    }
+
+    auto const found = find_single_named<utxo_map<container_sizes[Index]>>(
+        **opened, map_object_name, file_name);
+    if ( ! found) return std::unexpected(found.error());
+
+    segments_[Index] = std::move(*opened);
+    containers_[Index] = *found;
+    current_versions_[Index] = version;
+    return {};
+}
+
+template<size_t Index>
+result<> database_impl::create_container(size_t version) {
+    auto const file_name = db_path_ / fmt::format(data_file_format, Index, version);
+
+    // create_only, so a name already taken is reported rather than adopted. A
+    // version this call believes is new and is not means the catalogue and the
+    // directory disagree, and building into whatever is there would be the
+    // reinterpretation the stamp exists to prevent.
+    std::unique_ptr<bip::managed_mapped_file> segment;
+    try {
+        segment = std::make_unique<bip::managed_mapped_file>(
+            bip::create_only, file_name.c_str(), active_file_sizes_[Index]);
+    } catch (std::exception const& e) {
+        log::error("container {} v{} could not be created: {}", Index, version, e.what());
+        return std::unexpected(error_code::identity_collision);
+    }
+
+    // From here the file exists and this call is what made it — create_only
+    // guarantees that, which is what makes removing it safe. Until the segment
+    // is published, any failure or exception takes the file with it: a rotation
+    // that failed part-way would otherwise leave the name occupied with nothing
+    // usable behind it, and the retry computes the same version number and finds
+    // it taken. The container would then have no active version and no way back.
+    bool published = false;
+    scope_exit const rollback([&] {
+        if (published) return;
+        segment.reset();   // unmapped before it is unlinked
+        std::error_code ec;
+        fs::remove(file_name, ec);
+        if (ec) {
+            log::error("could not withdraw the half-built {}", path_display(file_name));
+        }
+    });
+
+    if (failpoints::fail_after_segment_create.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::file_open_failed);
+    }
+
+    if (auto const stamped = place_stamp(*segment, file_name,
+                                         expected_identity(uint32_t(Index), version));
+        ! stamped) {
+        return std::unexpected(stamped.error());
+    }
+
+    if (failpoints::fail_after_segment_stamp.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::file_open_failed);
+    }
+
+    auto* map = segment->construct<utxo_map<container_sizes[Index]>>(map_object_name, std::nothrow)(
         min_buckets_ok_[Index],
         outpoint_hash{},
         outpoint_equal{},
         segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>()
     );
+    if (map == nullptr) {
+        log::error("container {} v{} already holds a map", Index, version);
+        return std::unexpected(error_code::identity_collision);
+    }
 
+    segments_[Index] = std::move(segment);
+    containers_[Index] = map;
     current_versions_[Index] = version;
+    published = true;
+    return {};
 }
 
 template<size_t Index>
@@ -244,7 +319,13 @@ void database_impl::new_version() {
     // This is not durable creation, which belongs with the barrier work; it only
     // keeps the in-memory catalogue from describing something that is not there.
     auto const next = catalogs_[Index].next_version();
-    open_or_create_container<Index>(next);   // sets current_versions_ once it maps
+    // A rotation always makes a file that did not exist, so this is the create
+    // path and never the open one. Failure throws, as it already did when Boost
+    // refused the mapping: insert() is the only caller and has no way to report
+    // a rotation that could not happen.
+    if (auto const created = create_container<Index>(next); ! created) {
+        throw std::runtime_error(fmt::format("container {} could not rotate to v{}", Index, next));
+    }
 
     catalogs_[Index].add(next);
     catalogs_[Index].metadata(next) = file_metadata{};
@@ -480,20 +561,23 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
     auto const config_exists = path_exists(config_path);
     if ( ! config_exists) return std::unexpected(config_exists.error());
 
-    // Written once, when the database is created, and never again: the content
-    // does not change, and rewriting it on every open would put a barrier — and
-    // a way to fail — on a path that has nothing to say.
-    bool must_write_config = false;
-
+    // Read and held against this build before a single segment is mapped. A
+    // database written under a geometry, a map layout, a hash or a platform this
+    // build does not share is refused here, with every file still untouched —
+    // which is the difference between a refusal and a repair.
     if (*config_exists && !remove_existing) {
-        if (auto r = load_config_from_disk(); !r) {
-            return std::unexpected(r.error());
+        auto config = read_config_file(config_path);
+        if ( ! config) return std::unexpected(config.error());
+
+        if (auto const usable = check_config_compatible(*config, config_path); ! usable) {
+            return std::unexpected(usable.error());
         }
-        if (mode_ != mode) {
+        if (config->mode != mode) {
             return std::unexpected(error_code::storage_mode_mismatch);
         }
+        mode_ = config->mode;
+        database_id_ = config->database_id;
     } else {
-        must_write_config = true;
         // No config file — check for pre-existing data files from the other mode
         if (!remove_existing) {
             auto const other_mode_file = mode == storage_mode::reference
@@ -507,6 +591,23 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
             }
         }
         mode_ = mode;
+
+        // The identity is made once, here, and every segment this database ever
+        // creates carries it. Sixteen bytes from the system generator, not a
+        // timestamp or a pid: those collide, and two databases that share an
+        // identity are exactly what the check on the way in cannot then catch.
+        if (auto const seeded = system_entropy(database_id_.data(), database_id_.size());
+            ! seeded) {
+            return std::unexpected(seeded.error());
+        }
+
+        // Written before anything is created, not after. The other order leaves
+        // a crash between the two with segments on disk and no config, and the
+        // next open would take that for a fresh database, mint a second identity
+        // and then refuse its own files.
+        if (auto const written = save_config_to_disk(); ! written) {
+            return std::unexpected(written.error());
+        }
     }
 
     // Initialize file cache
@@ -515,7 +616,7 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
     // and fs::path converts implicitly to its native string type, so reading it
     // here still compiles and hands over an empty base path. Every historical
     // version file would then be looked for in the working directory.
-    file_cache_ = std::make_unique<file_cache>(db_path_);
+    file_cache_ = std::make_unique<file_cache>(db_path_, database_id_);
 
     entries_count_ = 0;
 
@@ -542,8 +643,15 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         reference_catalog_.clear();
         for (auto const v : *listed) reference_catalog_.add(v);
 
+        // Whether this is a creation is the catalogue's answer, not the map's.
+        // "db_map was not there" must never become "so I made one".
+        bool const fresh = reference_catalog_.empty();
         size_t const latest_version = reference_catalog_.active();
-        reference_open_or_create(latest_version);
+        if (auto const ready = fresh ? reference_create(latest_version)
+                                     : reference_open_existing(latest_version);
+            ! ready) {
+            return std::unexpected(ready.error());
+        }
         reference_catalog_.add(latest_version);   // a fresh database has just created it
         entries_count_ += reference_map().size();
 
@@ -560,6 +668,14 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
             // the instance.
             auto opened = open_existing_segment(file_name);
             if ( ! opened) return std::unexpected(opened.error());
+            // The stamp before the map, here too: this is the first thing that
+            // reads a historical version, so it is the first place a file that
+            // is not what the catalogue thinks would be believed.
+            if (auto const stamped = validate_stamp(
+                    **opened, file_name, expected_identity(reference_container_kind, v));
+                ! stamped) {
+                return std::unexpected(stamped.error());
+            }
             auto const found = find_single_named<reference_map_t>(**opened, map_object_name, file_name);
             if ( ! found) return std::unexpected(found.error());
             entries_count_ += (*found)->size();
@@ -599,8 +715,15 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         for_each_index<container_count>([&](auto I) {
             if ( ! count_error.has_value()) return;
 
+            // See the reference branch: the catalogue decides, not the map.
+            bool const fresh = catalogs_[I].empty();
             size_t const latest_version = catalogs_[I].active();
-            open_or_create_container<I>(latest_version);
+            if (auto const ready = fresh ? create_container<I>(latest_version)
+                                         : open_existing_container<I>(latest_version);
+                ! ready) {
+                count_error = std::unexpected(ready.error());
+                return;
+            }
             catalogs_[I].add(latest_version);   // a fresh database has just created it
 
             // Count existing entries in active container
@@ -614,6 +737,13 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
                 auto opened = open_existing_segment(file_name);
                 if ( ! opened) {
                     count_error = std::unexpected(opened.error());
+                    return;
+                }
+                // See the reference branch: the stamp is checked before the map.
+                if (auto const stamped = validate_stamp(
+                        **opened, file_name, expected_identity(uint32_t(I.value), v));
+                    ! stamped) {
+                    count_error = std::unexpected(stamped.error());
                     return;
                 }
                 auto const found = find_single_named<utxo_map<container_sizes[I]>>(
@@ -632,7 +762,6 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         if ( ! count_error.has_value()) return count_error;
     }
 
-    if (must_write_config) return save_config_to_disk();
     return {};
 }
 
@@ -1465,6 +1594,40 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
 
         auto segment = std::make_unique<bip::managed_mapped_file>(
             bip::create_only, building.c_str(), policy.file_size());
+
+        // Every exit from here to the end of this block discards what was being
+        // built, and there are seven of them. They used to say so one by one,
+        // which is exactly how one came to be missing: a source whose map could
+        // not be reached returned without unmapping or removing the target, and
+        // the .building file survived a failed compaction. Said once, it cannot
+        // be left out of a branch added later.
+        //
+        // Only up to here. Past this block the target is synced, recorded and
+        // renamed, and those steps abandon it deliberately and in an order that
+        // the crash cases pin; a guard reaching over them would be changing a
+        // sequence rather than removing a repetition.
+        bool built = false;
+        scope_exit const discard_target([&] {
+            if (built) return;
+            segment.reset();   // unmapped before it is unlinked
+            abandon();
+        });
+        // The kind this container is written as. idx is SIZE_MAX for reference
+        // mode, which is not the same number on every platform, so it never
+        // reaches the file.
+        auto const kind = idx == reference_sentinel_index ? reference_container_kind
+                                                          : uint32_t(idx);
+
+        // A merge target is a file this call just created, so it is stamped
+        // before it holds anything — and stamped as the version it will be
+        // published as, not as the one it is being built under.
+        if (auto const stamped = place_stamp(*segment, building,
+                                             local_identity(database_id_, kind,
+                                                            uint64_t(target)));
+            ! stamped) {
+            return std::unexpected(stamped.error());
+        }
+
         auto* target_map = Policy::construct_map(*segment, policy.min_buckets());
 
         // Before the barriers, so the marker is as durable as the entries.
@@ -1485,6 +1648,15 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
             }
             auto source_segment = std::move(*opened_source);
 
+            if (auto const stamped = validate_stamp(
+                    *source_segment, source_path,
+                    local_identity(database_id_, kind, uint64_t(source)));
+                ! stamped) {
+                log::error("compaction: {} is not this database's to merge; nothing is "
+                           "published", policy.describe(source));
+                return std::unexpected(stamped.error());
+            }
+
             auto const source_map = Policy::find_map(*source_segment, source_path);
             if ( ! source_map) {
                 log::error("compaction: {} holds no usable map; nothing is published",
@@ -1503,9 +1675,6 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
                         // canonical has changed at this point.
                         log::error("compaction: duplicate key across the sources of {}: {}",
                                    policy.describe(target), outpoint_to_string(key));
-                        source_segment.reset();
-                        segment.reset();
-                        abandon();
                         return std::unexpected(error_code::duplicate_key);
                     }
                     ++entries_moved;
@@ -1515,9 +1684,6 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
                     // group; sources are only ever read here.
                     log::debug("compaction: {} filled early, {} entries in",
                                policy.describe(target), entries_moved);
-                    source_segment.reset();
-                    segment.reset();
-                    abandon();
                     return std::unexpected(error_code::insufficient_space);
                 }
             }
@@ -1527,10 +1693,12 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
         // pages, not the inode, and neither covers the name.
         if (auto const synced = sync_mapped_region(segment->get_address(), segment->get_size());
             ! synced && synced.error() != error_code::sync_unsupported) {
-            segment.reset();
-            abandon();
             return std::unexpected(synced.error());
         }
+
+        // Built. From here the target is the durability sequence's to abandon,
+        // and it does so explicitly at each of its own steps.
+        built = true;
     } catch (std::exception const& e) {
         // Creating or mapping a file is where the filesystem says no — no room,
         // no permission, no file. Boost reports that by throwing, and this is a
@@ -1728,8 +1896,15 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
         // Derived data: failing to rebuild it costs a rescan later and nothing
         // else, so unlike the sources above this one only warns.
         auto const target_path = data_path(idx, target);
+        auto const summary_kind = idx == reference_sentinel_index ? reference_container_kind
+                                                                  : uint32_t(idx);
         if (auto segment = open_existing_segment(target_path); segment) {
-            if (auto const map_ptr = Policy::find_map(**segment, target_path); map_ptr) {
+            if (auto const stamped = validate_stamp(
+                    **segment, target_path,
+                    local_identity(database_id_, summary_kind, uint64_t(target)));
+                ! stamped) {
+                log::warn("compaction: could not summarise {}", policy.describe(target));
+            } else if (auto const map_ptr = Policy::find_map(**segment, target_path); map_ptr) {
                 for (auto const& [key, val] : **map_ptr) {
                     meta.update_on_insert(key, Policy::height_of(val));
                 }
@@ -1763,7 +1938,12 @@ result<> database_impl::reopen_active_container() {
         if (failpoints::fail_container_open.load(std::memory_order_relaxed)) {
             throw std::runtime_error("failpoint");
         }
-        open_or_create_container<Index>(active);
+        // Compaction closed a file that is still there, so this reopens an
+        // existing version; it never creates one.
+        if (auto const opened = open_existing_container<Index>(active); ! opened) {
+            cleanup_pending_ = true;
+            return std::unexpected(opened.error());
+        }
         catalogs_[Index].add(active);
         return {};
     } catch (std::exception const& e) {
@@ -2445,20 +2625,86 @@ size_t database_impl::find_optimal_buckets_reference(fs::path const& file_path,
     return best_buckets;
 }
 
-void database_impl::reference_open_or_create(size_t version) {
-    auto file_name = db_path_ / fmt::format(reference_data_file_format, version);
+result<> database_impl::reference_open_existing(size_t version) {
+    auto const file_name = db_path_ / fmt::format(reference_data_file_format, version);
 
-    reference_segment_ = std::make_unique<bip::managed_mapped_file>(
-        bip::open_or_create, file_name.c_str(), reference_active_file_size_);
+    auto opened = open_existing_segment(file_name);
+    if ( ! opened) return std::unexpected(opened.error());
 
-    reference_container_ = reference_segment_->find_or_construct<reference_map_t>(map_object_name)(
+    if (auto const stamped = validate_stamp(**opened, file_name,
+                                            expected_identity(reference_container_kind, version));
+        ! stamped) {
+        return std::unexpected(stamped.error());
+    }
+
+    auto const found = find_single_named<reference_map_t>(**opened, map_object_name, file_name);
+    if ( ! found) return std::unexpected(found.error());
+
+    reference_segment_ = std::move(*opened);
+    reference_container_ = *found;
+    reference_current_version_ = version;
+    return {};
+}
+
+result<> database_impl::reference_create(size_t version) {
+    auto const file_name = db_path_ / fmt::format(reference_data_file_format, version);
+
+    std::unique_ptr<bip::managed_mapped_file> segment;
+    try {
+        segment = std::make_unique<bip::managed_mapped_file>(
+            bip::create_only, file_name.c_str(), reference_active_file_size_);
+    } catch (std::exception const& e) {
+        log::error("reference v{} could not be created: {}", version, e.what());
+        return std::unexpected(error_code::identity_collision);
+    }
+
+    // From here the file exists and this call is what made it — create_only
+    // guarantees that, which is what makes removing it safe. Until the segment
+    // is published, any failure or exception takes the file with it: a rotation
+    // that failed part-way would otherwise leave the name occupied with nothing
+    // usable behind it, and the retry computes the same version number and finds
+    // it taken. The container would then have no active version and no way back.
+    bool published = false;
+    scope_exit const rollback([&] {
+        if (published) return;
+        segment.reset();   // unmapped before it is unlinked
+        std::error_code ec;
+        fs::remove(file_name, ec);
+        if (ec) {
+            log::error("could not withdraw the half-built {}", path_display(file_name));
+        }
+    });
+
+    if (failpoints::fail_after_segment_create.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::file_open_failed);
+    }
+
+    if (auto const stamped = place_stamp(*segment, file_name,
+                                         expected_identity(reference_container_kind, version));
+        ! stamped) {
+        return std::unexpected(stamped.error());
+    }
+
+    if (failpoints::fail_after_segment_stamp.load(std::memory_order_relaxed)) {
+        return std::unexpected(error_code::file_open_failed);
+    }
+
+    auto* map = segment->construct<reference_map_t>(map_object_name, std::nothrow)(
         reference_min_buckets_ok_,
         outpoint_hash{},
         outpoint_equal{},
-        reference_segment_->get_allocator<typename reference_map_t::value_type>()
+        segment->get_allocator<typename reference_map_t::value_type>()
     );
+    if (map == nullptr) {
+        log::error("reference v{} already holds a map", version);
+        return std::unexpected(error_code::identity_collision);
+    }
 
+    reference_segment_ = std::move(segment);
+    reference_container_ = map;
     reference_current_version_ = version;
+    published = true;
+    return {};
 }
 
 void database_impl::reference_close_container() {
@@ -2480,7 +2726,11 @@ void database_impl::reference_new_version() {
 
     // The file first, the catalogue after: see new_version().
     auto const next = reference_catalog_.next_version();
-    reference_open_or_create(next);   // sets reference_current_version_ once it maps
+    // See new_version(): a rotation only ever creates.
+    if (auto const created = reference_create(next); ! created) {
+        throw std::runtime_error(fmt::format("the reference container could not rotate to v{}",
+                                             next));
+    }
 
     reference_catalog_.add(next);
     reference_catalog_.metadata(next) = file_metadata{};
@@ -2650,7 +2900,10 @@ result<> database_impl::reopen_active_reference_container() {
         if (failpoints::fail_container_open.load(std::memory_order_relaxed)) {
             throw std::runtime_error("failpoint");
         }
-        reference_open_or_create(active);
+        if (auto const opened = reference_open_existing(active); ! opened) {
+            cleanup_pending_ = true;
+            return std::unexpected(opened.error());
+        }
         reference_catalog_.add(active);
         return {};
     } catch (std::exception const& e) {
@@ -2735,14 +2988,9 @@ result<> database_impl::save_config_to_disk() {
             return std::unexpected(error_code::config_file_corrupt);
         }
 
-        char const magic[4] = {'U', 'T', 'X', 'O'};
-        ofs.write(magic, 4);
-
-        uint32_t const version = 1;
-        ofs.write(reinterpret_cast<char const*>(&version), sizeof(version));
-
-        uint8_t const mode_byte = static_cast<uint8_t>(mode_);
-        ofs.write(reinterpret_cast<char const*>(&mode_byte), sizeof(mode_byte));
+        auto const encoded = encode_config(local_config(mode_, database_id_));
+        ofs.write(reinterpret_cast<char const*>(encoded.data()),
+                  static_cast<std::streamsize>(encoded.size()));
 
         ofs.close();
         if (ofs.fail()) {
@@ -2786,40 +3034,6 @@ result<> database_impl::save_config_to_disk() {
     return {};
 }
 
-result<> database_impl::load_config_from_disk() {
-    auto config_path = db_path_ / "utxoz_config.dat";
-    std::ifstream ifs(config_path, std::ios::binary);
-    if (!ifs) {
-        return std::unexpected(error_code::config_file_corrupt);
-    }
-
-    char magic[4];
-    ifs.read(magic, 4);
-    if (!ifs || magic[0] != 'U' || magic[1] != 'T' || magic[2] != 'X' || magic[3] != 'O') {
-        return std::unexpected(error_code::config_file_corrupt);
-    }
-
-    uint32_t version;
-    ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
-    if (!ifs) {
-        return std::unexpected(error_code::config_file_corrupt);
-    }
-    if (version != 1) {
-        return std::unexpected(error_code::config_file_corrupt);
-    }
-
-    uint8_t mode_byte;
-    ifs.read(reinterpret_cast<char*>(&mode_byte), sizeof(mode_byte));
-    if (!ifs) {
-        return std::unexpected(error_code::config_file_corrupt);
-    }
-    if (mode_byte != static_cast<uint8_t>(storage_mode::full) &&
-        mode_byte != static_cast<uint8_t>(storage_mode::reference)) {
-        return std::unexpected(error_code::config_file_corrupt);
-    }
-    mode_ = static_cast<storage_mode>(mode_byte);
-    return {};
-}
 
 // =============================================================================
 // database_impl - Typed full-mode methods
@@ -3302,11 +3516,16 @@ result<> database_impl::reference_for_each_entry_typed(
 // Explicit template instantiations
 // =============================================================================
 
-template void database_impl::open_or_create_container<0>(size_t);
-template void database_impl::open_or_create_container<1>(size_t);
-template void database_impl::open_or_create_container<2>(size_t);
-template void database_impl::open_or_create_container<3>(size_t);
-template void database_impl::open_or_create_container<4>(size_t);
+template result<> database_impl::open_existing_container<0>(size_t);
+template result<> database_impl::open_existing_container<1>(size_t);
+template result<> database_impl::open_existing_container<2>(size_t);
+template result<> database_impl::open_existing_container<3>(size_t);
+template result<> database_impl::open_existing_container<4>(size_t);
+template result<> database_impl::create_container<0>(size_t);
+template result<> database_impl::create_container<1>(size_t);
+template result<> database_impl::create_container<2>(size_t);
+template result<> database_impl::create_container<3>(size_t);
+template result<> database_impl::create_container<4>(size_t);
 
 template void database_impl::close_container<0>();
 template void database_impl::close_container<1>();

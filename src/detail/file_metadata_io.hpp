@@ -41,6 +41,7 @@
 #include <utxoz/types.hpp>
 
 #include "durability.hpp"
+#include "record_bytes.hpp"
 #include "file_metadata.hpp"
 
 namespace utxoz::detail {
@@ -78,38 +79,10 @@ struct metadata_record {
     static constexpr size_t encoded_size = 100;
 };
 
-static_assert(std::endian::native == std::endian::little,
-              "the metadata record is little-endian; a big-endian port must convert "
-              "and bump metadata_record::current_format");
-
-namespace metadata_detail {
-
-/// FNV-1a, 32-bit. Enough to catch a torn or truncated write, which is all it
-/// is for — it is not a defence against deliberate tampering and is not
-/// presented as one.
-[[nodiscard]]
-inline uint32_t checksum(std::span<uint8_t const> bytes) noexcept {
-    uint32_t hash = 2166136261u;
-    for (auto const b : bytes) {
-        hash ^= b;
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
-template <typename T>
-void put(std::vector<uint8_t>& out, T const& value) {
-    auto const* src = reinterpret_cast<uint8_t const*>(&value);
-    out.insert(out.end(), src, src + sizeof(T));
-}
-
-template <typename T>
-void get(uint8_t const*& cursor, T& value) {
-    std::memcpy(&value, cursor, sizeof(T));
-    cursor += sizeof(T);
-}
-
-} // namespace metadata_detail
+/// This record was where the encoding was first written; it now lives in
+/// record_bytes.hpp, shared with the config and the segment stamp, so the three
+/// cannot drift into three slightly different little-endian conventions.
+namespace metadata_detail = record_bytes;
 
 /// Serialises a record, checksum included.
 [[nodiscard]]
