@@ -51,7 +51,12 @@ class UtxozConan(ConanFile):
     # include/* carries the two .hpp.in templates, not the headers they generate:
     # those live in the build tree now, so a package never depends on a generated
     # header having been left behind in somebody's source directory.
-    exports_sources = "CMakeLists.txt", "src/*", "include/*", "examples/*", "tests/*", "benchmarks/*", "LICENSE", "README.md"
+    # The compatibility fixtures are excluded on purpose. They are eighty
+    # megabytes of evidence about what earlier builds wrote, which this
+    # repository's CI needs and a consumer building from source does not — and
+    # exporting them would put those bytes in every recipe revision.
+    exports_sources = ("CMakeLists.txt", "src/*", "include/*", "examples/*", "tests/*",
+                       "!tests/fixtures/*", "benchmarks/*", "LICENSE", "README.md")
 
     def validate(self):
         if self.info.settings.compiler.cppstd:

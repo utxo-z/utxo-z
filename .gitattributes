@@ -20,3 +20,17 @@
 # own; naming them is a guard against a future rule that is less careful.
 *.png binary
 *.pdf binary
+
+# The compatibility fixtures. `text=auto` does detect these correctly today —
+# they are full of NUL bytes — but the detection is a heuristic over the first
+# few kilobytes, and these files exist precisely to be byte-for-byte what an
+# earlier build wrote. A normalisation applied to one of them would not corrupt
+# it visibly; it would change a digest the suite then reports as a format change.
+tests/fixtures/** binary
+
+# Except the manifest, which is the one file here meant to be read. It is the
+# certificate a reviewer compares against when fixtures are regenerated, and a
+# diff they cannot see is a diff they cannot check. Kept out of the rule above
+# rather than left to detection, and with its line endings pinned so that what it
+# certifies does not depend on which platform committed it.
+tests/fixtures/**/manifest.json -binary text eol=lf

@@ -338,6 +338,12 @@ void database_impl::new_version() {
 
 template<size_t Index>
 bool database_impl::can_insert_safely() const {
+    // The generator's seam: consumed one rotation at a time, so a fixture can be
+    // given more than one generation without the hundred thousand entries a real
+    // one needs. Answering here means the ordinary rotation path runs — nothing
+    // downstream can tell this apart from a container that filled up.
+    if (failpoints::consume_forced_rotation()) return false;
+
     auto const& map = container<Index>();
 
     // Check load factor
@@ -596,8 +602,12 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         // creates carries it. Sixteen bytes from the system generator, not a
         // timestamp or a pid: those collide, and two databases that share an
         // identity are exactly what the check on the way in cannot then catch.
-        if (auto const seeded = system_entropy(database_id_.data(), database_id_.size());
-            ! seeded) {
+        if (failpoints::force_database_id.load(std::memory_order_relaxed)) {
+            // Only the fixture generator sets this, and only so that two writers
+            // can be compared byte for byte.
+            database_id_ = failpoints::forced_database_id;
+        } else if (auto const seeded = system_entropy(database_id_.data(), database_id_.size());
+                   ! seeded) {
             return std::unexpected(seeded.error());
         }
 
@@ -808,8 +818,10 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
         new_version<Index>();
     }
 
-    // Prepare value
-    utxo_value<container_sizes[Index]> val;
+    // Prepare value. Value-initialised: set_data() defines everything from the
+    // payload onwards, and this defines what comes before it, so no byte of what
+    // reaches the file is left holding whatever this stack frame last held.
+    utxo_value<container_sizes[Index]> val{};
     val.block_height = height;
     val.set_data(value);
 
@@ -2738,6 +2750,12 @@ void database_impl::reference_new_version() {
 }
 
 bool database_impl::reference_can_insert_safely() const {
+    // The generator's seam: consumed one rotation at a time, so a fixture can be
+    // given more than one generation without the hundred thousand entries a real
+    // one needs. Answering here means the ordinary rotation path runs — nothing
+    // downstream can tell this apart from a container that filled up.
+    if (failpoints::consume_forced_rotation()) return false;
+
     auto const& map = reference_map();
 
     if (map.bucket_count() > 0) {
@@ -3270,7 +3288,7 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
         reference_new_version();
     }
 
-    reference_value val;
+    reference_value val{};
     val.height = height;
     val.file_number = file_number;
     val.offset = offset;
