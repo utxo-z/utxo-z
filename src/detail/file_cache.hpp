@@ -90,12 +90,23 @@ struct file_cache {
 
         // Open file
         auto file_path = make_file_path(container_index, version);
-        auto segment = open_existing_segment(file_path);
 
-        auto* map = segment->find<utxo_map<container_sizes[Index]>>(map_object_name).first;
-        if (!map) {
-            throw std::runtime_error("Map not found in file: " + path_display(file_path));
+        // The cache reports failure by throwing, which is what resolve() and
+        // apply_deletes() are built to catch; the two calls below report it as a
+        // value. Adapting here keeps that conversion in one place instead of at
+        // every caller, and keeps this file's documented contract unchanged.
+        auto opened = open_existing_segment(file_path);
+        if ( ! opened) {
+            throw std::runtime_error("cannot open version file: " + path_display(file_path));
         }
+        auto segment = std::move(*opened);
+
+        auto found = find_single_named<utxo_map<container_sizes[Index]>>(
+            *segment, map_object_name, file_path);
+        if ( ! found) {
+            throw std::runtime_error("unusable version file: " + path_display(file_path));
+        }
+        auto* map = *found;
 
         cache_[file_key] = cached_file{
             std::move(segment),
@@ -127,12 +138,19 @@ struct file_cache {
         }
 
         auto file_path = make_file_path(reference_sentinel_index, version);
-        auto segment = open_existing_segment(file_path);
 
-        auto* map = segment->find<reference_map_t>(map_object_name).first;
-        if (!map) {
-            throw std::runtime_error("Map not found in reference file: " + path_display(file_path));
+        // See get_or_open_file(): the cache's contract is to throw.
+        auto opened = open_existing_segment(file_path);
+        if ( ! opened) {
+            throw std::runtime_error("cannot open version file: " + path_display(file_path));
         }
+        auto segment = std::move(*opened);
+
+        auto found = find_single_named<reference_map_t>(*segment, map_object_name, file_path);
+        if ( ! found) {
+            throw std::runtime_error("unusable version file: " + path_display(file_path));
+        }
+        auto* map = *found;
 
         cache_[file_key] = cached_file{
             std::move(segment),
