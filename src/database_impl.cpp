@@ -550,15 +550,19 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         // Count entries in previous versions (still searchable/deletable)
         for (auto const v : reference_catalog_.below(latest_version)) {
             auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
-            try {
-                auto segment = open_existing_segment(file_name);
-                auto* map_ptr = segment->template find<reference_map_t>(map_object_name).first;
-                if (map_ptr) {
-                    entries_count_ += map_ptr->size();
-                }
-            } catch (std::exception const& e) {
-                log::error("configure: error counting reference entries v{}: {}", v, e.what());
-            }
+            // The catalogue says this version is here, so being unable to read
+            // it is not a smaller database — it is one this instance cannot
+            // describe. Carrying on would publish a size() short by whatever the
+            // file held, and hand back something that looks healthy until an
+            // operation happens to reach that generation. The count is also a
+            // running total from here on: insert() adds to it and apply_deletes()
+            // subtracts, so a wrong starting point stays wrong for the life of
+            // the instance.
+            auto opened = open_existing_segment(file_name);
+            if ( ! opened) return std::unexpected(opened.error());
+            auto const found = find_single_named<reference_map_t>(**opened, map_object_name, file_name);
+            if ( ! found) return std::unexpected(found.error());
+            entries_count_ += (*found)->size();
         }
 
         for (auto const v : reference_catalog_.versions()) {
@@ -589,7 +593,12 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         });
         if ( ! catalog_error.has_value()) return catalog_error;
 
+        // As with the catalogue above, the first container that cannot be
+        // described stops the open; the ones after it are not even mapped.
+        result<> count_error;
         for_each_index<container_count>([&](auto I) {
+            if ( ! count_error.has_value()) return;
+
             size_t const latest_version = catalogs_[I].active();
             open_or_create_container<I>(latest_version);
             catalogs_[I].add(latest_version);   // a fresh database has just created it
@@ -600,21 +609,27 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
             // Count entries in previous versions (still searchable/deletable)
             for (auto const v : catalogs_[I].below(latest_version)) {
                 auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
-                try {
-                    auto segment = open_existing_segment(file_name);
-                    auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>(map_object_name).first;
-                    if (map_ptr) {
-                        entries_count_ += map_ptr->size();
-                    }
-                } catch (std::exception const& e) {
-                    log::error("configure: error counting entries in container {} v{}: {}", I.value, v, e.what());
+                // See the reference branch: a catalogued version this instance
+                // cannot read is not a smaller database.
+                auto opened = open_existing_segment(file_name);
+                if ( ! opened) {
+                    count_error = std::unexpected(opened.error());
+                    return;
                 }
+                auto const found = find_single_named<utxo_map<container_sizes[I]>>(
+                    **opened, map_object_name, file_name);
+                if ( ! found) {
+                    count_error = std::unexpected(found.error());
+                    return;
+                }
+                entries_count_ += (*found)->size();
             }
 
             for (auto const v : catalogs_[I].versions()) {
                 load_metadata_from_disk(I, v);
             }
         });
+        if ( ! count_error.has_value()) return count_error;
     }
 
     if (must_write_config) return save_config_to_disk();
@@ -1198,22 +1213,15 @@ result<> database_impl::directory_barrier(failpoints::dir_barrier stage) const {
  */
 result<merge_marker> database_impl::read_target_marker(size_t index, size_t version) const {
     auto const path = data_path(index, version);
-    try {
-        auto const segment = open_existing_segment(path);
-        auto const found = segment->find<merge_marker>(merge_marker::object_name);
-        if (found.first == nullptr) {
-            log::error("recovery: {} carries no merge marker", path_display(path));
-            return std::unexpected(error_code::recovery_failed);
-        }
-        if (found.second != 1) {
-            log::error("recovery: {} carries {} merge markers", path_display(path), found.second);
-            return std::unexpected(error_code::recovery_failed);
-        }
-        return *found.first;
-    } catch (std::exception const& e) {
-        log::error("recovery: {} could not be opened to read its merge marker: {}", path_display(path), e.what());
-        return std::unexpected(error_code::recovery_failed);
-    }
+    // This function is where the absent/duplicated check was first written by
+    // hand. find_single_named() is that check, extracted; every reason it can
+    // refuse means the same thing here, so they collapse into one error.
+    auto const opened = open_existing_segment(path);
+    if ( ! opened) return std::unexpected(error_code::recovery_failed);
+
+    auto const found = find_single_named<merge_marker>(**opened, merge_marker::object_name, path);
+    if ( ! found) return std::unexpected(error_code::recovery_failed);
+    return **found;
 }
 
 namespace {
@@ -1463,11 +1471,28 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
         segment->template construct<merge_marker>(merge_marker::object_name)(merge_id);
 
         for (auto const source : sources) {
-            auto source_segment = open_existing_segment(data_path(idx, source));
-            auto* source_map = Policy::find_map(*source_segment);
-            if ( ! source_map) continue;
+            auto const source_path = data_path(idx, source);
 
-            for (auto const& [key, value] : *source_map) {
+            // Refused, not skipped. Every source is unlinked once the target is
+            // published, so a source that was passed over would have its entries
+            // dropped from the merge and the only copy of them deleted straight
+            // after. Nothing is published unless every source was read.
+            auto opened_source = open_existing_segment(source_path);
+            if ( ! opened_source) {
+                log::error("compaction: {} could not be read; nothing is published",
+                           policy.describe(source));
+                return std::unexpected(opened_source.error());
+            }
+            auto source_segment = std::move(*opened_source);
+
+            auto const source_map = Policy::find_map(*source_segment, source_path);
+            if ( ! source_map) {
+                log::error("compaction: {} holds no usable map; nothing is published",
+                           policy.describe(source));
+                return std::unexpected(source_map.error());
+            }
+
+            for (auto const& [key, value] : **source_map) {
                 try {
                     auto const [pos, inserted] = target_map->emplace(key, value);
                     if ( ! inserted) {
@@ -1700,15 +1725,19 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
         meta = file_metadata{};
         meta.container_index = idx;
         meta.version = target;
-        try {
-            auto segment = open_existing_segment(data_path(idx, target));
-            if (auto* map_ptr = Policy::find_map(*segment)) {
-                for (auto const& [key, val] : *map_ptr) {
+        // Derived data: failing to rebuild it costs a rescan later and nothing
+        // else, so unlike the sources above this one only warns.
+        auto const target_path = data_path(idx, target);
+        if (auto segment = open_existing_segment(target_path); segment) {
+            if (auto const map_ptr = Policy::find_map(**segment, target_path); map_ptr) {
+                for (auto const& [key, val] : **map_ptr) {
                     meta.update_on_insert(key, Policy::height_of(val));
                 }
+            } else {
+                log::warn("compaction: could not summarise {}", policy.describe(target));
             }
-        } catch (std::exception const& e) {
-            log::warn("compaction: could not summarise {}: {}", policy.describe(target), e.what());
+        } else {
+            log::warn("compaction: could not summarise {}", policy.describe(target));
         }
         policy.save_metadata(target);
     }
@@ -1835,16 +1864,26 @@ result<> database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&),
         for (auto const v : catalogs_[I].below(current_versions_[I])) {
             auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
 
-            try {
-                auto segment = open_existing_segment(file_name);
-                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>(map_object_name).first;
-                if (!map_ptr) continue;
+            auto opened = open_existing_segment(file_name);
+            if ( ! opened) {
+                outcome = std::unexpected(opened.error());
+                return;
+            }
+            auto const found = find_single_named<utxo_map<container_sizes[I]>>(
+                **opened, map_object_name, file_name);
+            if ( ! found) {
+                outcome = std::unexpected(found.error());
+                return;
+            }
 
-                for (auto const& [key, _] : *map_ptr) {
+            // The callback is the caller's code and may raise; nothing else in
+            // here can any more.
+            try {
+                for (auto const& [key, _] : **found) {
                     cb(ctx, key);
                 }
             } catch (std::exception const& e) {
-                log::error("for_each_key: error reading container {} v{}: {}", I.value, v, e.what());
+                log::error("for_each_key: the callback raised over container {} v{}: {}", I.value, v, e.what());
                 outcome = std::unexpected(error_code::file_open_failed);
                 return;
             }
@@ -1873,16 +1912,26 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
         for (auto const v : catalogs_[I].below(current_versions_[I])) {
             auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
 
-            try {
-                auto segment = open_existing_segment(file_name);
-                auto* map_ptr = segment->template find<utxo_map<container_sizes[I]>>(map_object_name).first;
-                if (!map_ptr) continue;
+            auto opened = open_existing_segment(file_name);
+            if ( ! opened) {
+                outcome = std::unexpected(opened.error());
+                return;
+            }
+            auto const found = find_single_named<utxo_map<container_sizes[I]>>(
+                **opened, map_object_name, file_name);
+            if ( ! found) {
+                outcome = std::unexpected(found.error());
+                return;
+            }
 
-                for (auto const& [key, val] : *map_ptr) {
+            // The callback is the caller's code and may raise; nothing else in
+            // here can any more.
+            try {
+                for (auto const& [key, val] : **found) {
                     cb(ctx, key, val.block_height, val.get_data());
                 }
             } catch (std::exception const& e) {
-                log::error("for_each_entry: error reading container {} v{}: {}", I.value, v, e.what());
+                log::error("for_each_entry: the callback raised over container {} v{}: {}", I.value, v, e.what());
                 outcome = std::unexpected(error_code::file_open_failed);
                 return;
             }
@@ -2537,16 +2586,19 @@ result<> database_impl::reference_for_each_key(void(*cb)(void*, raw_outpoint con
     for (auto const v : reference_catalog_.below(reference_current_version_)) {
         auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
 
-        try {
-            auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<reference_map_t>(map_object_name).first;
-            if (!map_ptr) continue;
+        auto opened = open_existing_segment(file_name);
+        if ( ! opened) return std::unexpected(opened.error());
+        auto const found = find_single_named<reference_map_t>(**opened, map_object_name, file_name);
+        if ( ! found) return std::unexpected(found.error());
 
-            for (auto const& [key, _] : *map_ptr) {
+        // The callback is the caller's code and may raise; nothing else in here
+        // can any more.
+        try {
+            for (auto const& [key, _] : **found) {
                 cb(ctx, key);
             }
         } catch (std::exception const& e) {
-            log::error("reference_for_each_key: error reading reference v{}: {}", v, e.what());
+            log::error("reference_for_each_key: the callback raised over reference v{}: {}", v, e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }
@@ -2572,16 +2624,19 @@ result<> database_impl::reference_for_each_entry(void(*cb)(void*, raw_outpoint c
     for (auto const v : reference_catalog_.below(reference_current_version_)) {
         auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
 
-        try {
-            auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<reference_map_t>(map_object_name).first;
-            if (!map_ptr) continue;
+        auto opened = open_existing_segment(file_name);
+        if ( ! opened) return std::unexpected(opened.error());
+        auto const found = find_single_named<reference_map_t>(**opened, map_object_name, file_name);
+        if ( ! found) return std::unexpected(found.error());
 
-            for (auto const& [key, val] : *map_ptr) {
+        // The callback is the caller's code and may raise; nothing else in here
+        // can any more.
+        try {
+            for (auto const& [key, val] : **found) {
                 emit(key, val);
             }
         } catch (std::exception const& e) {
-            log::error("reference_for_each_entry: error reading reference v{}: {}", v, e.what());
+            log::error("reference_for_each_entry: the callback raised over reference v{}: {}", v, e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }
@@ -3223,16 +3278,19 @@ result<> database_impl::reference_for_each_entry_typed(
     for (auto const v : reference_catalog_.below(reference_current_version_)) {
         auto file_name = db_path_ / fmt::format(reference_data_file_format, v);
 
-        try {
-            auto segment = open_existing_segment(file_name);
-            auto* map_ptr = segment->find<reference_map_t>(map_object_name).first;
-            if (!map_ptr) continue;
+        auto opened = open_existing_segment(file_name);
+        if ( ! opened) return std::unexpected(opened.error());
+        auto const found = find_single_named<reference_map_t>(**opened, map_object_name, file_name);
+        if ( ! found) return std::unexpected(found.error());
 
-            for (auto const& [key, val] : *map_ptr) {
+        // The callback is the caller's code and may raise; nothing else in here
+        // can any more.
+        try {
+            for (auto const& [key, val] : **found) {
                 cb(ctx, key, val.height, val.file_number, val.offset);
             }
         } catch (std::exception const& e) {
-            log::error("reference_for_each_entry_typed: error reading reference v{}: {}", v, e.what());
+            log::error("reference_for_each_entry_typed: the callback raised over reference v{}: {}", v, e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }

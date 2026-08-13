@@ -34,6 +34,7 @@
 #include <utxoz/aliases.hpp>
 #include <utxoz/types.hpp>
 
+#include "segment_open.hpp"
 #include "utxo_value.hpp"
 #include "version_catalog.hpp"
 
@@ -67,9 +68,13 @@ struct full_merge_policy {
             segment.get_allocator<typename map_type::value_type>());
     }
 
+    /// The source of a merge. Refusing here rather than returning null is the
+    /// point: a source whose map cannot be reached used to be skipped, and every
+    /// source is unlinked once the target is published — so skipping one dropped
+    /// its entries and then deleted the only copy.
     [[nodiscard]]
-    static map_type* find_map(bip::managed_mapped_file& segment) {
-        return segment.find<map_type>(map_object_name).first;
+    static result<map_type*> find_map(bip::managed_mapped_file& segment, fs::path const& path) {
+        return find_single_named<map_type>(segment, map_object_name, path);
     }
 
     /// Where the creation height lives in a stored value. The one field the two
@@ -106,9 +111,13 @@ struct reference_merge_policy {
             segment.get_allocator<typename map_type::value_type>());
     }
 
+    /// The source of a merge. Refusing here rather than returning null is the
+    /// point: a source whose map cannot be reached used to be skipped, and every
+    /// source is unlinked once the target is published — so skipping one dropped
+    /// its entries and then deleted the only copy.
     [[nodiscard]]
-    static map_type* find_map(bip::managed_mapped_file& segment) {
-        return segment.find<map_type>(map_object_name).first;
+    static result<map_type*> find_map(bip::managed_mapped_file& segment, fs::path const& path) {
+        return find_single_named<map_type>(segment, map_object_name, path);
     }
 
     [[nodiscard]]

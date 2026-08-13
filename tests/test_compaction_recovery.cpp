@@ -1567,14 +1567,20 @@ TEST_CASE("a truncated version file is refused promptly, not after a long wait",
 
     auto const victim = fs::path(path) / older.front();
     REQUIRE(fs::file_size(victim) > 1024);
-    {
-        std::ofstream ofs(victim, std::ios::binary | std::ios::trunc);
-        ofs << "far too small to be a segment";
-    }
 
     auto opened = utxoz::full_db::open_for_testing(path);
     REQUIRE(opened);
     auto db = std::move(*opened);
+
+    // Damaged after the open, not before. configure() now refuses to describe a
+    // catalogued version it cannot read, so a database damaged beforehand does
+    // not open at all — and what this case is about is the promptness of the
+    // refusal on the path that reaches the file, which needs an instance to
+    // reach it with.
+    {
+        std::ofstream ofs(victim, std::ios::binary | std::ios::trunc);
+        ofs << "far too small to be a segment";
+    }
 
     auto const start = std::chrono::steady_clock::now();
     auto const scanned = db.for_each_key([](utxoz::raw_outpoint const&) {});
@@ -1625,14 +1631,17 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         std::ranges::sort(older);
         REQUIRE(older.size() >= 3);
 
+        auto opened = utxoz::full_db::open_for_testing(path);
+        REQUIRE(opened);
+        auto db = std::move(*opened);
+
+        // Damaged after the open: configure() now refuses a catalogued version
+        // it cannot read, and this case is about the cache refusing promptly,
+        // which needs an instance to go through the cache with.
         {
             std::ofstream ofs(fs::path(path) / older.front(), std::ios::binary | std::ios::trunc);
             ofs << "far too small to be a segment";
         }
-
-        auto opened = utxoz::full_db::open_for_testing(path);
-        REQUIRE(opened);
-        auto db = std::move(*opened);
 
         // Misses the active map, which is what sends the resolution through the
         // cache.
@@ -1698,14 +1707,17 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         std::ranges::sort(older);
         REQUIRE(older.size() >= 3);
 
+        auto opened = utxoz::reference_db::open_for_testing(path);
+        REQUIRE(opened);
+        auto db = std::move(*opened);
+
+        // Damaged after the open: configure() now refuses a catalogued version
+        // it cannot read, and this case is about the cache refusing promptly,
+        // which needs an instance to go through the cache with.
         {
             std::ofstream ofs(fs::path(path) / older.front(), std::ios::binary | std::ios::trunc);
             ofs << "far too small to be a segment";
         }
-
-        auto opened = utxoz::reference_db::open_for_testing(path);
-        REQUIRE(opened);
-        auto db = std::move(*opened);
 
         CHECK_FALSE(db.find(witness, 900));
         std::vector<utxoz::lookup_request> const batch{{witness, 900}};
@@ -1768,6 +1780,17 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
     // Boost's states are Uninitialized, Initializing, Initialized, Corrupted —
     // in that order, in a uint32 at offset zero. `Initializing` is the one it
     // waits on; `Corrupted` it reports at once, which would not exercise this.
+    REQUIRE(original_size >= utxoz::detail::smallest_configured_file);
+
+    auto opened = utxoz::full_db::open_for_testing(path);
+    REQUIRE(opened);
+    auto db = std::move(*opened);
+
+    // Damaged after the open, not before. configure() now refuses to describe a
+    // catalogued version it cannot read, so a database damaged beforehand does
+    // not open at all — and what this case is about is the promptness of the
+    // refusal on the path that reaches the file, which needs an instance to
+    // reach it with.
     {
         std::fstream f(victim, std::ios::binary | std::ios::in | std::ios::out);
         REQUIRE(f);
@@ -1780,11 +1803,6 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
     // The size is untouched, so the preflight has nothing to object to — which
     // is the point: this reaches Boost.
     REQUIRE(fs::file_size(victim) == original_size);
-    REQUIRE(original_size >= utxoz::detail::smallest_configured_file);
-
-    auto opened = utxoz::full_db::open_for_testing(path);
-    REQUIRE(opened);
-    auto db = std::move(*opened);
 
     auto const start = std::chrono::steady_clock::now();
     auto const scanned = db.for_each_key([](utxoz::raw_outpoint const&) {});
