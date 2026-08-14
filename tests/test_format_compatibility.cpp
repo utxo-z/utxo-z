@@ -48,8 +48,8 @@
 #include <unistd.h>
 #endif
 
+#include <boost/json.hpp>
 #include <boost/json/basic_parser_impl.hpp>
-#include <boost/json/src.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 

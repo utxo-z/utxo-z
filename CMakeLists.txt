@@ -206,8 +206,18 @@ if(UTXOZ_BUILD_TESTS)
         PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
                 BOOST_ALL_NO_LIB)
 
+    # The sizing instrument. Built with the tests because it uses the same
+    # internal headers, and never installed: it answers a question a person asks
+    # before choosing a file size, and nothing a database does depends on it.
+    add_executable(utxoz_sizing tools/sizing.cpp)
+    target_link_libraries(utxoz_sizing PRIVATE utxoz)
+    target_include_directories(utxoz_sizing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(utxoz_sizing
+        PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
+                BOOST_ALL_NO_LIB)
+
     # The suite runs the generator, so it has to exist before the suite does.
-    add_dependencies(utxoz_tests utxoz_make_format_fixtures)
+    add_dependencies(utxoz_tests utxoz_make_format_fixtures utxoz_sizing)
 endif()
 
 # Benchmarks
