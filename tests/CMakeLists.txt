@@ -29,6 +29,8 @@ add_executable(utxoz_tests
     test_named_object_guard.cpp
     test_format_barrier.cpp
     test_container_selection.cpp
+    test_sizing_tool.cpp
+    support/boost_json.cpp
     test_value_initialisation.cpp
     test_failpoint_reset.cpp
     test_fixture_generator.cpp
@@ -86,7 +88,8 @@ target_include_directories(utxoz_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../sr
 # Where the fixture generator ends up. test_fixture_generator.cpp runs it as a
 # process, because what it checks is what the tool does on its way out.
 target_compile_definitions(utxoz_tests
-    PRIVATE UTXOZ_FIXTURE_GENERATOR="$<TARGET_FILE:utxoz_make_format_fixtures>")
+    PRIVATE UTXOZ_FIXTURE_GENERATOR="$<TARGET_FILE:utxoz_make_format_fixtures>"
+            UTXOZ_SIZING_TOOL="$<TARGET_FILE:utxoz_sizing>")
 
 # A contract that can only be checked by failing to compile.
 #

@@ -262,6 +262,79 @@ jobs:
         run: |
           ctest --preset ${{ matrix.build-preset }} --output-on-failure
 
+      # The production figures, measured once per platform rather than in every
+      # case. What differs between them is not the arithmetic — slots and group
+      # metadata are the same everywhere — but the machinery the segment persists
+      # beside them: the mutex is forty bytes on glibc and four in the spinlock
+      # emulation, and the segment manager moves with it. A common minimum cannot
+      # be assumed, so it is measured.
+      #
+      # Not on the sanitizer job: the numbers are about bytes on disk, and an
+      # instrumented build would measure its own instrumentation.
+      - name: 📏 Sizing profile for this platform
+        if: matrix.sanitizer == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # By exact name, and executable. A wildcard would also match
+          # utxoz_sizing.pdb, an object file or a stale copy from another
+          # configuration, and the first one found would be measured without
+          # anybody noticing which.
+          # Not `mapfile`: macOS runners ship bash 3.2, where it does not exist,
+          # and the step died with "command not found" after every test had
+          # already passed.
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            candidates=$(find build -type f -name 'utxoz_sizing.exe')
+          else
+            candidates=$(find build -type f -name 'utxoz_sizing' -perm -u+x)
+          fi
+          found=$(printf '%s\n' "${candidates}" | grep -c '[^[:space:]]' || true)
+          if [[ "${found}" -eq 0 ]]; then
+            echo "the sizing tool was not built; nothing was measured" >&2
+            exit 1
+          fi
+          if [[ "${found}" -gt 1 ]]; then
+            # Choosing silently is how a report ends up describing a binary
+            # nobody meant to run.
+            echo "more than one sizing tool was found; which one is meant?" >&2
+            printf '  %s\n' "${candidates}" >&2
+            exit 1
+          fi
+          tool="${candidates}"
+          # Which binary ran, said out loud: a report that cannot name the
+          # executable behind it is a report nobody can reproduce.
+          echo "tool: ${tool}"
+          mkdir -p sizing-report
+
+          # Every class at the capacity today's policy picks and at the step
+          # above it, so the table is complete on every platform rather than
+          # extrapolated from one.
+          measure() {
+            echo "--- class $1, $2 buckets ---"
+            "${tool}" --class "$1" --buckets "$2" --precision 65536 --format json \
+              --output "sizing-report/${1}-${2}.json"
+            cat "sizing-report/${1}-${2}.json"
+          }
+          measure 48 7864319
+          measure 48 15728639
+          measure 96 3932159
+          measure 96 7864319
+          measure 128 3932159
+          measure 128 7864319
+          measure 256 122879
+          measure 256 245759
+          measure 10240 959
+          measure 10240 1919
+          measure reference 7864319
+          measure reference 15728639
+
+      - name: 📤 Upload the sizing profile
+        if: matrix.sanitizer == 'none'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sizing-${{ runner.os }}-${{ runner.arch }}
+          path: sizing-report/
+
   publish:
     needs: [setup, build]
     if: >-
