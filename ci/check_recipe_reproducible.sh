@@ -78,6 +78,13 @@ recipe_files="$(git ls-files -- "${RECIPE_INPUTS[@]}")" \
 offenders=""
 while IFS= read -r file; do
     [[ -f "${file}" ]] || continue
+    # A file git exports verbatim cannot change the revision by its line
+    # endings, because it has none: `binary` means the bytes go out as they are
+    # on every platform. Asking anyway finds carriage returns inside binary data
+    # and reports them as a portability fault.
+    if git check-attr binary -- "${file}" | grep -q ': binary: set$'; then
+        continue
+    fi
     if has_crlf "${file}"; then
         offenders+="  ${file}"$'\n'
     fi

@@ -211,6 +211,30 @@ struct failpoints {
     static inline std::atomic<bool> fail_after_segment_create{false};
     static inline std::atomic<bool> fail_after_segment_stamp{false};
 
+    /// Makes the next `n` inserts each rotate before they store anything, by
+    /// answering the safety check the way a container about to overflow does.
+    ///
+    /// Only the fixture generator uses it, and only to build a database with
+    /// more than one generation without writing the hundred thousand entries a
+    /// real rotation needs. It drives the ordinary rotation path — new_version()
+    /// and everything under it — rather than fabricating a second file, because
+    /// a fixture assembled by hand would attest to our ability to produce
+    /// plausible bytes and not to what the writer actually writes.
+    ///
+    /// Internal, off by default, and not part of anything installed.
+    static inline std::atomic<uint32_t> force_rotations{0};
+
+    /// The identity a database being created takes, instead of drawing one.
+    ///
+    /// Every database gets sixteen random bytes, so two runs of the generator
+    /// produce different files even when everything else is identical — which
+    /// makes "did this Boost write the same bytes?" unanswerable by comparison.
+    /// Fixing the identity is what makes that question answerable at all.
+    ///
+    /// Internal, off by default, and used only by the fixture generator.
+    static inline std::atomic<bool> force_database_id{false};
+    static inline std::array<uint8_t, 16> forced_database_id{};
+
     /// Fails the removal of the sidecar, and the barrier that confirms it.
     static inline std::atomic<bool> fail_sidecar_removal{false};
 
@@ -255,7 +279,36 @@ struct failpoints {
         fail_sidecar_removal.store(false, std::memory_order_relaxed);
         before_target_publish.store(nullptr, std::memory_order_relaxed);
         forced_merge_id.store(0, std::memory_order_relaxed);
+        force_rotations.store(0, std::memory_order_relaxed);
+        force_database_id.store(false, std::memory_order_relaxed);
+        forced_database_id.fill(0);
     }
+
+    /// Takes one forced rotation if any are pending, and says so.
+    ///
+    /// Both size-class and reference inserts consult this, and the decrement has
+    /// to happen exactly once per rotation granted — two copies of that is two
+    /// places for the counter to stop being consumed.
+    static bool consume_forced_rotation() noexcept {
+        auto pending = force_rotations.load(std::memory_order_relaxed);
+        if (pending == 0) return false;
+        force_rotations.store(pending - 1, std::memory_order_relaxed);
+        return true;
+    }
+
+    /// Disarms every seam when it goes out of scope.
+    ///
+    /// Calling `clear()` at the end of a test is not enough. A failed REQUIRE
+    /// leaves the scope by throwing, so the call is skipped and the next test
+    /// runs with a seam still armed — which surfaces as a failure somewhere
+    /// unrelated, or, for a seam that only makes something happen earlier, as a
+    /// pass. Construct one of these before arming anything.
+    struct scoped_reset {
+        scoped_reset() = default;
+        scoped_reset(scoped_reset const&) = delete;
+        scoped_reset& operator=(scoped_reset const&) = delete;
+        ~scoped_reset() { clear(); }
+    };
 };
 
 /**

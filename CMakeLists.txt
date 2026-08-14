@@ -144,6 +144,18 @@ endif()
 target_compile_definitions(utxoz
     PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u)
 
+# This project links Boost::headers and no Boost binary. On MSVC a Boost header
+# can ask the linker for one anyway, through a `#pragma comment(lib, ...)` that
+# fires on inclusion whether or not a symbol from that library is ever needed —
+# so the request arrives with no library path to satisfy it and the link fails
+# over a dependency nothing uses. Boost.Container's pmr headers do this, and
+# Boost.JSON includes them.
+#
+# Private, and repeated on our own targets rather than made PUBLIC: a consumer
+# may link a compiled Boost of their own, and which libraries their linker goes
+# looking for is their decision. This changes no inline function — only that.
+target_compile_definitions(utxoz PRIVATE BOOST_ALL_NO_LIB)
+
 # Log backend configuration (defines are in config.hpp)
 if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
     target_link_libraries(utxoz PRIVATE spdlog::spdlog_header_only)
@@ -180,6 +192,22 @@ endif()
 if(UTXOZ_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+
+    # The compatibility-fixture generator. Built with the tests because it uses
+    # the same internal headers, and never installed: it is a tool a person runs
+    # by hand to produce candidates, not part of what a consumer gets.
+    add_executable(utxoz_make_format_fixtures tools/make_format_fixtures.cpp)
+    target_link_libraries(utxoz_make_format_fixtures PRIVATE utxoz)
+    target_include_directories(utxoz_make_format_fixtures
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
+    # See src/detail/segment_open.hpp: this value is baked into an inline
+    # function, so every target that includes that header must agree on it.
+    target_compile_definitions(utxoz_make_format_fixtures
+        PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
+                BOOST_ALL_NO_LIB)
+
+    # The suite runs the generator, so it has to exist before the suite does.
+    add_dependencies(utxoz_tests utxoz_make_format_fixtures)
 endif()
 
 # Benchmarks

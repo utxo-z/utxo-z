@@ -40,6 +40,9 @@ on:
 jobs:
   setup:
     runs-on: ubuntu-24.04
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 10
     outputs:
       build-version: ${{ steps.version.outputs.build-version }}
     steps:
@@ -131,6 +134,9 @@ jobs:
             sanitizer: "address,undefined"
 
     runs-on: ${{ matrix.os }}
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 60
     name: ${{ matrix.name }}
 
     steps:
@@ -247,7 +253,12 @@ jobs:
         run: |
           cmake --build --preset ${{ matrix.build-preset }} --parallel
 
+      # UTXOZ_TEST_TRACE makes the compatibility cases say where they are on
+      # stderr. A case killed by a timeout reports nothing otherwise — Catch2
+      # buffers until it has a result, and a killed case never has one.
       - name: 🧪 Run tests
+        env:
+          UTXOZ_TEST_TRACE: 1
         run: |
           ctest --preset ${{ matrix.build-preset }} --output-on-failure
 
@@ -283,6 +294,9 @@ jobs:
             compiler-major: 44
 
     runs-on: ${{ matrix.os }}
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 60
     name: ${{ matrix.name }}
 
     steps:
@@ -432,6 +446,9 @@ jobs:
   build-wasm:
     needs: [setup]
     runs-on: ubuntu-24.04
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 45
     name: 🌐 WebAssembly (Emscripten)
 
     steps:
@@ -506,9 +523,80 @@ jobs:
         run: |
           cmake --build --preset conan-release --parallel
 
+  boost-compatibility:
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 60
+    name: 🔭 Boost compatibility probe (informative)
+    # Informative on purpose, and never required. A Boost release is not a defect
+    # in whatever pull request happens to be open when it lands; what this job
+    # produces is a verdict for a person to read before deciding whether
+    # map_layout_epoch moves. It builds and runs code from the checked-out
+    # revision and needs nothing but read access.
+    continue-on-error: true
+    permissions:
+      contents: read
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Select GCC 16
+        run: |
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes gcc-16 g++-16
+          echo "CC=gcc-16" >> "$GITHUB_ENV"
+          echo "CXX=g++-16" >> "$GITHUB_ENV"
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan==${{ env.CONAN_VERSION }}
+          conan profile detect --force
+
+      # The pinned build first: the probe needs the generated config.hpp, and the
+      # other dependencies come from the ordinary resolution. Only Boost is
+      # replaced, and only for the probe.
+      - name: 📦 Install dependencies
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+        run: |
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
+
+      - name: ⚙️ Configure CMake
+        run: cmake --preset conan-release
+
+      # The baseline half of the writer comparison. Without this the probe has
+      # nothing written by the pinned Boost to compare against, and reports
+      # NO_EVIDENCE for the writer — which is honest, and useless.
+      - name: 🔨 Build the pinned-Boost generator
+        run: |
+          cmake --build --preset conan-release --target utxoz_make_format_fixtures --parallel
+
+      # The comparison, checked against six cases whose answers are known —
+      # including a file only the candidate writes, which an enumeration of one
+      # side would never visit.
+      - name: 🧪 The comparison can tell things apart
+        run: ./ci/check_boost_latest.sh --self-test
+
+      - name: 🔭 Probe a newer Boost
+        env:
+          # Pinned by version and checksum. A floating reference would leave a
+          # run that cannot say which bytes it tested.
+          BOOST_VERSION: "1.92.0"
+          BOOST_SHA256: "e2a814b3a158ab482c7a3d330f8bf5a7a8423d258a4e2fb396996e00fcee2111"
+        run: ./ci/check_boost_latest.sh
+
   generated-headers:
     needs: [setup]
     runs-on: ubuntu-24.04
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 30
     name: 🧬 Generated headers
     # This job builds and runs code from the checked-out revision, which on a
     # pull request is whatever the contributor pushed. It needs to read the
@@ -583,6 +671,9 @@ jobs:
   statistics-disabled:
     needs: [setup]
     runs-on: ubuntu-24.04
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 60
     name: 📉 Statistics disabled
     # Builds and runs code from the checked-out revision; it needs to read the
     # repository and nothing else.
@@ -659,6 +750,29 @@ jobs:
         run: |
           ctest --preset conan-release --output-on-failure
 
+      # The compatibility cases are only built when the fixtures are present, so
+      # a mistake in that condition would take them out of the suite and leave
+      # this job green without them.
+      #
+      # The suite is asked by tag rather than ctest by name pattern: names are a
+      # heuristic that both misses cases and matches unrelated ones, and a count
+      # that includes tests which are not these proves nothing about these.
+      - name: 🧪 Verify the compatibility cases actually ran
+        run: |
+          suite=$(find build -type f -name utxoz_tests -perm -u+x -print -quit)
+          if [[ -z "${suite}" ]]; then
+            echo "the test binary was not found; nothing can be said about coverage" >&2
+            exit 1
+          fi
+          # One line per case, so the count does not depend on how Catch2
+          # words its summary or indents its listing.
+          count=$("${suite}" '[compat]' --list-tests --verbosity quiet | grep -c '[^[:space:]]' || true)
+          echo "[compat] cases in this build: ${count:-0}"
+          if [[ "${count:-0}" -lt 8 ]]; then
+            echo "the format compatibility cases are missing from this build" >&2
+            exit 1
+          fi
+
   publish-dry-run:
     needs: [setup]
     # The same platforms publish runs on, because the thing being rehearsed is
@@ -691,6 +805,9 @@ jobs:
             runner-arch: X64
 
     runs-on: ${{ matrix.os }}
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 45
     name: ${{ matrix.name }}
     # Builds and runs code from the checked-out revision, which on a pull request
     # is whatever the contributor pushed. Read the repository and nothing else —
@@ -963,6 +1080,9 @@ jobs:
   benchmark:
     needs: [setup]
     runs-on: ubuntu-24.04
+    # A stuck job otherwise runs to the six-hour default, blocking the matrix
+    # and reporting nothing about which step it was in.
+    timeout-minutes: 60
     name: 📊 Benchmarks
     permissions:
       contents: write

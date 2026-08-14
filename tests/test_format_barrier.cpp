@@ -277,6 +277,35 @@ TEST_CASE("the config refuses another platform's bytes", "[format]") {
     CHECK(db.error() == utxoz::error_code::abi_mismatch);
 }
 
+TEST_CASE("a file whose data ABI matches but whose machinery does not is refused",
+          "[format]") {
+    // The case the identity used to miss, and the reason it was widened. Linux
+    // and macOS agree on endianness and on the width of a size_t, a pointer and
+    // an offset_ptr — and write files the other cannot read, because a segment
+    // keeps its allocator's mutex inside the mapped file and Boost compiles a
+    // different one for each. What followed was not a wrong answer but no answer:
+    // the segment mapped, and the first named-object lookup never returned.
+    fresh_db f("cfg_sync_abi");
+
+    // Same data ABI, different persisted machinery — exactly what one of those
+    // files looks like from here.
+    auto const foreign = utxoz::detail::compute_platform_abi_id(
+        utxoz::detail::sync_abi_family == 1u ? 3u : 1u, utxoz::detail::platform_tag);
+    REQUIRE(foreign != utxoz::detail::platform_abi_id);
+    rewrite_config(f.dir, [&](store_config& c) { c.platform_abi_id = foreign; });
+
+    // Armed so that any attempt to open a container fails with its own code. The
+    // refusal below therefore proves an ordering rather than merely an outcome:
+    // the config is read and rejected before anything is mapped. Asserting that
+    // by timing would prove nothing — a fast answer is not an early one.
+    utxoz::detail::failpoints::scoped_reset const disarm;
+    utxoz::detail::failpoints::fail_container_open.store(true, std::memory_order_relaxed);
+
+    auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::abi_mismatch);
+}
+
 TEST_CASE("a config format from the future is not corruption", "[format]") {
     fresh_db f("cfg_future");
 
@@ -576,7 +605,7 @@ TEST_CASE("the effective hash is the one every stored file was written under", "
     // and passing green on the others would be claiming something that had never
     // been checked.
     std::vector<sample> samples;
-    if (utxoz::detail::platform_abi_id == utxoz::detail::lp64_le_abi) {
+    if (utxoz::detail::data_abi_id == utxoz::detail::lp64_le_abi) {
         samples = {
             {"all zero",     utxoz::raw_outpoint{},  0x0000000000000000ull, 0x0000000000000000ull},
             {"all ones",     all_ones,               0x1eecfda47f4a7c14ull, 0x61d8a19a3f903356ull},
@@ -591,7 +620,7 @@ TEST_CASE("the effective hash is the one every stored file was written under", "
             // hash to cover all 36 bytes would move every key in every database.
             {"txid byte 31", key_from({{31, 1}}),    0x0000000000000000ull, 0x0000000000000000ull},
         };
-    } else if (utxoz::detail::platform_abi_id == utxoz::detail::wasm32_le_abi) {
+    } else if (utxoz::detail::data_abi_id == utxoz::detail::wasm32_le_abi) {
         samples = {
             {"all zero",     utxoz::raw_outpoint{},  0x0000000000000000ull, 0x0000000000000000ull},
             {"all ones",     all_ones,               0x000000007f4a7c14ull, 0x00000000deec0683ull},
@@ -604,8 +633,8 @@ TEST_CASE("the effective hash is the one every stored file was written under", "
             {"txid byte 31", key_from({{31, 1}}),    0x0000000000000000ull, 0x0000000000000000ull},
         };
     } else {
-        FAIL("no hash vectors are pinned for platform_abi_id "
-             << utxoz::detail::platform_abi_id
+        FAIL("no hash vectors are pinned for data_abi_id "
+             << utxoz::detail::data_abi_id
              << "; a database written here would claim hash_epoch "
              << utxoz::detail::hash_epoch
              << " without that ever having been verified. Measure the vectors on this "
