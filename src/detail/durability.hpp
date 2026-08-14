@@ -202,6 +202,19 @@ struct failpoints {
     /// Fails reopening the active container after a compaction.
     static inline std::atomic<bool> fail_container_open{false};
 
+    /// How many existing segments have been mapped.
+    ///
+    /// Incremented by `open_existing_segment`, which is the only place this store
+    /// maps a segment it did not just create — so "was anything mapped?" is a
+    /// question with an answer rather than an inference. A refusal that happens
+    /// before any mapping leaves this untouched, and that is the observable
+    /// behind the ordering the format barrier claims.
+    ///
+    /// A counter rather than a switch that fails: what has to be shown is that
+    /// the edge was never reached, and a seam that fails when reached only shows
+    /// what happens if it is.
+    static inline std::atomic<uint64_t> segments_mapped{0};
+
     /// The two windows inside creating a version file, between the moment the
     /// file exists on disk and the moment the caller is told it does. Nothing
     /// else can reach them: the file is created, stamped and filled inside one
@@ -223,6 +236,20 @@ struct failpoints {
     ///
     /// Internal, off by default, and not part of anything installed.
     static inline std::atomic<uint32_t> force_rotations{0};
+
+    /// The capacity every new map is built with, overriding the policy.
+    ///
+    /// So that a test can put a small map inside a segment with room to spare —
+    /// which is the only way to reach the compaction guard. At the ten-megabyte
+    /// test profile the file is already too small for the next step, so
+    /// `bad_alloc` refuses first and a guard that had been removed would look
+    /// exactly like one that had not.
+    ///
+    /// Zero means the policy decides, which is every case but that one. Applied
+    /// to one container only: the same capacity in every class would ask the
+    /// 10240 class for a hundred and fifty megabytes inside a ten-megabyte file.
+    static inline std::atomic<size_t> forced_capacity{0};
+    static inline std::atomic<size_t> forced_capacity_index{0};
 
     /// The identity a database being created takes, instead of drawing one.
     ///
@@ -276,10 +303,13 @@ struct failpoints {
         crash_at.store(crash_point::none, std::memory_order_relaxed);
         fail_directory_barrier_at.store(dir_barrier::none, std::memory_order_relaxed);
         fail_container_open.store(false, std::memory_order_relaxed);
+        segments_mapped.store(0, std::memory_order_relaxed);
         fail_sidecar_removal.store(false, std::memory_order_relaxed);
         before_target_publish.store(nullptr, std::memory_order_relaxed);
         forced_merge_id.store(0, std::memory_order_relaxed);
         force_rotations.store(0, std::memory_order_relaxed);
+        forced_capacity.store(0, std::memory_order_relaxed);
+        forced_capacity_index.store(0, std::memory_order_relaxed);
         force_database_id.store(false, std::memory_order_relaxed);
         forced_database_id.fill(0);
     }

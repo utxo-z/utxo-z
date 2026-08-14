@@ -10,7 +10,7 @@ Four numbers stand in the way, and this is how they move.
 
 | | changes when |
 |---|---|
-| `geometry_id` | our container sizing changes |
+| `geometry_id` | our storage geometry changes: the size classes, or the capacity and file size a new segment is created with |
 | `map_layout_epoch` | the map implementation we are certified against changes what it persists |
 | `hash_epoch` | the effective hash changes, so keys move |
 | `platform_abi_id` | derived from the target; never edited by hand — it covers the data ABI *and* which interprocess mutex the build compiles |
@@ -105,10 +105,17 @@ Promotion is a person copying files after reading the diff.
 
 ### Bump `geometry_id`
 
-When `container_sizes` changes, a container is added or removed, or a value that
-used to live in one container now lives in another. A `static_assert` in
-`format_identity.hpp` fails the build if the geometry moves without this number,
-so forgetting is not one of the options.
+When `container_sizes` changes, a container is added or removed, a value that used
+to live in one container now lives in another, or the capacity policy moves — the
+capacity a map is built with, or the size of the segment holding it. From geometry
+3 those are one identity, because a capacity without the file size it needs is a
+rehash waiting for the entries.
+
+A `static_assert` in `format_identity.hpp` fails the build if any of that moves
+without this number, so forgetting is not one of the options. It compares the
+whole production table against the one geometry 3 is defined to be, field by
+field, rather than a list of fields somebody chose to check: a segment size, a
+capacity or a bucket count that changes anywhere in the table stops the build.
 
 Existing databases are refused with `geometry_mismatch` and have to be rebuilt.
 There is no migrator and there deliberately will not be one: a value's container
@@ -222,6 +229,12 @@ mutex sits beside it.
 `platform_abi_encoding` exists so that changing the ingredient list is itself a
 change of identity: an id computed from a different set of numbers cannot collide
 with an old one into looking compatible.
+
+A separate limitation on that ABI, recorded in issue #135: `reference_file_size`
+is four gibibytes computed in `size_t`, which wraps to zero where `size_t` is 32
+bits. Reference mode cannot create its production segment there, and the geometry
+assertion compares a truncated value against the same truncated value — agreement,
+not certification. Geometry 3 does not claim reference mode works on wasm32.
 
 There are no wasm32 fixtures. There is therefore **no evidence of a physical
 round trip on wasm32**, and the compatibility suite says so rather than passing

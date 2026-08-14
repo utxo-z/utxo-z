@@ -103,8 +103,14 @@ inline constexpr auto container_capacities = [] {
 
 /**
  * @brief File sizes for each container type (production)
+ *
+ * Container 0 is 1340 MiB because that is what its capacity was measured to need
+ * plus five per cent, rounded up to a whole mebibyte — not because it is a round
+ * number. The rest are what they have always been. `capacity_policy.hpp` holds
+ * the capacity each of these was chosen for and asserts that the two lists agree,
+ * so neither can move without the other.
  */
-inline constexpr std::array<size_t, 5> file_sizes = {2_gib, 500_mib, 1_gib, 50_mib, 10_mib};
+inline constexpr std::array<size_t, 5> file_sizes = {1340_mib, 500_mib, 1_gib, 50_mib, 10_mib};
 
 /**
  * @brief File sizes for each container type (testing - much smaller)

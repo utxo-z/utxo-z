@@ -29,6 +29,7 @@ add_executable(utxoz_tests
     test_named_object_guard.cpp
     test_format_barrier.cpp
     test_container_selection.cpp
+    test_capacity_policy.cpp
     test_sizing_tool.cpp
     support/boost_json.cpp
     test_value_initialisation.cpp

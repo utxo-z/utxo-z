@@ -36,6 +36,7 @@
 #include "segment_open.hpp"
 #include "segment_stamp.hpp"
 #include "store_config_io.hpp"
+#include "capacity_policy.hpp"
 #include "version_catalog.hpp"
 #include "utxo_value.hpp"
 
@@ -264,11 +265,10 @@ public:
 
 private:
 
-    // Optimal buckets finder
-    template<size_t Index>
-    size_t find_optimal_buckets(fs::path const& file_path, size_t file_size, size_t initial_buckets);
-
     // Utilities
+    size_t capacity_for(size_t index) const;
+    size_t capacity_for_reference() const;
+
     size_t get_index_from_size(size_t size) const;
 
     size_t estimate_memory_usage(size_t index) const;
@@ -300,8 +300,6 @@ private:
     result<> reference_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     result<> reference_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
-    size_t find_optimal_buckets_reference(fs::path const& file_path, size_t file_size, size_t initial_buckets);
-
     reference_map_t& reference_map();
     reference_map_t const& reference_map() const;
 
@@ -318,17 +316,28 @@ private:
     storage_mode mode_ = storage_mode::full;
 
     // Full mode storage
-    std::array<size_t, container_count> active_file_sizes_ = file_sizes; // Can be changed for testing
+    /// What a new segment gets: its size and the capacity its map is built with,
+    /// together, because they are one decision. Set by which configure() was
+    /// called and never derived from anything at run time.
+    std::array<capacity_entry, container_count> capacity_ = production_capacity;
     std::array<std::unique_ptr<bip::managed_mapped_file>, container_count> segments_;
     std::array<void*, container_count> containers_{};
+
+    /// The bucket count each open generation was created or opened with.
+    ///
+    /// The invariant this store rests on is that it never changes: a container
+    /// that fills up gets a new generation, and compaction deals with the cost
+    /// later. Comparing against this rather than against the previous insert
+    /// catches a growth from any path, not only from the insert that saw it.
+    std::array<rehash_watch, container_count> rehash_watch_{};
     std::array<size_t, container_count> current_versions_{};
-    std::array<size_t, container_count> min_buckets_ok_{};
 
     // Reference mode storage
     std::unique_ptr<bip::managed_mapped_file> reference_segment_;
     void* reference_container_ = nullptr;
     size_t reference_current_version_ = 0;
-    size_t reference_min_buckets_ok_ = 0;
+    capacity_entry reference_capacity_ = production_reference;
+    rehash_watch reference_rehash_watch_{};
     size_t reference_active_file_size_ = 0;
     version_catalog reference_catalog_;
 

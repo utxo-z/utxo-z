@@ -7,6 +7,7 @@
  * @brief Database implementation - migrated from interprocess_multiple_v12.hpp
  */
 
+#include "detail/capacity_policy.hpp"
 #include "detail/database_impl.hpp"
 
 #include <utxoz/config.hpp>
@@ -139,56 +140,33 @@ utxo_map<container_sizes[Index]> const& database_impl::container() const {
 // database_impl - Utilities
 // =============================================================================
 
+/// The capacity a new map is built with: the policy, unless a test has asked for
+/// something else. One place, so the seam cannot apply to some maps and not
+/// others and leave a compaction target disagreeing with its sources.
+size_t database_impl::capacity_for(size_t index) const {
+    if (auto const forced = failpoints::forced_capacity.load(std::memory_order_relaxed);
+        forced != 0
+        && index == failpoints::forced_capacity_index.load(std::memory_order_relaxed)) {
+        return forced;
+    }
+    return capacity_[index].capacity;
+}
+
+size_t database_impl::capacity_for_reference() const {
+    if (auto const forced = failpoints::forced_capacity.load(std::memory_order_relaxed);
+        forced != 0
+        && failpoints::forced_capacity_index.load(std::memory_order_relaxed)
+               == reference_container_kind) {
+        return forced;
+    }
+    return reference_capacity_.capacity;
+}
+
 size_t database_impl::get_index_from_size(size_t size) const {
     for (size_t i = 0; i < container_count; ++i) {
         if (size <= container_capacities[i]) return i;
     }
     return container_count;
-}
-
-// =============================================================================
-// database_impl - Optimal buckets finder
-// =============================================================================
-
-template<size_t Index>
-size_t database_impl::find_optimal_buckets(fs::path const& file_path,
-                                           size_t file_size,
-                                           size_t initial_buckets) {
-    log::debug("Finding optimal buckets for container {} (file size: {})...", Index, file_size);
-
-    size_t left = 1;
-    size_t right = initial_buckets;
-    size_t best_buckets = left;
-
-    while (left <= right) {
-        size_t mid = left + (right - left) / 2;
-
-        fs::path const temp_file = file_path / fmt::format("temp_{}_{}.dat", file_size, mid);
-        try {
-            bip::managed_mapped_file segment(bip::open_or_create, temp_file.c_str(), file_size);
-
-            // Just test if construction succeeds - we don't need the pointer
-            (void)segment.find_or_construct<utxo_map<container_sizes[Index]>>("temp_map")(
-                mid,
-                outpoint_hash{},
-                outpoint_equal{},
-                segment.get_allocator<std::pair<raw_outpoint const, utxo_value<container_sizes[Index]>>>()
-            );
-
-            // Success - try more buckets
-            best_buckets = mid;
-            left = mid + 1;
-            log::trace("  {} buckets OK, trying more...", mid);
-        } catch (boost::interprocess::bad_alloc const&) {
-            // Too many - try fewer
-            right = mid - 1;
-        }
-
-        fs::remove(temp_file);
-    }
-
-    log::debug("Optimal buckets for container {}: {}", Index, best_buckets);
-    return best_buckets;
 }
 
 // =============================================================================
@@ -217,6 +195,7 @@ result<> database_impl::open_existing_container(size_t version) {
 
     segments_[Index] = std::move(*opened);
     containers_[Index] = *found;
+    rehash_watch_[Index].reset((*found)->bucket_count());
     current_versions_[Index] = version;
     return {};
 }
@@ -232,7 +211,7 @@ result<> database_impl::create_container(size_t version) {
     std::unique_ptr<bip::managed_mapped_file> segment;
     try {
         segment = std::make_unique<bip::managed_mapped_file>(
-            bip::create_only, file_name.c_str(), active_file_sizes_[Index]);
+            bip::create_only, file_name.c_str(), capacity_[Index].file_size);
     } catch (std::exception const& e) {
         log::error("container {} v{} could not be created: {}", Index, version, e.what());
         return std::unexpected(error_code::identity_collision);
@@ -270,7 +249,7 @@ result<> database_impl::create_container(size_t version) {
     }
 
     auto* map = segment->construct<utxo_map<container_sizes[Index]>>(map_object_name, std::nothrow)(
-        min_buckets_ok_[Index],
+        capacity_for(Index),
         outpoint_hash{},
         outpoint_equal{},
         segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>()
@@ -282,6 +261,7 @@ result<> database_impl::create_container(size_t version) {
 
     segments_[Index] = std::move(segment);
     containers_[Index] = map;
+    rehash_watch_[Index].reset(map->bucket_count());
     current_versions_[Index] = version;
     published = true;
     return {};
@@ -346,12 +326,15 @@ bool database_impl::can_insert_safely() const {
 
     auto const& map = container<Index>();
 
-    // Check load factor
-    if (map.bucket_count() > 0) {
-        float next_load = float(map.size() + 1) / float(map.bucket_count());
-        if (next_load >= map.max_load_factor() * 0.95f) {
-            return false;
-        }
+    // From the bucket count of the map that is open, never from the policy: a
+    // generation written under an older one has its own, and it is the one that
+    // decides when *that* file is full. The policy decides what a new segment
+    // gets; the file decides how it is operated.
+    //
+    // Integers, and inclusive: `max_entries_for` is the most entries this map may
+    // hold, so a map already holding that many is full and this insert rotates.
+    if (map.bucket_count() > 0 && map.size() >= max_entries_for(map.bucket_count())) {
+        return false;
     }
 
     // Check available memory
@@ -373,11 +356,8 @@ bool database_impl::can_insert_safely() const {
 template<size_t Index>
 bool database_impl::can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map,
                                               bip::managed_mapped_file const& segment) const {
-    if (map.bucket_count() > 0) {
-        float next_load = float(map.size() + 1) / float(map.bucket_count());
-        if (next_load >= map.max_load_factor() * 0.95f) {
-            return false;
-        }
+    if (map.bucket_count() > 0 && map.size() >= max_entries_for(map.bucket_count())) {
+        return false;
     }
 
     try {
@@ -491,12 +471,18 @@ void database_impl::load_metadata_from_disk(size_t index, size_t version) {
 // =============================================================================
 
 result<> database_impl::configure(fs::path path, bool remove_existing, storage_mode mode) {
-    active_file_sizes_ = file_sizes;
+    // The profile is chosen here and nowhere else. Production fixes the capacity
+    // and takes the file size that was measured for it; testing fixes the file
+    // size at ten megabytes and takes the capacity that fits. They answer
+    // different questions and share no formula.
+    capacity_ = production_capacity;
+    reference_capacity_ = production_reference;
     return configure_internal(std::move(path), remove_existing, mode);
 }
 
 result<> database_impl::configure_for_testing(fs::path path, bool remove_existing, storage_mode mode) {
-    active_file_sizes_ = test_file_sizes;
+    capacity_ = testing_capacity;
+    reference_capacity_ = testing_reference;
     return configure_internal(std::move(path), remove_existing, mode);
 }
 
@@ -639,10 +625,7 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
 
     if (mode_ == storage_mode::reference) {
         // Reference mode: single container
-        reference_active_file_size_ = (active_file_sizes_[0] == file_sizes[0])
-            ? reference_file_size : reference_test_file_size;
-
-        reference_min_buckets_ok_ = find_optimal_buckets_reference(db_path_, reference_active_file_size_, 7864304);
+        reference_active_file_size_ = reference_capacity_.file_size;
 
         // Build the catalogue before anything is opened. A directory we cannot
         // read is not an empty directory: opening on that assumption would
@@ -697,11 +680,6 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
     } else {
         // Full mode: 5 containers
         static_assert(container_count == 5);
-        min_buckets_ok_[0] = find_optimal_buckets<0>(db_path_, active_file_sizes_[0], 7864304);
-        min_buckets_ok_[1] = find_optimal_buckets<1>(db_path_, active_file_sizes_[1], 7864304);
-        min_buckets_ok_[2] = find_optimal_buckets<2>(db_path_, active_file_sizes_[2], 7864304);
-        min_buckets_ok_[3] = find_optimal_buckets<3>(db_path_, active_file_sizes_[3], 7864304);
-        min_buckets_ok_[4] = find_optimal_buckets<4>(db_path_, active_file_sizes_[4], 7864304);
 
         // As above: every container's catalogue is read before any of them is
         // opened, and a failure to read one aborts the open rather than being
@@ -829,8 +807,6 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
     while (max_retries > 0) {
         try {
             auto& map = container<Index>();
-            [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
-
             auto [it, inserted] = map.emplace(key, val);
             if ( ! inserted) {
                 log::warn("insert: duplicate key at height {}, outpoint={}, container={}",
@@ -839,16 +815,24 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
             if (inserted) {
                 ++entries_count_;
 
+                // The invariant, checked against the count the generation was
+                // opened with rather than against the previous insert: a growth
+                // from any path breaks it, not only one this insert witnessed.
+                //
+                // The insert has already happened, so this cannot become a
+                // retryable error — a caller that retried would write the entry
+                // twice. It is reported and counted, and the insert is still a
+                // success, because the entry is there.
+                bool const rehashed = note_rehash_if_grown(
+                    Index, rehash_watch_[Index], map.bucket_count());
+
 #ifdef UTXOZ_STATISTICS_ENABLED
                 // Update statistics
                 ++container_stats_[Index].total_inserts;
                 ++container_stats_[Index].current_size;
                 ++container_stats_[Index].value_size_distribution[value.size()];
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[Index];
-
-                if (map.bucket_count() != bucket_count_before) {
-                    ++container_stats_[Index].rehash_count;
-                }
+                if (rehashed) ++container_stats_[Index].rehash_count;
 #endif
 
                 update_metadata_on_insert(Index, current_versions_[Index], key, height);
@@ -1523,9 +1507,9 @@ result<> database_impl::recover_pending_merges() {
 template <size_t Index>
 size_t full_merge_policy<Index>::index() const { return Index; }
 template <size_t Index>
-size_t full_merge_policy<Index>::file_size() const { return db.active_file_sizes_[Index]; }
+size_t full_merge_policy<Index>::file_size() const { return db.capacity_[Index].file_size; }
 template <size_t Index>
-size_t full_merge_policy<Index>::min_buckets() const { return db.min_buckets_ok_[Index]; }
+size_t full_merge_policy<Index>::min_buckets() const { return db.capacity_for(Index); }
 template <size_t Index>
 version_catalog& full_merge_policy<Index>::catalogue() const { return db.catalogs_[Index]; }
 template <size_t Index>
@@ -1539,7 +1523,7 @@ std::string full_merge_policy<Index>::describe(size_t version) const {
 
 size_t reference_merge_policy::index() const { return reference_sentinel_index; }
 size_t reference_merge_policy::file_size() const { return db.reference_active_file_size_; }
-size_t reference_merge_policy::min_buckets() const { return db.reference_min_buckets_ok_; }
+size_t reference_merge_policy::min_buckets() const { return db.capacity_for_reference(); }
 version_catalog& reference_merge_policy::catalogue() const { return db.reference_catalog_; }
 void reference_merge_policy::save_metadata(size_t version) const {
     db.reference_save_metadata(version);
@@ -1642,6 +1626,17 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
 
         auto* target_map = Policy::construct_map(*segment, policy.min_buckets());
 
+        // The invariant applies here too, and this is where it was missing: a
+        // merge that filled the target past its threshold would grow the map it
+        // had just built, and reference has room in its file for exactly that.
+        // Recorded now so the whole construction can be checked against it.
+        size_t const target_buckets = target_map->bucket_count();
+        // The growth point, not the operating threshold. A sealed target is built
+        // once and never inserted into, so it does not need the five per cent of
+        // reserve a live container keeps — it needs only to not grow. Using the
+        // live threshold here would refuse merges that fit perfectly well.
+        size_t const target_limit = max_size_without_rehash(target_buckets);
+
         // Before the barriers, so the marker is as durable as the entries.
         segment->template construct<merge_marker>(merge_marker::object_name)(merge_id);
 
@@ -1678,6 +1673,28 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
 
             for (auto const& [key, value] : **source_map) {
                 try {
+                    // Below the limit, `emplace` is the only lookup: it finds
+                    // the key or inserts it, and a duplicate comes back as
+                    // `!inserted`. At the limit the order matters and the lookup
+                    // is worth paying for — a key present in two sources means the
+                    // database is locally inconsistent, which sends the caller
+                    // somewhere different from "this group is too large", and a
+                    // duplicate costs no capacity. So it is asked first, and only
+                    // there.
+                    if (target_map->size() >= target_limit) {
+                        if (target_map->find(key) != target_map->end()) {
+                            log::error("compaction: duplicate key across the sources of "
+                                       "{}: {}", policy.describe(target),
+                                       outpoint_to_string(key));
+                            return std::unexpected(error_code::duplicate_key);
+                        }
+                        log::debug("compaction: {} holds {} of the {} entries it can take "
+                                   "without growing; the caller can retry with fewer "
+                                   "sources", policy.describe(target), target_map->size(),
+                                   target_limit);
+                        return std::unexpected(error_code::insufficient_space);
+                    }
+
                     auto const [pos, inserted] = target_map->emplace(key, value);
                     if ( ! inserted) {
                         // Two sources held the same key. A published state holds
@@ -1690,6 +1707,20 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
                         return std::unexpected(error_code::duplicate_key);
                     }
                     ++entries_moved;
+
+                    // Whatever the guard above believed, the map must not have
+                    // grown. Checked per entry rather than at the end: a merge
+                    // that grew and then carried on would keep writing into a
+                    // file that is no longer the one it planned.
+                    if (target_map->bucket_count() != target_buckets) {
+                        rehash_watch target_watch;
+                        target_watch.reset(target_buckets);
+                        note_rehash_if_grown(kind, target_watch, target_map->bucket_count());
+                        log::error("compaction: {} grew from {} buckets to {}; nothing is "
+                                   "published", policy.describe(target), target_buckets,
+                                   target_map->bucket_count());
+                        return std::unexpected(error_code::insufficient_space);
+                    }
                 } catch (boost::interprocess::bad_alloc const&) {
                     // The group was planned to fit and did not. Leave every
                     // source exactly as it is and let the caller try a smaller
@@ -2272,9 +2303,15 @@ void database_impl::update_fragmentation_stats() {
     for_each_index<container_count>([&](auto I) {
         if (segments_[I]) {
             try {
-                size_t total_size = active_file_sizes_[I];
-                size_t free_memory = segments_[I]->get_free_memory();
-                size_t used_memory = total_size - free_memory;
+                // From the segment that is open, not from the policy. These
+                // describe a file; the policy describes what a new one is created
+                // with, and the two are only the same number by coincidence — a
+                // coincidence that ends the next time the policy moves. Asking the
+                // segment also means `total - free` cannot underflow.
+                size_t const total_size = segments_[I]->get_size();
+                size_t const free_memory = segments_[I]->get_free_memory();
+                size_t const used_memory = total_size >= free_memory
+                                         ? total_size - free_memory : 0;
 
                 fragmentation_stats_.fill_ratios[I] = double(used_memory) / double(total_size);
 
@@ -2295,7 +2332,9 @@ size_t database_impl::estimate_memory_usage(size_t index) const {
     size_t total = 0;
 
     if (segments_[index]) {
-        total += active_file_sizes_[index];
+        // The open segment's own size, for the same reason: this is an
+        // observation, and an observation that reads a setting is not one.
+        total += segments_[index]->get_size();
     }
 
     for (auto const v : catalogs_[index].below(current_versions_[index])) {
@@ -2328,7 +2367,9 @@ database_statistics database_impl::get_statistics() {
         stats.total_inserts = container_stats_[0].total_inserts;
         stats.total_deletes = container_stats_[0].total_deletes;
         stats.rotations_per_container[0] = reference_current_version_;
-        stats.memory_usage_per_container[0] = reference_active_file_size_;
+        // The open segment, not the setting: this reports usage.
+        stats.memory_usage_per_container[0] =
+            reference_segment_ ? reference_segment_->get_size() : reference_active_file_size_;
     } else {
         for (size_t i = 0; i < container_count; ++i) {
             stats.containers[i] = container_stats_[i];
@@ -2422,7 +2463,10 @@ sizing_report database_impl::get_sizing_report() const {
         for (size_t i = 0; i < container_count; ++i) {
             auto& info = report.containers[i];
             info.container_size = container_sizes[i];
-            info.file_size_setting = active_file_sizes_[i];
+            // The setting, deliberately: this field is named for what a new
+            // segment is created with. What the open one measures is reported by
+            // the fragmentation figures beside it.
+            info.file_size_setting = capacity_[i].file_size;
             info.file_count = catalogs_[i].size();
             info.current_entries = container_stats_[i].current_size;
             info.historical_inserts = container_stats_[i].total_inserts;
@@ -2600,42 +2644,6 @@ reference_map_t const& database_impl::reference_map() const {
     return *static_cast<reference_map_t const*>(reference_container_);
 }
 
-size_t database_impl::find_optimal_buckets_reference(fs::path const& file_path,
-                                                    size_t file_size,
-                                                    size_t initial_buckets) {
-    log::debug("Finding optimal buckets for reference container (file size: {})...", file_size);
-
-    size_t left = 1;
-    size_t right = initial_buckets;
-    size_t best_buckets = left;
-
-    while (left <= right) {
-        size_t mid = left + (right - left) / 2;
-
-        fs::path const temp_file = file_path / fmt::format("temp_reference_{}_{}.dat", file_size, mid);
-        try {
-            bip::managed_mapped_file segment(bip::open_or_create, temp_file.c_str(), file_size);
-
-            (void)segment.find_or_construct<reference_map_t>("temp_map")(
-                mid,
-                outpoint_hash{},
-                outpoint_equal{},
-                segment.get_allocator<std::pair<raw_outpoint const, reference_value>>()
-            );
-
-            best_buckets = mid;
-            left = mid + 1;
-            log::trace("  {} buckets OK, trying more...", mid);
-        } catch (boost::interprocess::bad_alloc const&) {
-            right = mid - 1;
-        }
-
-        fs::remove(temp_file);
-    }
-
-    log::debug("Optimal buckets for reference container: {}", best_buckets);
-    return best_buckets;
-}
 
 result<> database_impl::reference_open_existing(size_t version) {
     auto const file_name = db_path_ / fmt::format(reference_data_file_format, version);
@@ -2654,6 +2662,7 @@ result<> database_impl::reference_open_existing(size_t version) {
 
     reference_segment_ = std::move(*opened);
     reference_container_ = *found;
+    reference_rehash_watch_.reset((*found)->bucket_count());
     reference_current_version_ = version;
     return {};
 }
@@ -2702,7 +2711,7 @@ result<> database_impl::reference_create(size_t version) {
     }
 
     auto* map = segment->construct<reference_map_t>(map_object_name, std::nothrow)(
-        reference_min_buckets_ok_,
+        capacity_for_reference(),
         outpoint_hash{},
         outpoint_equal{},
         segment->get_allocator<typename reference_map_t::value_type>()
@@ -2714,6 +2723,7 @@ result<> database_impl::reference_create(size_t version) {
 
     reference_segment_ = std::move(segment);
     reference_container_ = map;
+    reference_rehash_watch_.reset(map->bucket_count());
     reference_current_version_ = version;
     published = true;
     return {};
@@ -2758,11 +2768,11 @@ bool database_impl::reference_can_insert_safely() const {
 
     auto const& map = reference_map();
 
-    if (map.bucket_count() > 0) {
-        float next_load = float(map.size() + 1) / float(map.bucket_count());
-        if (next_load >= map.max_load_factor() * 0.95f) {
-            return false;
-        }
+    // As in full mode: the open map's own bucket count, in integers, inclusive.
+    // Reference is already past 2^24 buckets in production, where a float can no
+    // longer represent one exactly.
+    if (map.bucket_count() > 0 && map.size() >= max_entries_for(map.bucket_count())) {
+        return false;
     }
 
     if (reference_segment_) {
@@ -3297,8 +3307,6 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
     while (max_retries > 0) {
         try {
             auto& map = reference_map();
-            [[maybe_unused]] size_t bucket_count_before = map.bucket_count();
-
             auto [it, inserted] = map.emplace(key, val);
             if (!inserted) {
                 log::warn("reference_insert_typed: duplicate key at height {}, outpoint={}",
@@ -3307,15 +3315,16 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
             if (inserted) {
                 ++entries_count_;
 
+                // As in full mode, and for the same reason.
+                bool const rehashed = note_rehash_if_grown(
+                    reference_container_kind, reference_rehash_watch_, map.bucket_count());
+
 #ifdef UTXOZ_STATISTICS_ENABLED
                 ++container_stats_[0].total_inserts;
                 ++container_stats_[0].current_size;
                 ++container_stats_[0].value_size_distribution[sizeof(uint32_t) * 2];
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[0];
-
-                if (map.bucket_count() != bucket_count_before) {
-                    ++container_stats_[0].rehash_count;
-                }
+                if (rehashed) ++container_stats_[0].rehash_count;
 #endif
 
                 reference_catalog_.metadata(reference_current_version_).update_on_insert(key, height);
