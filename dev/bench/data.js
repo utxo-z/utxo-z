@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786719882281,
+  "lastUpdate": 1786727834527,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -15924,6 +15924,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 53.05,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b3cf6cb91f50796d3ab8201b604b8767b04dfcb6",
+          "message": "feat: an instrument that answers how large a segment has to be, instead of inheriting one (#133)\n\nThe file sizes were chosen once and everything since has been fitted into them.\nThis asks the question the other way round — given a class and a target bucket\ncount, how many bytes does the segment need to build and operate that map — so a\nsize can be decided rather than inherited.\n\n`utxoz_sizing` is diagnostic only. It is never installed, nothing a database does\ndepends on it, and it is allowed to see `bad_alloc` precisely because it is the\none place that may: finding the smallest segment that works means asking segments\nthat do not. `configure()` must never learn its sizes that way, which is the\nreason this exists apart from it.\n\n## Three parts, not one number\n\nA single figure from a bisection hides its own assumptions, so the estimate is\ncomputed and broken down, the minimum is measured, and the difference between them\nis reported as overhead rather than smoothed away. A reader can check the\narithmetic against the measurement and see which half they are trusting. On Linux\nthe overhead came to 1743 bytes against a 1276 MiB map — small, and now a number\nrather than a belief.\n\nThe search starts from the arithmetic instead of from nothing. Bisecting the whole\nplausible range would build a 1.2 GiB table thirty times to learn what one\ncalculation and a dozen trials already say; it brackets around the estimate and\ncloses to a precision it reports, because a file size should not be chosen on the\nlast byte.\n\n## Building is not operating\n\n`--fill` inserts up to the rotation threshold and checks the bucket count never\nmoved. That is the half a construction test cannot reach: a segment can hold the\narrays and still run out when the entries arrive. At the production step for\ncontainer 0 it inserted 13,074,431 entries with no rehash, which is the property\nthe policy will rest on.\n\nIt also explains a figure that would otherwise look wrong. Constructing the map\ntouches the group metadata and leaves the slots alone, so a 1339 MiB file reports\n16 MiB of blocks until it is filled. Logical size and physical blocks are reported\nseparately for that reason, and Windows says `unavailable` rather than offering the\nlogical size as consumption — a number that reads like a measurement and is not.\n\n## The classes come from the geometry\n\nThe dispatch enumerates the containers by hand, because each is a distinct type,\nso it is pinned twice: the size list and the count. Changing `container_sizes`\nstops this compiling rather than leaving an instrument quietly measuring a geometry\nthat no longer exists. Verified by changing it.\n\nEleven cases exercise the instrument at small steps — the ladder, capacity to\nbucket count, every class, monotonicity, the recommended size building and the\nfloor being a floor, the next step not fitting, the fill not rehashing, nothing\nleft behind, seven bad command lines each named in its error, and the JSON parsing\nand landing where it was asked to. The production figures are a lane that runs\nonce per platform and uploads its JSON, rather than a suite that builds gigabyte\ntables in every case.\n\n## Build\n\nNothing here uses `CMakeUserPresets.json`. Two Conan installs in one checkout give\ntwo presets with one name, and `cmake --build --preset` then fails or, worse,\nsilently runs a binary from the other configuration — which happened during this\nwork and nearly turned a mutation that was caught into one reported as missed. The\nlane names the executable it ran.\n\nSuites: 237 cases with statistics, 232 without.\n\n## It was not measuring what it said\n\n`try_build` constructed a map called \"m\" in an otherwise empty segment. Production\nplaces a stamp first and constructs the map under `map_object_name`, and both\nconsume space — so the floor being reported was the floor for a file the store\nwould never have written.\n\nThere is one build helper now, used by the search, the physical measurement, the\nfill and the growth probe, and it does what `create_container` does in the order\nit does it: segment, stamp with a fixed identity, then the map under the real name\nwith the real allocator. The numbers moved by less than the precision — the\nallocator had slack the stamp fits into — but the report now measures the thing it\nnames.\n\n## Coexistence is asked, not inferred\n\n`free_after >= 2 * (slots + metadata)` is arithmetic about free bytes, and what\nthe policy needs to know is whether the allocator will actually satisfy a growth.\nSo the map is built in the segment, seeded past any empty-map shortcut, and asked\nto `rehash` to the next bucket count. What is reported is what happened, and by\nwhich method.\n\nKept separate from `next_builds_alone`, because they are different questions: one\nis whether the larger map could ever live there, the other whether Boost can get\nto it from the map that is already in place.\n\nThat measurement is also what `--segment` is for. Pointed at the file that exists\nrather than the one the tool would recommend, it answers the question that started\nall of this — and the answer is not a deduction any more:\n\n    container 0, 7 864 319 buckets in today's 2 GiB   → it grows on its own: YES\n    container 0, 15 728 639 buckets in 1339.80 MiB    → no\n    reference,   7 864 319 buckets in today's 4 GiB   → it grows on its own: YES\n\n## An exception is not a measurement\n\n`catch (std::exception)` turned a permission error, a full filesystem or a bug\ninto \"does not fit\", and the number that came out looked exactly like a real one.\nOnly `bad_alloc` now means capacity; anything else aborts with a diagnostic and\nits own exit code, so a caller can tell \"it does not fit\" from \"nothing was\nmeasured\". The build at the recommended size no longer swallows its failure —\nreporting on a file with no map in it is worse than reporting nothing — and\n`--fill` names the error rather than leaving `filled: false` unexplained.\n\n## The floor is a bracket, and says so\n\nThe search now keeps both ends it tried: a size that did not build, and one that\ndid. Both are re-tried and reported with the result, the precision is their\ndistance, and the upper end is called an upper bound rather than \"the minimum\",\nbecause the minimum is a byte nothing tested. A mutation that lets the lower end\nbe accepted fails the suite.\n\nThe margin rounds up instead of truncating. `value / 100 * percent` loses up to a\nhundred bytes per point, and this is a safety bound.\n\n## Measured again\n\n    class 48, 15 728 639 buckets\n      bracket    1276.00 MiB did not build, 1276.00 MiB did  (±2552 bytes, 22 attempts)\n      overhead   1743 bytes\n      margin 5%  63.80 MiB          recommended  1339.80 MiB\n      filled     13 074 431 entries, bucket_count unchanged, 390 s\n      next step  31 457 279 neither builds alone nor is reachable by growth\n\nSuites: 237 cases with statistics, 232 without.\n\n## Three ways a failure could still look like a measurement\n\nA stamp that would not go down was folded into the search as one more size that\ndid not fit. It is fifty-six bytes at the start of a segment already sized for a\nmap thousands of times larger, so \"there was no room\" is not what a failure there\nmeans — a permission error or a name collision would have been counted as\ncapacity. `nullopt` is now reserved for the map: the stamp failing throws with its\nerror code, and `--fail-stamp` reaches that path for a reason unrelated to space,\nso the refusal is tested rather than asserted.\n\nA `--fill` that was asked for and did not finish reported `filled: false` beside a\nsuccessful exit code. A script reading that code would accept a report that never\ndid what it was told. It is fatal now, with the cause named and the temporary\nremoved.\n\nAnd every full-mode class stamped its segment as container 0. The kind travels\nwith the class now, from the same dispatch the sizes come from, and the stamp is\nread back after building — a segment identified as something it is not is a\nsegment the store would refuse, and measuring one is measuring the wrong file.\n\nThe small path through the fill was re-run rather than the six-minute one: nothing\nhere changes layout or capacity, and the figures are unmoved.\n\nSuites: 240 cases with statistics, 235 without.\n\n## Zero is not \"unset\"\n\nThree options used zero as though it meant absence, and one of them could hang the\ntool rather than answer wrongly: with `--precision 0` and a bracket one byte wide,\nthe midpoint is the lower bound, the lower bound is set to itself, and the search\nnever ends. All three are refused on the way in — precision, buckets and segment —\nand the search keeps a one-byte floor of its own so an internal caller cannot\nreintroduce it. `--segment` is an optional now rather than a sentinel, so a value\nof zero is a mistake and not a missing option.\n\nThe precision case has its own test, and it is timed: a case that only checked the\nmessage would pass while the tool ran forever.\n\n## What the lane runs\n\n`find -name 'utxoz_sizing*'` would also match a `.pdb`, an object file or a stale\ncopy from another configuration, and the first one found would be measured with\nnobody the wiser. It is the exact name now, executable on Unix and `.exe` on\nWindows — and if there are none or more than one, the lane says so and stops\nrather than choosing.\n\n## A writer that does not depend on its callers\n\nEvery string this tool emits is validated or a literal, so nothing could have got\ninto the JSON unescaped. That is a fact about today's callers rather than about\nthe writer, and one nobody could safely add a field to. Strings are escaped —\nquotes, backslash, the three whitespace controls and everything below U+0020 —\nand `fill_error` is gone from the report altogether: a fill that failed does not\nproduce a report, so carrying its message into one described a state that cannot\nexist.\n\nMeasurements unmoved: 1276.00 MiB floor, 4296 bytes of overhead, 1339.80 MiB\nrecommended. Suites: 241 cases with statistics, 236 without.\n\n## bash 3.2\n\nThe exact-name lookup used `mapfile`, which is a bash 4 builtin. macOS runners\nship bash 3.2, so the step died with \"command not found\" after all 244 tests on\nthat platform had already passed — a green suite followed by a red job, for a\nshell feature.\n\nReplaced with a form 3.2 has, and checked against all three answers it has to\ngive: nothing found, exactly one, more than one. No other script in the repository\nuses `mapfile` or `readarray`.",
+          "timestamp": "2026-08-14T19:12:46+02:00",
+          "tree_id": "c0d12e2ad716a6a630fc0130e572abca8e1a12bb",
+          "url": "https://github.com/utxo-z/utxo-z/commit/b3cf6cb91f50796d3ab8201b604b8767b04dfcb6"
+        },
+        "date": 1786727833938,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 282827.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 477888.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 268409.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 505809.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 483.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 536.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12535380.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 25989469.68,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 11900411.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12074.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2313761.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2392338.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 70755.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 13150.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2710.93,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3403.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2824.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 56.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 56.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 56.39,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 56.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 56.19,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 56.11,
             "unit": "ops/sec"
           }
         ]
