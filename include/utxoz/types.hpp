@@ -77,7 +77,7 @@ using output_data_span = std::span<uint8_t const>;
 /**
  * @brief Container sizes for different UTXO value sizes
  */
-inline constexpr std::array<size_t, 5> container_sizes = {48, 94, 128, 256, 10240};
+inline constexpr std::array<size_t, 5> container_sizes = {48, 96, 128, 256, 10240};
 
 /**
  * @brief Effective data capacity for a given container size

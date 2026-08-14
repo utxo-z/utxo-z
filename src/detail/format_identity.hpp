@@ -227,9 +227,14 @@ static_assert(sizeof(segment_manager_t) > 0,
  * assertion below is what makes forgetting impossible: change the geometry
  * without changing this number and the build stops.
  */
-inline constexpr uint32_t geometry_id = 1;
+/// 2: the second class became 96 rather than 94. The object already occupied 96
+/// — 94 rounds up — so the two bytes it gained were padding nobody could use.
+/// Naming the class 96 turns them into payload and costs nothing, but it moves
+/// where a value lives: a 90- or 91-byte output used to go to container 2 and now
+/// fits in container 1. Databases written under geometry 1 are refused.
+inline constexpr uint32_t geometry_id = 2;
 
-static_assert(container_sizes == std::array<size_t, 5>{48, 94, 128, 256, 10240},
+static_assert(container_sizes == std::array<size_t, 5>{48, 96, 128, 256, 10240},
               "the container geometry changed; bump geometry_id and update this assertion, "
               "because existing databases were written under the old one");
 

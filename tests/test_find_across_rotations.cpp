@@ -71,7 +71,7 @@ utxoz::raw_outpoint random_outpoint(std::mt19937_64& rng, uint32_t output_index)
 ///             container-3/4 version files manageable in the large-scale run.
 enum class size_profile { wide, realistic };
 
-/// Container capacities are 43 / 89 / 123 / 250 / 10234 bytes.
+/// Container capacities are 43 / 91 / 123 / 250 / 10234 bytes.
 size_t pick_value_size(std::mt19937_64& rng, size_profile profile) {
     std::uniform_int_distribution<int> pick(0, 999);
     int const p = pick(rng);

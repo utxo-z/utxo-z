@@ -28,6 +28,7 @@ add_executable(utxoz_tests
     test_path_encoding.cpp
     test_named_object_guard.cpp
     test_format_barrier.cpp
+    test_container_selection.cpp
     test_value_initialisation.cpp
     test_failpoint_reset.cpp
     test_fixture_generator.cpp

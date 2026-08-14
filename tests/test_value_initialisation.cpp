@@ -23,9 +23,11 @@
  *    the claim that matters and the one the first check only implies.
  *
  * The second covers a region no member names. `sizeof` rounds a size class up to
- * the alignment, so a 94 container occupies 96 and the two bytes it gains are
- * padding: copied, written, and reachable by nothing except the object
- * representation.
+ * the alignment, so a class that is not a multiple of it — 94 occupies 96 —
+ * gains padding: copied, written, and reachable by nothing except the object
+ * representation. No class in the current geometry is such a size, which is
+ * exactly why 94 is still tested here: the guarantee is about the object, and a
+ * branch that is only ever unreachable is a branch nobody has checked.
  */
 
 #include <algorithm>
@@ -204,7 +206,8 @@ constexpr size_t payload_for(size_t index) {
 
 TEST_CASE("a value built on contaminated storage keeps none of it", "[value]") {
     check_tail_is_defined<48>(8);
-    check_tail_is_defined<94>(8);
+    check_tail_is_defined<96>(8);
+    check_tail_is_defined<94>(8);   // not a container class; the padding witness
     check_tail_is_defined<128>(8);
     check_tail_is_defined<256>(8);
     check_tail_is_defined<10240>(8);
@@ -216,14 +219,20 @@ TEST_CASE("a full payload leaves nothing undefined either", "[value]") {
     // Asked of the type rather than recomputed from its layout: a duplicate of
     // that arithmetic would go on compiling after the members changed, and would
     // then be testing a boundary that is no longer the boundary.
+    check_tail_is_defined<96>(utxo_value<96>{}.data.size());
     check_tail_is_defined<94>(utxo_value<94>{}.data.size());
     check_tail_is_defined<10240>(utxo_value<10240>{}.data.size());
 }
 
 TEST_CASE("the padding a size class gains is real, and is defined", "[value]") {
-    // 94 is the one that rounds up, and it is the reason this is checked through
-    // the object representation rather than through the members.
+    // No container class rounds up any more — 96 is what 94 used to round up to,
+    // and naming the class 96 turned the difference into payload. So the witness
+    // is a size that is not a container class, because the guarantee belongs to
+    // the object and not to whichever sizes the geometry happens to list.
     STATIC_REQUIRE(sizeof(utxo_value<94>) == 96);
+    STATIC_REQUIRE(utxo_value<94>{}.data.size() == 89);
+    STATIC_REQUIRE(sizeof(utxo_value<96>) == 96);
+    STATIC_REQUIRE(utxo_value<96>{}.data.size() == 91);
     STATIC_REQUIRE(sizeof(utxo_value<48>) == 48);
 
     auto const bytes = value_over_poison<94>(8);

@@ -70,8 +70,10 @@ came from residue, not from structure.
 
 `set_data()` now defines everything past the payload, in two regions: the unused
 tail of `data`, and the padding `sizeof` adds where a size class is not a multiple
-of the alignment — 94 occupies 96, and those two bytes are persisted like any
-other. `tests/test_value_initialisation.cpp` pins both, through the object
+of the alignment. No class in the current geometry is such a size — that is what
+geometry 2 fixed — but the guarantee belongs to the object rather than to whichever
+classes are listed, so the branch stays and a non-geometry size is tested against
+it. `tests/test_value_initialisation.cpp` pins both, through the object
 representation rather than through the members, and checks what actually reaches
 the file rather than only what the object holds.
 
@@ -109,6 +111,23 @@ used to live in one container now lives in another. A `static_assert` in
 so forgetting is not one of the options.
 
 Existing databases are refused with `geometry_mismatch` and have to be rebuilt.
+There is no migrator and there deliberately will not be one: a value's container
+is decided by its size, so migrating means reading every entry and writing it
+somewhere else — which is rebuilding, with the added risk of a tool that thinks it
+is doing something safer.
+
+**Geometry 2** is the second class becoming 96 rather than 94. The object always
+occupied 96, because 94 rounds up to the alignment, so the two bytes it gained
+were padding no caller could reach: `sizeof(utxo_value<94>)` and
+`sizeof(utxo_value<96>)` are both 96, and the stored pair is 132 either way.
+Naming the class 96 turns those bytes into payload — capacity goes from 89 to 91 —
+at no cost in bytes per slot, entries per file or anything else the capacity
+profile measures.
+
+It is still a format change, because it moves where a value lives: a 90- or
+91-byte output used to go to container 2 and now fits in container 1. A database
+written under geometry 1 is refused with `geometry_mismatch` and has to be rebuilt
+from the chain.
 
 ### Bump `map_layout_epoch`
 

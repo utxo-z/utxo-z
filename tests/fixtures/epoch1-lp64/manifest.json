@@ -3,7 +3,7 @@
   "written_by": {
     "boost_version": 109100,
     "config_format": 2,
-    "geometry_id": 1,
+    "geometry_id": 2,
     "map_layout_epoch": 1,
     "hash_epoch": 1,
     "platform_abi_id": 3060504794,
@@ -35,19 +35,19 @@
         {"container_kind": 4, "generation": 0, "entries": 70, "logical_digest": "93fa81c972fc243cafecd7c1152f958f610aef5dc1ee14d699ee60141be1762c"}
       ],
       "files": [
-        {"name": "cont_0_v00000.dat", "bytes": 10485760, "sha256": "5b8eba6f87ca3d37d0297fe58464a8a23266e924d8a9bcd4fa9204d226963dff"},
-        {"name": "cont_0_v00001.dat", "bytes": 10485760, "sha256": "8e3f8a6760f196a33e3f6f297a2ffec2f03338456bb6b117d3ebb6722961cedf"},
-        {"name": "cont_1_v00000.dat", "bytes": 10485760, "sha256": "82a5adf0a3182d4d70bc057e26c180fd6a8d07c2ae4a0ce3647d000a997d8d35"},
-        {"name": "cont_2_v00000.dat", "bytes": 10485760, "sha256": "f1e16ee33f32da708ce38f36a0acb70731cf2c3d0a73b848dfa049f3fee0c576"},
-        {"name": "cont_3_v00000.dat", "bytes": 10485760, "sha256": "5b890c50d56b844e8d630a2faff04aeb4c66a1eced1531cd127d48709b9ad765"},
-        {"name": "cont_4_v00000.dat", "bytes": 10485760, "sha256": "50ead22322d6d7018936b29a99b821e1e732cac12a8267b15aab32ffd7aae01d"},
+        {"name": "cont_0_v00000.dat", "bytes": 10485760, "sha256": "006a249de65c3b691691c2811aa3b43928f7eedb63e91b89f07aaa1d2610e383"},
+        {"name": "cont_0_v00001.dat", "bytes": 10485760, "sha256": "930f40daeae1fd30f3ec834495a87a326bd16f1e7615ef9d1fedb638234ce3cd"},
+        {"name": "cont_1_v00000.dat", "bytes": 10485760, "sha256": "db08332ed7841feebc96559c8924147b445804334c8a0265aaf3ef280ab8f82f"},
+        {"name": "cont_2_v00000.dat", "bytes": 10485760, "sha256": "d63196b06b3000a703b8a6c8c74203b8c85ae8d595b3ab8096be0a40e1592f07"},
+        {"name": "cont_3_v00000.dat", "bytes": 10485760, "sha256": "988e2552f556304d730b98b3ecd5ce8a4b0c9637f5753b83dd63db2540d0efcd"},
+        {"name": "cont_4_v00000.dat", "bytes": 10485760, "sha256": "da15b1129d14c0f899242807b5090f9bd428f65f95fc695a835211b74751b6db"},
         {"name": "meta_0_v00000.dat", "bytes": 100, "sha256": "8dba9c44ae951a585829d5b6e8386313235d82cbf8ba21283cb326f5832df0ed"},
         {"name": "meta_0_v00001.dat", "bytes": 100, "sha256": "9b24c60d3171ec935709d6412cc75f3613350a4afa55196786c85e2a20449222"},
         {"name": "meta_1_v00000.dat", "bytes": 100, "sha256": "df3c5d551820f96e6815a5429ce42c834e771c86aede7760caaf10cd84469fbb"},
         {"name": "meta_2_v00000.dat", "bytes": 100, "sha256": "54af8245ddc7893681b135ef5ba5dd71b58b0f092da23d012403b01b2ff69fe2"},
         {"name": "meta_3_v00000.dat", "bytes": 100, "sha256": "77508ef6dcf7b5f1e179f0752e512e3e6ab6a59348a47964c8acdef5dd602209"},
         {"name": "meta_4_v00000.dat", "bytes": 100, "sha256": "f8fdf7949d0d06ff2888cb002cab9634c964742100ead859a244e09979eec32a"},
-        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "449d67bf177736c501dabcaa1c0e6e538ac1632853fca5cecb7ea7c6e178c08e"}
+        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "1045deb4968d481ed14bbea9d6f886b28353a76871474f252bd5eb2aaf2f7015"}
       ]
     },
     {
@@ -60,11 +60,11 @@
         {"container_kind": 4294967295, "generation": 1, "entries": 210, "logical_digest": "9395732be72bc7b116119d2040fdc5cc0384124d0bd57f24c62f26c8fa7b8061"}
       ],
       "files": [
-        {"name": "compact_v00000.dat", "bytes": 10485760, "sha256": "2ecb2e3720856ae5f2ddb905379c31269dc9853640bf90d4689581357bf4e63a"},
-        {"name": "compact_v00001.dat", "bytes": 10485760, "sha256": "5277486f04ecdf001f2f0e378ed814690d79b9e86486c77f2ec13e520a4d9d15"},
+        {"name": "compact_v00000.dat", "bytes": 10485760, "sha256": "b613deba5dc3bf23eee69242b719877e8206b3f83626d30992cc5b327263afeb"},
+        {"name": "compact_v00001.dat", "bytes": 10485760, "sha256": "56ebf3ba7d0022860b75b59afde3b51a5811cdb199e0627a8b557cc1049f01c8"},
         {"name": "meta_compact_v00000.dat", "bytes": 100, "sha256": "20d6ccdcc2f11565cfda0c13f69fd564daabf9f3d48b63095fea30f177aacc7c"},
         {"name": "meta_compact_v00001.dat", "bytes": 100, "sha256": "002933537b864199f09fe5265828c3a663b82d10501199cd7b37488920233199"},
-        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "017792d4bde974ba5330b023423c253338a86a1a45b4ac2a06ebf4c0a74a00dd"}
+        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "2c07f1d48d697889fe207bbeb97234f61e9ab97da1ad0eb40147cee2154b8aad"}
       ]
     }
   ]
