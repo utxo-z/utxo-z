@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786712078701,
+  "lastUpdate": 1786719882281,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -15785,6 +15785,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 53.81,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0764ce8a74e466e865d4d747d671ef1bc05036c9",
+          "message": "feat!: the second container class is 96, and stops wasting the two bytes it always had (#132)\n\n`utxo_value<94>` never occupied 94 bytes. Four for the height, one for the length\nand eighty-nine of payload come to 94, which rounds up to the alignment — so the\nobject has always been 96, and the two bytes at the end were padding no caller\ncould reach. They were copied, written to disk, and, until recently, uninitialised.\n\nNaming the class 96 turns them into payload. Measured, and the whole of it:\n\n    sizeof(utxo_value<94>) = 96      sizeof(utxo_value<96>) = 96\n    sizeof(pair with 94)   = 132     sizeof(pair with 96)   = 132\n    payload usable  94 -> 89         96 -> 91\n\nSame object, same stored pair, same bytes per slot, same entries per file. Two more\nbytes a caller can use, at no cost anywhere the capacity profile measures.\n\n## It is still a format change\n\nCapacity 89 becomes 91, so a 90- or 91-byte output used to go to container 2 and\nnow fits in container 1. That is a value living somewhere else, which is what\n`geometry_id` is for: it moves from 1 to 2, and a `static_assert` on\n`container_sizes` makes forgetting impossible rather than merely unlikely.\n\n`map_layout_epoch` and `hash_epoch` do not move, and should not: the map layout is\nbyte-identical and no key changes bucket. Only where a value is stored changes.\n\nDatabases written under geometry 1 are refused with `geometry_mismatch` and have\nto be rebuilt from the chain. There is no migrator and deliberately will not be\none — a value's container is decided by its size, so migrating means reading every\nentry and writing it elsewhere, which is rebuilding with the added risk of a tool\nthat believes it is doing something safer.\n\n## The line, tested where it moved\n\nFour payloads, because the classes are coarse and almost every size sits in the\nmiddle of one and proves nothing: 89 fitted before and fits now; 90 and 91 have\ncrossed; 92 has not. Each is inserted, read back byte for byte — a value in the\nright container missing its last byte satisfies every count in the store — and\nthen the container file it should have landed in is required to exist, because\n\"it reads back\" is equally true of the wrong container.\n\nThe last size each of the five classes accepts is checked too, so a change to any\nof them has to come through this test.\n\n## What keeps the padding honest\n\nNo class in the geometry rounds up any more, so the branch in `set_data()` that\nclears padding now compiles to nothing. It stays, and 94 stays tested beside it as\na size that is not a container class: the guarantee is about the object, and a\nbranch that is only ever unreachable is a branch nobody has checked. The tail of\n`data` is still cleared for every class, which is where nearly all of it was.\n\nFixtures regenerated under geometry 2; two runs at a fixed identity produce\neighteen identical files. Suites: 225 cases with statistics, 220 without.\n\n## Two tests that were not testing what they said\n\nChecking that `cont_1_v00000.dat` and `cont_2_v00000.dat` exist proves nothing\nabout where any particular key went, because the same test fills both. And\n`find()` searches every container, so it answers \"the store has this\" and never\n\"it is here\". Between them, the placement half of these cases was unchecked.\n\nThey now open the segments and look in the named map with the type that container\nactually holds: each key is required to be in the container it belongs to, absent\nfrom every other one, and to read back byte for byte from there.\n\nThe upper edge was missing too. \"Every class boundary\" inserted only the capacity,\nwhich leaves the half that actually moves when a class changes untested. Each\nnon-final class now gets `capacity` and `capacity + 1`, and the largest class gets\none byte past it — which must be refused with `value_too_large` and must not\npersist the key anywhere.\n\n## And geometry 1 by name\n\nThe existing case moves the geometry up by one, which proves \"some other geometry\nis refused\". It does not pin the incompatibility this change introduces. Geometry\n1 is every database written before the second class became 96, and it is what an\noperator is holding, so it is refused by name — with container opens forced to\nfail, so the refusal is an ordering and not merely an outcome: nothing is mapped\nbefore the config is read and rejected.\n\nFour mutations, each confirmed to fail the suite:\n\n- capacity 91 reverted to 89 — fails to build, on the assertion that pins it;\n- 90 and 91 routed back to container 2 with the capacities left intact — 2 of 3;\n- `capacity + 1` kept in the class below — 2 of 3;\n- geometry 1 accepted — 1 of 25 in the barrier suite;\n- a value too large truncated into the last class instead of refused — 1 of 3.\n\nSuites: 226 cases with statistics, 221 without.",
+          "timestamp": "2026-08-14T16:59:53+02:00",
+          "tree_id": "5371b523d46208e59a9755938ca62acd5b778e6f",
+          "url": "https://github.com/utxo-z/utxo-z/commit/0764ce8a74e466e865d4d747d671ef1bc05036c9"
+        },
+        "date": 1786719881934,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 271108.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 269698.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 235856.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 358050.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 387.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 452.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12765510.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 26051730.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12419420.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12943.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2092239.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2297299.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 65203.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 6255.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 1972.86,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3019.21,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2727.39,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 52.74,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 52.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 52.94,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 52.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 53.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 53.05,
             "unit": "ops/sec"
           }
         ]
