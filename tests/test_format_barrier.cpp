@@ -241,6 +241,28 @@ TEST_CASE("reference mode records what it was written under", "[format]") {
 // B. Refused on what the config says, before a segment is mapped
 // =============================================================================
 
+TEST_CASE("geometry 1 is refused by name, not merely as some other geometry",
+          "[format]") {
+    // The case above proves "a geometry that is not ours is refused". This one
+    // proves the incompatibility this build actually introduced: geometry 1 is
+    // every database written before the second class became 96, and it is what an
+    // operator will be holding. A test that only moves the number up would stay
+    // green if 1 were ever quietly accepted.
+    fresh_db f("cfg_geometry_1");
+    REQUIRE(utxoz::detail::geometry_id == 2);
+    rewrite_config(f.dir, [](store_config& c) { c.geometry_id = 1; });
+
+    // Container opens forced to fail, so the refusal below is an ordering and not
+    // just an outcome: the config is read and rejected before anything is mapped.
+    // A database from another geometry must not have its segments touched.
+    utxoz::detail::failpoints::scoped_reset const disarm;
+    utxoz::detail::failpoints::fail_container_open.store(true, std::memory_order_relaxed);
+
+    auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::geometry_mismatch);
+}
+
 TEST_CASE("the config refuses a geometry this build does not write", "[format]") {
     fresh_db f("cfg_geometry");
     rewrite_config(f.dir, [](store_config& c) { c.geometry_id += 1; });

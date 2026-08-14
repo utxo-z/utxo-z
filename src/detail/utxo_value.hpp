@@ -100,11 +100,17 @@ struct utxo_value {
     }
 };
 
-// What `sizeof` actually reserves for each container, pinned. 94 is the one that
-// rounds up, and the two bytes it gains are the padding set_data() defines above.
-// Written out rather than derived so that a change to the members shows up here
-// as a failing build instead of as a quietly different file on disk.
+// What `sizeof` actually reserves for each container, pinned. Every class in the
+// current geometry is a multiple of the alignment, so each reserves exactly what
+// it is named — which is the point of 96: as 94 it reserved 96 anyway and wasted
+// the difference. Written out rather than derived so that a change to the members
+// shows up here as a failing build instead of as a quietly different file on disk.
 static_assert(sizeof(utxo_value<48>) == 48);
+static_assert(sizeof(utxo_value<96>) == 96);
+
+// Not a container class, and kept deliberately: a size that is not a multiple of
+// the alignment still has to be handled correctly, and this is the witness that
+// the padding branch above is real rather than merely unreachable.
 static_assert(sizeof(utxo_value<94>) == 96);
 static_assert(sizeof(utxo_value<128>) == 128);
 static_assert(sizeof(utxo_value<256>) == 256);
