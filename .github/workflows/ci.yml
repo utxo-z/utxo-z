@@ -262,6 +262,27 @@ jobs:
         run: |
           ctest --preset ${{ matrix.build-preset }} --output-on-failure
 
+      # The invariant, asked for by name on every platform and in both
+      # configurations. It runs inside the suite above too, but a dedicated step
+      # means a run reports on it rather than burying it among two hundred cases:
+      # the store's answer to a full container is a new generation, and a map that
+      # grew instead is the one defect this whole policy exists to prevent.
+      - name: 🧪 No generation's bucket count moved
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            suite=$(find build -type f -name 'utxoz_tests.exe' -print -quit)
+          else
+            suite=$(find build -type f -name 'utxoz_tests' -perm -u+x -print -quit)
+          fi
+          if [[ -z "${suite}" ]]; then
+            echo "the test binary was not found" >&2
+            exit 1
+          fi
+          echo "suite: ${suite}"
+          "${suite}" '[capacity]' --reporter compact
+
       # The production figures, measured once per platform rather than in every
       # case. What differs between them is not the arithmetic — slots and group
       # metadata are the same everywhere — but the machinery the segment persists
@@ -317,6 +338,53 @@ jobs:
           }
           measure 48 7864319
           measure 48 15728639
+
+          # And the production decision, checked rather than printed. These are
+          # the numbers a new container 0 gets; a lane that only reported them
+          # would be a lane nobody reads until the day they are wrong.
+          python3 - "sizing-report/48-15728639.json" <<'CHECK'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          policy = 1405091840          # 1340 MiB
+          problems = []
+          if d["observed_minimum"] > policy:
+              problems.append("the certified floor %d does not fit in %d"
+                              % (d["observed_minimum"], policy))
+          if d["bucket_count"] != 15728639:
+              problems.append("bucket_count is %d" % d["bucket_count"])
+          if d["rotation_threshold"] != 13074431:
+              problems.append("the threshold is %d" % d["rotation_threshold"])
+          if d["next_bucket_count"] != 31457279:
+              problems.append("the next step is %d" % d["next_bucket_count"])
+          if d["next_builds_alone"]:
+              problems.append("the next step builds alone in the recommended size")
+          if d["next_coexists_via_rehash"]:
+              problems.append("the next step is reachable by growing the map")
+          if problems:
+              print("the measured policy does not match the one in the code:")
+              for p in problems:
+                  print("  -", p)
+              sys.exit(1)
+          print("container 0: floor %d fits in %d, %d buckets, rotates at %d, "
+                "next step neither builds nor grows"
+                % (d["observed_minimum"], policy, d["bucket_count"],
+                   d["rotation_threshold"]))
+          CHECK
+
+          # The same helper, driven through a fill, at a size a lane can afford.
+          "${tool}" --class 48 --step 10 --fill --format json > sizing-report/fill-check.json
+          python3 - "sizing-report/fill-check.json" <<'FILL'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          if not d["filled"] or d["rehashed_while_filling"]:
+              print("the fill did not complete without growing:", d)
+              sys.exit(1)
+          if d["entries_inserted"] != d["rotation_threshold"]:
+              print("the fill stopped short:", d["entries_inserted"], "of",
+                    d["rotation_threshold"])
+              sys.exit(1)
+          print("filled %d entries, bucket_count unchanged" % d["entries_inserted"])
+          FILL
           measure 96 3932159
           measure 96 7864319
           measure 128 3932159
@@ -822,6 +890,20 @@ jobs:
       - name: 🧪 Run tests
         run: |
           ctest --preset conan-release --output-on-failure
+
+      # Here too, and this is the job where it matters most: the rehash counter is
+      # compiled in whatever the build, precisely so that the configuration
+      # without statistics is not the one where nobody would notice.
+      - name: 🧪 No generation's bucket count moved
+        run: |
+          set -euo pipefail
+          suite=$(find build -type f -name 'utxoz_tests' -perm -u+x -print -quit)
+          if [[ -z "${suite}" ]]; then
+            echo "the test binary was not found" >&2
+            exit 1
+          fi
+          echo "suite: ${suite}"
+          "${suite}" '[capacity]' --reporter compact
 
       # The compatibility cases are only built when the fixtures are present, so
       # a mistake in that condition would take them out of the suite and leave

@@ -55,6 +55,7 @@
 
 #include <utxoz/types.hpp>
 
+#include "detail/capacity_policy.hpp"
 #include "detail/format_identity.hpp"
 #include "detail/segment_stamp.hpp"
 #include "detail/utxo_value.hpp"
@@ -82,9 +83,9 @@ static_assert(container_sizes == std::array<size_t, 5>{48, 96, 128, 256, 10240},
               "the geometry changed; update the dispatch in tools/sizing.cpp and "
               "re-measure, because every number this tool prints depends on it");
 
-/// One growth step of `unordered_flat_map`: the bucket counts it will actually
-/// use are `15·2^k − 1`, and each growth doubles.
-constexpr size_t bucket_step(unsigned k) { return (size_t(15) << k) - 1; }
+// `bucket_step` and `next_bucket_step` come from capacity_policy.hpp, which is
+// where the production policy reads them from too: a tool that measured a ladder
+// the store does not use would be measuring something else.
 
 /// Which step a bucket count is, or nothing if it is not one.
 std::optional<unsigned> step_of(size_t buckets) {
@@ -379,10 +380,13 @@ sizing_report measure(fs::path const& work, std::string class_name, size_t asked
     r.step = step_of(r.bucket_count);
     r.entries_at_max_load = size_t(double(r.bucket_count) * r.max_load_factor);
 
-    // The threshold the store rotates at: five per cent below the load Boost grows
-    // at. Mirrored from can_insert_safely(), and the whole point is that it is
-    // below the number above.
-    r.rotation_threshold = size_t(double(r.bucket_count) * r.max_load_factor * 0.95);
+    // The threshold the store rotates at, asked of the policy rather than derived
+    // again here. The two agree today — 133/160 is 0.875 × 0.95 — but a tool that
+    // recomputed it would report its own arithmetic on the day they stopped
+    // agreeing, and what this line is for is reporting what the store will do. The
+    // number above stays measured: that one is Boost's, not ours, and the whole
+    // point is that this one is below it.
+    r.rotation_threshold = size_t(max_entries_for(r.bucket_count));
 
     r.slot_bytes = r.bucket_count * r.sizeof_pair;
     r.metadata_bytes = (r.bucket_count / 15 + 1) * 16;
@@ -483,7 +487,7 @@ sizing_report measure(fs::path const& work, std::string class_name, size_t asked
         }
     }
 
-    r.next_bucket_count = r.bucket_count * 2 + 1;
+    r.next_bucket_count = next_bucket_step(r.bucket_count);
 
     // Can the step above be built at all in the recommended size?
     r.next_builds_alone =

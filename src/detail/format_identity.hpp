@@ -48,6 +48,7 @@
 
 #include <utxoz/types.hpp>
 
+#include "capacity_policy.hpp"
 #include "utxo_value.hpp"
 
 namespace utxoz::detail {
@@ -227,12 +228,33 @@ static_assert(sizeof(segment_manager_t) > 0,
  * assertion below is what makes forgetting impossible: change the geometry
  * without changing this number and the build stops.
  */
-/// 2: the second class became 96 rather than 94. The object already occupied 96
-/// — 94 rounds up — so the two bytes it gained were padding nobody could use.
-/// Naming the class 96 turns them into payload and costs nothing, but it moves
-/// where a value lives: a 90- or 91-byte output used to go to container 2 and now
-/// fits in container 1. Databases written under geometry 1 are refused.
-inline constexpr uint32_t geometry_id = 2;
+/// What `geometry_id` identifies, from 3 onwards: the **whole storage geometry**,
+/// not only the size classes. Both `container_sizes` and `production_capacity`
+/// move it — the assertions below make either one impossible to change quietly. That is the classes themselves, which payload goes
+/// to which of them, the capacity a new segment's map is built with, and the size
+/// of the segment. They are one decision — a capacity without the file size it
+/// needs is a rehash waiting for the entries — so they are identified together.
+///
+/// 1: classes {48, 94, 128, 256, 10240}.
+/// 2: the second class became 96. The object already occupied 96 — 94 rounds up —
+///    so the two bytes it gained were padding nobody could use. Naming the class
+///    96 turned them into payload at no cost, but it moved where a value lives: a
+///    90- or 91-byte output went to container 2 and now fits in container 1.
+/// 3: the capacity policy. Container 0 holds 15 728 639 buckets in a segment of
+///    1340 MiB, chosen by measurement rather than by a bisection that read
+///    `bad_alloc` as an answer, and sized so that a growth cannot fit.
+///
+/// Everything before 3 is refused with `geometry_mismatch` and has to be rebuilt.
+/// There is no migrator, and there will not be one: a database's container
+/// assignment and its capacity are decided when it is written.
+inline constexpr uint32_t geometry_id = 3;
+
+static_assert(geometry_id != 3 || (production_capacity == geometry_3_capacity
+                                   && production_reference == geometry_3_reference),
+              "geometry 3 is a capacity policy as well as a set of classes. The whole "
+              "table is compared, not a list of fields somebody chose: a segment size, a "
+              "capacity or a bucket count that moves is a different geometry and needs a "
+              "new id");
 
 static_assert(container_sizes == std::array<size_t, 5>{48, 96, 128, 256, 10240},
               "the container geometry changed; bump geometry_id and update this assertion, "

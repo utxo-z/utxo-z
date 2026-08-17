@@ -7,6 +7,10 @@
  * @brief Utility functions implementation
  */
 
+#include <cassert>
+
+#include "detail/capacity_policy.hpp"
+#include "detail/log.hpp"
 #include <utxoz/utils.hpp>
 
 #include <algorithm>
@@ -14,8 +18,6 @@
 #include <cstring>
 
 #include <fmt/format.h>
-
-#include "detail/log.hpp"
 
 namespace utxoz {
 
@@ -77,3 +79,32 @@ size_t calculate_optimal_buckets(size_t element_count, float max_load_factor) {
 }
 
 } // namespace utxoz
+
+namespace utxoz::detail {
+
+bool detect_rehash(uint32_t container_kind, rehash_watch& watch, size_t now) {
+    if (watch.at_open == 0 || now == watch.last_reported) return false;
+
+    size_t const was = watch.last_reported;
+    watch.last_reported = now;
+    rehashes_observed.fetch_add(1, std::memory_order_relaxed);
+    log::error("container {} grew to {} buckets, from {} and originally {}. A "
+               "generation's bucket count is not supposed to change: the store makes a "
+               "new generation when one fills up, and compaction deals with the cost "
+               "later. The entry was written; this is a defect in the guard, not a "
+               "failure of this insert.",
+               container_kind, now, was, watch.at_open);
+    return true;
+}
+
+bool note_rehash_if_grown(uint32_t container_kind, rehash_watch& watch, size_t now) {
+    bool const grown = detect_rehash(container_kind, watch, now);
+
+    // Not in a release build, where the alternative to continuing is losing a
+    // node. In a build with assertions it stops here, because continuing to write
+    // into a store that has started rehashing under itself buries the evidence.
+    assert( ! grown && "a generation's bucket count changed");
+    return grown;
+}
+
+} // namespace utxoz::detail

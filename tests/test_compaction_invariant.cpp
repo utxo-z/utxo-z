@@ -344,10 +344,18 @@ TEST_CASE("a failed compaction leaves the database exactly as it was",
             // key lists concatenated, and apply_deletes() partitions unique keys.
             // Comparing with batch.size() would assert something the contract
             // does not promise, and would break the day the two lists overlap.
+            // Sorted and uniqued rather than searched linearly. The linear form
+            // was quadratic in the batch, which is two full generations — two
+            // hundred thousand keys since a generation of container 0 stopped
+            // being twelve thousand entries. It was six of this case's six and a
+            // half seconds in an optimised build, and it was what put the case
+            // past the twenty-minute budget under the sanitizers.
             std::vector<utxoz::raw_outpoint> distinct;
-            for (auto const& e : batch) {
-                if (std::ranges::find(distinct, e.key) == distinct.end()) distinct.push_back(e.key);
-            }
+            distinct.reserve(batch.size());
+            for (auto const& e : batch) distinct.push_back(e.key);
+            std::ranges::sort(distinct);
+            auto const dup = std::ranges::unique(distinct);
+            distinct.erase(dup.begin(), dup.end());
             auto const progress = db.apply_deletes(batch);
             CHECK(progress.unresolved.empty());
             CHECK(progress.absent.empty());

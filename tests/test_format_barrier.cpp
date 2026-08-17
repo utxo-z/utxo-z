@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -51,6 +52,9 @@
 #include "detail/format_identity.hpp"
 #include "detail/segment_stamp.hpp"
 #include "detail/durability.hpp"
+#include "detail/database_lock.hpp"
+#include "support/read_file.hpp"
+#include "support/logical_digest.hpp"
 #include "detail/record_bytes.hpp"
 #include "detail/store_config_io.hpp"
 
@@ -133,6 +137,40 @@ std::vector<uint8_t> read_bytes(fs::path const& path) {
 
 /// Rewrites the config with one field changed, leaving everything else as the
 /// database actually wrote it.
+/// Every persisted file and its contents, digested.
+///
+/// Byte for byte, not by modification time: a timestamp says a file was written
+/// to, which is neither necessary nor sufficient for what has to be shown. What
+/// has to be shown is that the data did not change.
+///
+/// `.utxoz.lock` is excluded, and its exclusion is a finding rather than a
+/// convenience: an open that refuses still takes the directory's claim and
+/// records who holds it. That is correct — the refusal is a decision this
+/// instance had to hold the database to make — but it means "nothing was
+/// written" is false as stated, and the honest claim is about the data.
+std::map<std::string, std::string> contents_of(fs::path const& dir) {
+    std::map<std::string, std::string> out;
+    std::error_code ec;
+    for (auto const& e : fs::directory_iterator(dir, ec)) {
+        if ( ! e.is_regular_file()) continue;
+        if (e.path().filename() == utxoz::detail::database_lock::file_name) continue;
+        out.emplace(e.path().filename().string(),
+                    utxoz::testing::file_digest(utxoz::testing::read_file_bytes(e.path())));
+    }
+    return out;
+}
+
+/// Nothing half-made left behind.
+bool no_leftovers(fs::path const& dir) {
+    std::error_code ec;
+    for (auto const& e : fs::directory_iterator(dir, ec)) {
+        auto const name = e.path().filename().string();
+        if (e.path().extension() == ".building") return false;
+        if (name.find(".tmp") != std::string::npos) return false;
+    }
+    return true;
+}
+
 void rewrite_config(fs::path const& dir, auto&& mutate) {
     auto config = read_config_file(config_of(dir));
     REQUIRE(config.has_value());
@@ -241,6 +279,51 @@ TEST_CASE("reference mode records what it was written under", "[format]") {
 // B. Refused on what the config says, before a segment is mapped
 // =============================================================================
 
+TEST_CASE("geometry 2 is refused by name: the capacity policy is part of the geometry",
+          "[format]") {
+    // Geometry 2 is every database written before the capacity policy: its
+    // container 0 has 7 864 319 buckets in a 2 GiB segment, and neither number is
+    // recorded anywhere a reader could check. So the geometry id carries them,
+    // and a database from before is refused rather than opened and operated with
+    // thresholds meant for a different file.
+    fresh_db f("cfg_geometry_2");
+    REQUIRE(utxoz::detail::geometry_id == 3);
+    rewrite_config(f.dir, [](store_config& c) { c.geometry_id = 2; });
+
+    // What the refusal must not do is touch the segments, and that is asked of
+    // the files. Arming fail_container_open here would prove nothing: open()
+    // never reads it — only the compaction path does — and a test that arms a
+    // seam nothing consults is a test that cannot fail.
+    auto const before = contents_of(f.dir);
+    REQUIRE_FALSE(before.empty());
+    auto const mapped_before = utxoz::detail::failpoints::segments_mapped.load(
+        std::memory_order_relaxed);
+
+    auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::geometry_mismatch);
+    // The data is untouched, byte for byte, and nothing half-made was left.
+    CHECK(contents_of(f.dir) == before);
+    CHECK(no_leftovers(f.dir));
+
+    // And no segment was mapped at all: the counter sits at the only place this
+    // store maps an existing segment, so zero here is the ordering itself rather
+    // than an inference from it.
+    CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+          == mapped_before);
+
+    // The control, and it is not optional: an open that succeeds must move that
+    // counter. Without this, a counter that never counted would satisfy the
+    // check above and the ordering would be asserted by a number that is always
+    // zero.
+    rewrite_config(f.dir, [](store_config& c) { c.geometry_id = utxoz::detail::geometry_id; });
+    auto reopened = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE(reopened.has_value());
+    reopened->close();
+    CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+          > mapped_before);
+}
+
 TEST_CASE("geometry 1 is refused by name, not merely as some other geometry",
           "[format]") {
     // The case above proves "a geometry that is not ours is refused". This one
@@ -249,18 +332,27 @@ TEST_CASE("geometry 1 is refused by name, not merely as some other geometry",
     // operator will be holding. A test that only moves the number up would stay
     // green if 1 were ever quietly accepted.
     fresh_db f("cfg_geometry_1");
-    REQUIRE(utxoz::detail::geometry_id == 2);
+    REQUIRE(utxoz::detail::geometry_id == 3);
     rewrite_config(f.dir, [](store_config& c) { c.geometry_id = 1; });
 
-    // Container opens forced to fail, so the refusal below is an ordering and not
-    // just an outcome: the config is read and rejected before anything is mapped.
-    // A database from another geometry must not have its segments touched.
-    utxoz::detail::failpoints::scoped_reset const disarm;
-    utxoz::detail::failpoints::fail_container_open.store(true, std::memory_order_relaxed);
+    // As above: the observable is that no segment was written to.
+    auto const before = contents_of(f.dir);
+    REQUIRE_FALSE(before.empty());
+    auto const mapped_before = utxoz::detail::failpoints::segments_mapped.load(
+        std::memory_order_relaxed);
 
     auto const db = utxoz::full_db::open_for_testing(f.dir, false);
     REQUIRE_FALSE(db.has_value());
     CHECK(db.error() == utxoz::error_code::geometry_mismatch);
+    // The data is untouched, byte for byte, and nothing half-made was left.
+    CHECK(contents_of(f.dir) == before);
+    CHECK(no_leftovers(f.dir));
+
+    // And no segment was mapped at all: the counter sits at the only place this
+    // store maps an existing segment, so zero here is the ordering itself rather
+    // than an inference from it.
+    CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+          == mapped_before);
 }
 
 TEST_CASE("the config refuses a geometry this build does not write", "[format]") {
@@ -293,10 +385,23 @@ TEST_CASE("the config refuses a hash that would put every key elsewhere", "[form
 TEST_CASE("the config refuses another platform's bytes", "[format]") {
     fresh_db f("cfg_abi");
     rewrite_config(f.dir, [](store_config& c) { c.platform_abi_id ^= 0x01000000u; });
+    auto const before = contents_of(f.dir);
+    REQUIRE_FALSE(before.empty());
+    auto const mapped_before = utxoz::detail::failpoints::segments_mapped.load(
+        std::memory_order_relaxed);
 
     auto const db = utxoz::full_db::open_for_testing(f.dir, false);
     REQUIRE_FALSE(db.has_value());
     CHECK(db.error() == utxoz::error_code::abi_mismatch);
+    // The data is untouched, byte for byte, and nothing half-made was left.
+    CHECK(contents_of(f.dir) == before);
+    CHECK(no_leftovers(f.dir));
+
+    // And no segment was mapped at all: the counter sits at the only place this
+    // store maps an existing segment, so zero here is the ordering itself rather
+    // than an inference from it.
+    CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+          == mapped_before);
 }
 
 TEST_CASE("a file whose data ABI matches but whose machinery does not is refused",
@@ -316,16 +421,27 @@ TEST_CASE("a file whose data ABI matches but whose machinery does not is refused
     REQUIRE(foreign != utxoz::detail::platform_abi_id);
     rewrite_config(f.dir, [&](store_config& c) { c.platform_abi_id = foreign; });
 
-    // Armed so that any attempt to open a container fails with its own code. The
-    // refusal below therefore proves an ordering rather than merely an outcome:
-    // the config is read and rejected before anything is mapped. Asserting that
-    // by timing would prove nothing — a fast answer is not an early one.
-    utxoz::detail::failpoints::scoped_reset const disarm;
-    utxoz::detail::failpoints::fail_container_open.store(true, std::memory_order_relaxed);
+    // The observable: a file this build will not open must also be a file it does
+    // not write to. Timing would prove nothing — a fast answer is not an early
+    // one — and the seam that looks like it would help is only read by the
+    // compaction path.
+    auto const before = contents_of(f.dir);
+    REQUIRE_FALSE(before.empty());
+    auto const mapped_before = utxoz::detail::failpoints::segments_mapped.load(
+        std::memory_order_relaxed);
 
     auto const db = utxoz::full_db::open_for_testing(f.dir, false);
     REQUIRE_FALSE(db.has_value());
     CHECK(db.error() == utxoz::error_code::abi_mismatch);
+    // The data is untouched, byte for byte, and nothing half-made was left.
+    CHECK(contents_of(f.dir) == before);
+    CHECK(no_leftovers(f.dir));
+
+    // And no segment was mapped at all: the counter sits at the only place this
+    // store maps an existing segment, so zero here is the ordering itself rather
+    // than an inference from it.
+    CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+          == mapped_before);
 }
 
 TEST_CASE("a config format from the future is not corruption", "[format]") {

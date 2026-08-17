@@ -41,6 +41,7 @@
 
 #include <utxoz/types.hpp>
 
+#include "durability.hpp"
 #include "log.hpp"
 #include "path_display.hpp"
 
@@ -99,7 +100,14 @@ inline result<std::unique_ptr<bip::managed_mapped_file>> open_existing_segment(f
         return std::unexpected(error_code::file_open_failed);
     }
     try {
-        return std::make_unique<bip::managed_mapped_file>(bip::open_only, path.c_str());
+        auto mapped = std::make_unique<bip::managed_mapped_file>(bip::open_only, path.c_str());
+        // Counted at the edge itself, so a test can ask whether a refusal came
+        // before any segment was mapped instead of inferring it — and counted
+        // after the mapping exists rather than before it is attempted, because a
+        // constructor that throws mapped nothing and the question is about
+        // mappings, not about tries.
+        failpoints::segments_mapped.fetch_add(1, std::memory_order_relaxed);
+        return mapped;
     } catch (std::exception const& e) {
         log::error("{}: will not open as a segment: {}", path_display(path), e.what());
         return std::unexpected(error_code::file_open_failed);
