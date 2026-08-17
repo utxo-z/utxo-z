@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786962623459,
+  "lastUpdate": 1786996182525,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -16202,6 +16202,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 1089.64,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2e39afa48a5e22debfd246ef76c519d21054c310",
+          "message": "feat: count what is stored, instead of what this process happened to do (#137)\n\n`print_sizing_report()` looked like it answered \"what is in this database\". It\nprinted \"Current entries\", a file size per container, \"Wasted bytes\", and a\nglobal histogram of value sizes. Every one of those except the file size is a\ncounter that started when this process opened the database, and the file size is\nthe setting a new segment is created with rather than what any file occupies. A\nnode restarted a minute ago printed almost nothing and printed it under names\nthat read like storage.\n\nNothing walked the files. `census()` does.\n\n## What it reports\n\nPer generation, per class and in total: entries, bucket count and load factor;\nthe payload each entry actually uses and the capacity it leaves unused; the\nsegment's size and the bytes its allocator never handed out; the file's length\nand the blocks the filesystem actually gave it; and a histogram of the payload\nsizes that occur.\n\nThat last one is the number this was built for. Choosing container sizes from\ninserts this session has seen is choosing from a sample nobody selected; choosing\nthem from the payloads in the database is the measurement, and it is now one\ncommand.\n\n## Exact, modelled, residual — never added up as one kind of number\n\n    exact       payload, unused capacity, object padding, segment size,\n                segment free, logical file size\n    modelled    occupied slots, empty slots, group metadata — computed from the\n                certified map layout, not observed from the allocator\n    residual    unattributed_allocated_bytes = allocated - modelled\n\nThe residual is a subtraction, so every modelling error lands in it. It is\nreported as a residual and never described as the segment manager's own overhead,\nwhich would be a claim about bytes nobody counted. When the modelled parts come\nto more than was allocated the model is wrong, and `model_inconsistent` says so\nand the residual is withheld rather than clamped to zero — a zero there would\nread as a tight fit.\n\nNothing is double counted: empty slots and group metadata are inside the map's\nallocation, `segment_free_bytes` is what the allocator never handed out, and\n\n    occupied + empty + group_metadata + unattributed + free == segment_size\n\nholds per generation and is asserted per generation. In aggregate it would hold\nby construction and would be checking arithmetic instead of the model.\n\n## Physical blocks, and the two platforms that do not measure the same thing\n\nA version file is created at its full size and filled in gradually, so on a\nfilesystem with sparse files its length and its cost are different numbers — and\nthe cost is the one that is paid. POSIX answers with `st_blocks x 512`, which is\nblocks allocated. Windows answers with `GetCompressedFileSize`, which returns the\nsize on disk only where the volume supports compression or sparse files, and\notherwise returns the logical size — so a Windows figure equal to the file size\nis not evidence that nothing is sparse. The method travels with the figure for\nexactly that reason.\n\nIn a test database of 600 000 entries, 20 MiB of segment reported 475 KiB of\nblocks. That difference is the point.\n\n## Missing is not zero\n\nEvery figure that might not exist carries a status: `measured`, `not_applicable`,\n`unavailable` with a reason. The JSON writes the number as null unless it was\nmeasured, so a consumer comparing two machines cannot read \"nobody could measure\nthis\" as \"this is small\". A sum containing an unmeasurable part is unmeasurable\ntoo, rather than a smaller number wearing the name of a complete one.\n\n## What this scope does not claim\n\n`physical_stored` counts every entry in every generation, once per copy. It is\nnot the logical state, and the difference is not hypothetical: an insert consults\nonly the active map of the class its payload size selects, so one outpoint\ninserted twice with payloads of different sizes is stored in two classes at once.\n\nMeasured, not inferred:\n\n    insert 8B   -> INSERTED          (class 0)\n    insert 200B -> INSERTED          (class 3)\n    db.size() = 2\n    find -> payload 8 bytes\n    apply_deletes: erased=1\n    find after delete -> payload 200 bytes   <== the other copy answers now\n\nSo `entries` is a count of stored entries, not of distinct outpoints, and the\nreport says so in its own text — a pasted excerpt carries the caveat with it. The\nlogical census is the next piece of work and has its own algorithm and its own\nmemory bound.\n\nThe same walk turned up something worse, filed as #136 rather than fixed here:\n`full_resolve()` consults the LRU-cached files first, so on an already\ninconsistent database which copy answers depends on what this process read\nearlier. Two nodes with the same files can disagree, and one node can disagree\nwith itself across a restart.\n\n## The tool\n\n`utxoz_census <dir> [--text|--json] [--mode=reference] [--snapshot]` opens the\ndirectory the ordinary way — `open()`, which validates the config and the stamps\nand takes the claim — and asks the library to count. It uses only the public API\nand does not read the format itself: a tool with its own idea of what a segment\nlooks like is a second implementation of the format, and the day they disagree\nthe untested one wins.\n\nThe claim is exclusive, so a running node holds it and the tool refuses rather\nthan reading underneath it. `--snapshot` records that the directory is a copy\nwhose consistency depends on how it was taken, which nothing here can see.\n\n## print_sizing_report()\n\nKept, and no longer misleading. It says what it is before the numbers — session\ncounters, not the contents of the files — and points at census() for the rest. It\nstill reads no file, because a function that quietly grew a full pass over the\ndata would be worse than one that overstated its numbers. And in reference mode\nit prints one class instead of four containers that do not exist.\n\n## Cost\n\n600 000 entries across 10 files in 4-6 ms with the page cache warm, which is what\na repeated run measures; a cold cache makes it an I/O measurement instead. Every\nreport carries its own `duration_ms`, `files_examined` and `entries_examined`, so\nthe cost is a figure in the output rather than a claim in a commit message.\n\n## The tool is not a test artifact\n\n`utxoz_census` is built by `UTXOZ_BUILD_TOOLS`, on by default, and installed with\nthe library. It was inside the test block first, which meant a node operator\nbuilding with tests off could not produce the one thing here they would actually\nrun. It depends on neither the fixtures generator nor the sizing instrument, and\na CI job builds with tests, examples and benchmarks off, asserts that those three\ntargets were *not* built, installs, and runs the installed copy.\n\n## open_existing(), because the tool must not create what it measures\n\n`open()` creates a database where there is none. Right for a store; wrong for an\ninstrument, and silently so — a mistyped path leaves a new empty database behind\nand is then reported as holding nothing.\n\nA caller cannot fix this from outside. Checking first and opening second has a\nwindow between the two, and open-or-create fills that window by creating. So the\nproperty lives where the claim is held: `open_existing()` takes the claim, asks\nunder it whether a database is there, and returns `database_not_found` having\ncreated nothing. A typed `open_intent` rather than a second bool beside\n`remove_existing`, where `open(path, false, false)` would say nothing about which\nfalse is which.\n\nThe window itself is a test rather than an argument: a seam removes the config\nimmediately after the claim is taken and before the open decides anything. With\nthe decision inside the claim the open refuses; had it been made before, it would\nhave said yes and then created a database over its own answer.\n\nAbsence is `database_not_found`; a database that is there and is wrong returns\nwhat is wrong with it, so a corrupt config is `config_file_corrupt` and never\nabsence. The directory is not created either. One exception, documented: taking\nthe claim creates `.utxoz.lock`, which is permanent by design — replacing it is\nexplained in database_lock as worse than keeping it. A lock file is not a\ndatabase and is never read as one, so a refused open leaves a directory that\nopen_existing() still refuses.\n\n`open()` keeps its behaviour for the callers that have it, and a case pins that\ntoo. The census tool now uses open_existing() and knows no file names at all: it\nreads the format through the library or not at all.\n\n## An entry that cannot be true\n\nThe first version took `min(actual_size, capacity)`. That is a silent\nnormalisation of corruption in the one tool whose purpose is to be believed: an\nimpossible length would be reported as a full entry and nothing would be said.\n\nThe config and the stamp certify identity and layout. Neither certifies that each\nentry is internally consistent. An entry whose recorded payload length exceeds its\nclass, a map claiming more entries than buckets, and any count that cannot be\nmultiplied without overflowing are all `entry_corrupt` — a new code, distinct from\nevery stamp error, which say the file is not ours or is not where it claims to be.\nThe census fails and there is no partial report. The diagnostic names the class,\nthe generation and the offending value, and never the key or the payload.\n\nUnchecked arithmetic gets the same treatment for the same reason: on file data it\ndoes not produce an obviously wrong number, it produces a plausibly small one.\n\n## Provenance is not scope\n\n`--snapshot` used to append a sentence to `scope`, which is an enumerated value a\nconsumer switches on. It now sets a separate `source` object —\n`declared_external_snapshot` and `consistency` of `live_database_exclusive` or\n`not_verified` — carrying its own note that this is the caller's declaration and\nthat nothing here can verify how a copy was taken. `scope` stays exactly\n`physical_stored` either way, and a test pins that.\n\n## Tests\n\nSixteen cases. The parts add up to the whole in every direction the report offers\n— histogram buckets to class entries, payload buckets to payload bytes,\ngenerations to classes, classes to totals, and the segment identity per\ngeneration. Reference reports exactly one class and counts its historical\ngeneration. A deleted entry stops being counted, because it stops being stored.\nThe JSON parses, is versioned, distinguishes zero from unavailable, and is\nidentical for the same state apart from the duration. Neither presentation\ncontains a key or a payload, checked with markers planted in both.\n\nAnd two refusals, which are the cases that matter: a generation that has gone\nmissing and a generation that will not open as a segment both fail the census. A\nreport short by one file looks exactly like a database with one file fewer.\n\nThe corruption cases run in both width classes, because `actual_size` is a\n`uint8_t` below 256 and a `uint16_t` above it and a check tried on one\nrepresentation has been tried once. Each has a control on either side: the census\npasses on the file as written, fails with one field edited, and passes again when\nthat field is restored.\n\nThe checks that only impossible inputs reach — a map with more entries than\nbuckets, a product that overflows — are reached directly rather than by forging a\nfile, because forging one is fragile and version-dependent, and an unobservable\ncheck is one somebody deletes as dead code.\n\nAnd the tool is tested as a process: it censuses a database, refuses one another\nprocess is holding and then succeeds once that process lets go, and refuses an\nempty directory while leaving it empty.\n\nMutations, each confirmed red: counting an entry twice; skipping a historical\ngeneration; writing an unavailable figure as 0; carrying on past a segment that\nwill not open; and taking `min(actual_size, capacity)` instead of refusing.\n\n## From review\n\nA historical generation is now stamp-checked exactly as the ordinary open checks\nit. A mapped segment is not yet a segment of *this* database, and a file renamed\ninto a name that is not its own was being counted as the generation it was\npretending to be.\n\n`finish_generation` re-checks that entries do not exceed buckets before\nsubtracting, and refuses rather than saturating: clamping to zero would turn an\nimpossible file into a plausible report, which is the same silent normalisation\nthis census refuses to do with payload lengths. A `static_assert` ties the\ncapacity the geometry publishes to the capacity the stored type actually has,\nsince the report carries one and computes from the other. Reference mode counts\nits generations per class instead of reading the walk's file total. The Windows\nblock measurement clears the error before the call, because INVALID_FILE_SIZE is\nalso a legitimate size. The tool's directory check uses the error_code overload,\nso \"the filesystem would not answer\" and \"there is nothing there\" stay different\nanswers. And the JSON cases parse the document instead of searching it: a\nsubstring check passes on output that is not JSON at all.\n\n## Packaging\n\nThe first run of this had four jobs red for one reason: the recipe exports\n`src`, `include`, `examples`, `tests` and `benchmarks`, and not `tools`, so every\nbuild from the exported sources configured a target whose only source file was\nnot there. Local builds never saw it — the file is in the working tree.\n\n`tools/*` is exported now, with a `with_tools` recipe option that defaults to on,\nso a consumer who installs the library gets `bin/utxoz_census` rather than a\nsource tree to build again. Verified by building the package the way the publish\njob does and looking inside it: `bin/utxoz_census` and `include/utxoz/census.hpp`\nare both there. `census.hpp` joins the umbrella header, which listed every other\npublic header.\n\nThe off path was run too, because it is the one that matters for\ncross-compilation: `-o '&:with_tools=False'` produces a package with the library\nand the whole API, `census.hpp` included, no `bin/`, no object compiled from\n`tools/census.cpp`, `UTXOZ_BUILD_TOOLS:STRING=False` in the cache, and\ntest_package still passing. The installed binary is built for the package's\ntarget and is not a host build-tool, so a consumer cross-compiling has a reason\nto turn it off beyond size.\n\n## An inspection creates nothing, including the class that has none\n\nThe first version of this door promised to create nothing and created a\nten-megabyte file. `open()` creates the active container of a class that has no\ngenerations, which compaction produces by draining one completely — an ordinary\nstate, not damage. So a database with one class full and another empty was opened\nfor measurement, given version zero of the empty class, and then censused: the\nreport carried a generation the census had just made.\n\nMeasured, before and after: `cont_3_v00000.dat`, 10485760 bytes, then nothing.\n\nThe empty class now stays absent under inspection and is censused as zero\ngenerations and zero entries. That is the policy rather than a repair, and it\ndecides the contract: an inspection supports `census()` and `close()` and refuses\neverything else with `inspection_only`, because there is no map for the rest to\nwork on and making one is the thing being avoided. Which is also why it is called\n`open_for_inspection()` now: `open_existing()` says which databases it opens and\nnot what may be done with the result.\n\nA config with no generations in any class is still `database_not_found` — not a\ndatabase with empty classes, a config with nothing behind it.\n\nThe test digests every file before and after, so \"unchanged\" is a statement about\ncontent and not only about names, and it carries the control that `open()` does\ncreate the class, which is the reason this had to be a second door.\n\nMutations: letting the inspection create the empty class, and dropping the\nrefusal of non-inspecting operations. Both turn the suite red.\n\n## A config with no generations is not a database\n\nopen_existing() promised to create nothing and created five segments. A directory\nholding a valid config and no data files — the shape a database has between its\nconfig being written and its first segment existing, and what is left when the\ndata is removed and the config is not — took the creation branch, made version\nzero of every class, and then reported a database holding nothing. True of the\nfiles it had just made; not of anything that was there.\n\nMeasured before the change and after it: five `cont_*_v00000.dat` created, then\nnone, with `database_not_found` instead.\n\nAll five catalogues empty, not any one: a class whose generations were all\ndrained by compaction is legitimately empty and gets version zero back on the\nnext open. Reference mode has the same cut, and a case for each, each with the\ncontrol that open() still does create them — which is why this had to be a second\ndoor rather than a change to the first.\n\n## From review\n\nThe doc and the tool's own header still said the tool opens with `open()`. They\nsay `open_existing()` now, and the note about it writing says what it does write:\nnot a database, but the lock file, and the settling of an interrupted merge in a\ndatabase that is there.\n\n`group_metadata_model` is checked arithmetic like everything else derived from a\nfile. A bucket count large enough to overflow it cannot reach it today, because\nthe caller multiplies by the slot size first and that fails long before — but\nthat is an argument about the order of two functions, and a reader should not\nhave to reconstruct it to trust the number. Tested at the boundary rather than\nonly at absurd values: the largest count that works, and the first that does not.\n\n## constexpr, and the compiler that was right\n\nMaking the metadata model checked left it `constexpr` over calls to\n`checked_add` and `checked_mul`, which were not. MSVC refused to compile it —\n`error C3615: constexpr function cannot result in a constant expression` — and\nMSVC was correct. A `constexpr` function that cannot be invoked in any constant\nexpression is ill-formed, no diagnostic required: MSVC diagnosed it, GCC and\nClang were entitled to stay silent, and they did, right up until something asked\nfor the value. Asked for one, GCC gives the same two errors.\n\nSo this is the fix rather than a way around it: the whole chain is `constexpr`,\nand two `static_assert`s ask for an answer at compile time — one for a value, one\nfor the refusal. Not because the values need testing, which a case already does,\nbut so that the next time this decays it decays on every compiler at once instead\nof on the one platform nobody runs locally.\n\n## The benchmark job's comment step\n\nIt failed with GitHub's own \"No server is currently available to service your\nrequest\", which turned a job that benchmarked correctly into a red one and said\nnothing about the benchmarks. Posting is not the measurement: the step is\ncontinue-on-error now. Nothing is lost when it fails — the same report is already\nwritten to the step summary — and the step still shows as failed, so a persistent\nproblem is visible rather than swallowed.\n\nSuites: 295 cases with statistics, 290 without. No change to geometry_id, the\nepochs, container sizes, capacities, file sizes, the rotation fraction, the\nfixtures, or anything persisted.",
+          "timestamp": "2026-08-17T21:44:56+02:00",
+          "tree_id": "0db35a6ac83c52b3e06381f64427eaa037d938e2",
+          "url": "https://github.com/utxo-z/utxo-z/commit/2e39afa48a5e22debfd246ef76c519d21054c310"
+        },
+        "date": 1786996181846,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 339695.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 390654.15,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 396292.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 671262.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 453.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 496.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 13331909.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 26537411.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12962543.24,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 13285.37,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2264033.67,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2222569.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 111853.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 11957.42,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2593.69,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3373.14,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2995.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 1113.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 1113.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 1117.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 1093.01,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 1100.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 1048.67,
             "unit": "ops/sec"
           }
         ]
