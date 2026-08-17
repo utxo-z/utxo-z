@@ -365,7 +365,7 @@ TEST_CASE("full: a failed sweep publishes no statistics, and the retry counts on
         CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
         CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         // Two keys resolved, one proven absent — each counted once, so the
         // abandoned attempt left nothing behind. Only meaningful where the
         // counters exist; with statistics off they are all zero and the checks
@@ -555,7 +555,7 @@ TEST_CASE("reference: a failed sweep publishes no statistics, and the retry coun
         CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
         CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         CHECK(after_retry.resolution.resolved == before.resolution.resolved + 1);
         CHECK(after_retry.resolution.absent == before.resolution.absent + 1);
 #endif

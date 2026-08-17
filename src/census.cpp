@@ -331,7 +331,7 @@ result<census_report> database_impl::census(census_options const& options) const
     report.map_layout_epoch = map_layout_epoch;
     report.hash_epoch = hash_epoch;
     report.platform_abi_id = platform_abi_id;
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     report.statistics_enabled = true;
 #else
     report.statistics_enabled = false;

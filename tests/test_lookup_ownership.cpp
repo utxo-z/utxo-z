@@ -483,7 +483,7 @@ TEST_CASE("full: an unreadable version yields no partial results and no absences
     CHECK(after_retry.deferred.successfully_processed == before.deferred.successfully_processed);
     CHECK(after_retry.deferred.failed_to_delete == before.deferred.failed_to_delete);
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     // Counted once: the abandoned attempt left nothing behind.
     CHECK(after_retry.resolution.resolved == before.resolution.resolved + corpus::group_size);
     CHECK(after_retry.resolution.absent == before.resolution.absent + corpus::group_size);
@@ -768,7 +768,7 @@ TEST_CASE("full: a resolution moves only the resolution counters",
 
     auto const after = db.get_statistics();
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     CHECK(after.resolution.resolved == before.resolution.resolved + 1);
     CHECK(after.resolution.absent == before.resolution.absent + 1);
     CHECK(after.resolution.files_visited > before.resolution.files_visited);
@@ -816,7 +816,7 @@ TEST_CASE("full: a deletion moves only the deletion counters",
 
     auto const after = db.get_statistics();
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     // The deletion path moved — at least one of its counters has to have
     // changed, or this case would be
     // asserting that the resolution family stayed still while nothing happened
@@ -883,7 +883,7 @@ TEST_CASE("reference: a resolution moves only the resolution counters",
 
     auto const after = db.get_statistics();
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     CHECK(after.resolution.resolved == before.resolution.resolved + 1);
     CHECK(after.resolution.absent == before.resolution.absent + 1);
 #endif

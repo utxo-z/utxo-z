@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <boost/unordered/unordered_flat_map.hpp>
@@ -74,6 +75,112 @@ struct resolution_summary {
     double cache_hit_rate = 0.0;  ///< cache_hits / files_visited
 };
 
+/// One class's share of the read path. Every field is a count of one specific
+/// thing; see lookup_stats for why they are not interchangeable.
+struct class_lookup_summary {
+    /// Which class this is. `reference_class` in reference mode, where there is
+    /// one class and it is not a size class.
+    size_t container_class = 0;
+
+    /// Times `find()` asked this class's active map. **Derived, not counted.**
+    ///
+    /// The search visits the classes in order and stops at the first that
+    /// answers, so class `i` is asked exactly when the answer came from `i` or
+    /// later — or from nowhere:
+    ///
+    ///     active_maps_probed[i] = (answered by class i or after) + deferred
+    ///
+    /// Counting it directly, one increment per class per lookup, measured +160%
+    /// on a lookup that misses everywhere. Counting only where the search
+    /// stopped, one increment per lookup, was still an atomic on the hot path
+    /// for a number this arithmetic already had.
+    size_t active_maps_probed = 0;
+    size_t answered_from_active = 0;    ///< times it answered
+    size_t resolved_historical = 0;     ///< keys a sweep answered from this class's history
+
+    size_t generations_probed = 0;      ///< key-against-file probes charged here
+    size_t files_opened = 0;            ///< files a sweep worked against, per file
+    size_t cache_hits = 0;              ///< of those, served by the file cache
+
+    /// Over the keys answered from history: how many file probes each took, and
+    /// how far back the answering generation was. Different questions; see
+    /// lookup_stats.
+    double avg_probe_ordinal = 0.0;
+    double avg_version_distance = 0.0;
+
+    /// Buckets 1, 2, 3, 4, 5-8, 9+.
+    std::array<size_t, 6> probe_ordinal_histogram{};
+    std::array<size_t, 6> version_distance_histogram{};
+};
+
+/// The class index reference mode reports under. Not a size class, and not zero,
+/// so that a reader cannot mistake it for container 0.
+inline constexpr size_t reference_class = static_cast<size_t>(-1);
+
+/**
+ * @brief The read path, per class, plus the two figures that have no class.
+ *
+ * `lookups_received`, `deferred` and `absent` are global because they cannot be
+ * attributed: a lookup arrives with a key and no size, and one that is absent was
+ * refused by every class. Everything else that could be derived from the
+ * per-class counters is derived from them and not kept separately — a second
+ * running total is a second thing to be wrong.
+ */
+struct lookup_telemetry {
+    /// Bumped when a field changes meaning or leaves.
+    static constexpr uint32_t schema_version = 1;
+
+    /// What this build carries: "off", "basic" or "lookup". One value rather than
+    /// a pair of booleans, because "statistics are on" was never the same claim
+    /// as "these counters were collected": at `basic` the first is true and the
+    /// second is false, and a reader given only the first would take a page of
+    /// zeros for a database that answered nothing.
+    std::string statistics_level = "off";
+    storage_mode mode = storage_mode::full;
+
+    size_t lookups_received = 0;   ///< find() calls
+    size_t deferred = 0;           ///< of those, the ones no active map answered
+    size_t absent = 0;             ///< keys a *completed* sweep proved are nowhere
+
+    /// One entry per class in full mode; exactly one, labelled reference_class,
+    /// in reference mode. Never five empty ones.
+    std::vector<class_lookup_summary> classes;
+
+    /// Summed from `classes`, so they cannot disagree with it. Keeping a running
+    /// global beside the per-class counters would be a second authority on one
+    /// fact, and when the two disagreed nobody could say which was the defect.
+    ///
+    /// Defined here rather than in statistics.cpp because that translation unit
+    /// is compiled only when statistics are on, and these have to exist either
+    /// way: without statistics the classes are empty and every sum is zero,
+    /// which is the honest answer and not a missing symbol.
+    [[nodiscard]] size_t answered_from_active() const noexcept {
+        return sum_of(&class_lookup_summary::answered_from_active);
+    }
+    [[nodiscard]] size_t resolved_historical() const noexcept {
+        return sum_of(&class_lookup_summary::resolved_historical);
+    }
+    [[nodiscard]] size_t generations_probed() const noexcept {
+        return sum_of(&class_lookup_summary::generations_probed);
+    }
+    [[nodiscard]] size_t files_opened() const noexcept {
+        return sum_of(&class_lookup_summary::files_opened);
+    }
+    [[nodiscard]] size_t cache_hits() const noexcept {
+        return sum_of(&class_lookup_summary::cache_hits);
+    }
+
+private:
+    [[nodiscard]] size_t sum_of(size_t class_lookup_summary::*field) const noexcept {
+        size_t total = 0;
+        for (auto const& c : classes) total += c.*field;
+        return total;
+    }
+};
+
+/// Machine-readable, for comparing one run against another.
+[[nodiscard]] std::string to_json(lookup_telemetry const&);
+
 namespace detail {
 
 /**
@@ -85,13 +192,35 @@ namespace detail {
  * slot per thread is the common case rather than a guarantee — correctness does
  * not rest on it, the counters are atomic either way.
  */
-struct sharded_counters {
-    static constexpr size_t shard_count = 64;
-    static constexpr size_t field_count = 8;
+/// The thread's slot. Round-robin on first use and cached in a thread_local, so
+/// distinct threads usually get distinct shards; correctness does not rest on it,
+/// since the counters are atomic either way.
+[[nodiscard]] size_t thread_shard_index() noexcept;
 
-    void add(size_t field, uint64_t amount) noexcept;
-    [[nodiscard]] uint64_t sum(size_t field) const noexcept;
-    void reset() noexcept;
+/// How many shards every width uses. Named outside the template because
+/// `thread_shard_index()` has to know it and does not know the width.
+inline constexpr size_t counter_shard_count = 64;
+
+template <size_t Fields>
+struct sharded_counters {
+    static constexpr size_t shard_count = counter_shard_count;
+    static constexpr size_t field_count = Fields;
+
+    void add(size_t field, uint64_t amount) noexcept {
+        shards_[thread_shard_index()].fields[field].fetch_add(amount, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] uint64_t sum(size_t field) const noexcept {
+        uint64_t total = 0;
+        for (auto const& s : shards_) total += s.fields[field].load(std::memory_order_relaxed);
+        return total;
+    }
+
+    void reset() noexcept {
+        for (auto& s : shards_) {
+            for (auto& f : s.fields) f.store(0, std::memory_order_relaxed);
+        }
+    }
 
 private:
     /// Padded to the widest cache line among the platforms we target — Apple
@@ -103,6 +232,18 @@ private:
     std::array<shard, shard_count> shards_;
 };
 
+/// Eight fields are 64 bytes, which fit one padded shard: 8 KiB an instance.
+/// This is the width the counters that existed before the lookup telemetry use,
+/// and parameterising the type is what keeps it that way. A single global width
+/// wide enough for the widest user would have doubled every instance in every
+/// build, including the ones that never enable the widest user.
+using narrow_counters = sharded_counters<8>;
+
+/// Twenty fields are 160 bytes, so two padded shards: 16 KiB an instance. Only
+/// `lookup_stats` is this wide, and only when the lookup telemetry is compiled
+/// in at all.
+using wide_counters = sharded_counters<20>;
+
 } // namespace detail
 
 /**
@@ -113,7 +254,7 @@ struct probe_stats {
     probe_stats(probe_stats const&) = delete;
     probe_stats& operator=(probe_stats const&) = delete;
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     /// A probe the active map answered, with the height it was created at.
     void record_answered(uint32_t access_height, uint32_t creation_height) noexcept;
     /// A probe that had to be deferred.
@@ -123,11 +264,14 @@ struct probe_stats {
     [[nodiscard]] probe_summary get_summary() const noexcept;
 
 private:
-    enum field : size_t { f_probes, f_answered, f_age_total };
-    static_assert(f_age_total < detail::sharded_counters::field_count,
+    /// No `f_probes`. Every probe is either answered or deferred, so the total is
+    /// the sum of the two and counting it as well was a third atomic increment
+    /// on the hot path for a number arithmetic already had.
+    enum field : size_t { f_answered, f_deferred, f_age_total };
+    static_assert(f_age_total < detail::narrow_counters::field_count,
                   "probe_stats has outgrown its counter slots");
 
-    detail::sharded_counters counters_;
+    detail::narrow_counters counters_;
 #else
     // Compiled out entirely: no counters, and recording is a no-op the optimiser
     // deletes at the call site. Guarding here rather than at each call site is
@@ -141,6 +285,95 @@ private:
 };
 
 /**
+ * @brief What one class of the read path did, counted per class.
+ *
+ * The three things this separates are three different questions, and the reason
+ * they are separate is that the existing counters answered a mixture of them.
+ *
+ *  - **which class answered.** A full-mode lookup is not addressed to a class:
+ *    the caller supplies a key, not a size, and `find()` probes the active maps
+ *    in class order until one answers. So "the class of a lookup" only exists
+ *    for a lookup that was answered, and an absent one belongs to no class at
+ *    all. `active_maps_probed` is the other half of that: it says how often each
+ *    class was *asked*, which falls off sharply after class 0 precisely because
+ *    the search stops at the first hit.
+ *
+ *  - **how many files it cost** — `probe_ordinal`. A key answered by the third
+ *    generation file searched cost three file probes, whatever those files are
+ *    numbered. This is what "how much of the read path is used" means.
+ *
+ *  - **how far back it was found** — `version_distance`, the answering
+ *    generation's distance from its class's active version. Compaction removes
+ *    generations, so version numbers are sparse and this is *not* the ordinal;
+ *    the file cache is consulted first, so the order of the search is not the
+ *    order of the versions either. Two names, because they are two numbers.
+ *
+ * `generations_probed` is charged per key: a sweep of a thousand keys across
+ * three files probed three thousand times, and an absent key was probed by every
+ * file. `files_opened` and `cache_hits` are per file, which is the other
+ * question — what the cache did — and they are never added to the first.
+ */
+struct lookup_stats {
+    lookup_stats() = default;
+    lookup_stats(lookup_stats const&) = delete;
+    lookup_stats& operator=(lookup_stats const&) = delete;
+
+    /// Ordinals and distances are histogrammed into fixed buckets: a bounded
+    /// number of counters, no allocation, and no unbounded key space.
+    static constexpr size_t bucket_count = 6;
+    /// Which bucket a one-based ordinal or distance belongs in: 1, 2, 3, 4, 5-8,
+    /// 9 or more.
+    [[nodiscard]] static constexpr size_t bucket_of(uint64_t value) noexcept {
+        if (value <= 4) return value == 0 ? 0 : value - 1;
+        return value <= 8 ? 4 : 5;
+    }
+
+#if UTXOZ_STATISTICS_LEVEL >= 2
+    void record_answered_from_active(uint64_t times = 1) noexcept;
+    /// A key this class answered from a historical generation: how many file
+    /// probes it took, and how far back the file was.
+    /// A batch of keys this class answered from history, handed over as totals
+    /// and histograms accumulated on the caller's stack. One publication per
+    /// sweep per class, so the inner loop touches no atomic.
+    void record_resolved_batch(uint64_t count, uint64_t probe_ordinal_total,
+                               uint64_t version_distance_total,
+                               std::array<uint64_t, bucket_count> const& ordinals,
+                               std::array<uint64_t, bucket_count> const& distances) noexcept;
+    void record_generations_probed(uint64_t probes) noexcept;
+    void record_file_opened(uint64_t files, uint64_t cache_hits) noexcept;
+
+    void reset() noexcept;
+    [[nodiscard]] class_lookup_summary get_summary() const noexcept;
+
+private:
+    enum field : size_t {
+        f_answered_from_active,
+        f_resolved_historical,
+        f_generations_probed,
+        f_files_opened,
+        f_cache_hits,
+        f_version_distance_total,
+        f_probe_ordinal_total,
+        f_ordinal_bucket,                                  // six consecutive
+        f_distance_bucket = f_ordinal_bucket + bucket_count // six more
+    };
+    static_assert(f_distance_bucket + bucket_count <= detail::wide_counters::field_count,
+                  "lookup_stats has outgrown its counter slots");
+
+    detail::wide_counters counters_;
+#else
+    void record_answered_from_active(uint64_t = 1) noexcept {}
+    void record_resolved_batch(uint64_t, uint64_t, uint64_t,
+                               std::array<uint64_t, bucket_count> const&,
+                               std::array<uint64_t, bucket_count> const&) noexcept {}
+    void record_generations_probed(uint64_t) noexcept {}
+    void record_file_opened(uint64_t, uint64_t) noexcept {}
+    void reset() noexcept {}
+    [[nodiscard]] class_lookup_summary get_summary() const noexcept { return {}; }
+#endif
+};
+
+/**
  * @brief Historical lookup resolution counters.
  */
 struct resolution_stats {
@@ -148,9 +381,13 @@ struct resolution_stats {
     resolution_stats(resolution_stats const&) = delete;
     resolution_stats& operator=(resolution_stats const&) = delete;
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     /// A key a sweep answered, at `depth` versions back from the active one.
     void record_resolved(uint32_t depth) noexcept;
+    /// The same, for a batch whose depths were accumulated as a total. Identical
+    /// arithmetic to calling the above once per key, without a list of depths
+    /// held on the read path to replay it from.
+    void record_resolved_batch(uint64_t count, uint64_t depth_total) noexcept;
     /// Keys a completed resolution proved absent.
     void record_absent(size_t count) noexcept;
     /// A version file a sweep worked against.
@@ -161,12 +398,13 @@ struct resolution_stats {
 
 private:
     enum field : size_t { f_resolved, f_absent, f_depth_total, f_files, f_cache_hits };
-    static_assert(f_cache_hits < detail::sharded_counters::field_count,
+    static_assert(f_cache_hits < detail::narrow_counters::field_count,
                   "resolution_stats has outgrown its counter slots");
 
-    detail::sharded_counters counters_;
+    detail::narrow_counters counters_;
 #else
     void record_resolved(uint32_t) noexcept {}
+    void record_resolved_batch(uint64_t, uint64_t) noexcept {}
     void record_absent(size_t) noexcept {}
     void record_file_visited(bool) noexcept {}
     void reset() noexcept {}
@@ -235,6 +473,9 @@ struct fragmentation_stats {
 struct database_statistics {
     // Storage mode
     storage_mode mode = storage_mode::full;
+
+    /// The read path, per class. See lookup_telemetry.
+    lookup_telemetry lookups;
 
     // Global statistics
     size_t total_entries = 0;        ///< Total entries across all containers

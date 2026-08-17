@@ -23,6 +23,7 @@ int main() {
     bench::register_erase_benchmarks(bench);
     bench::register_mixed_workload_benchmarks(bench);
     bench::register_storage_benchmarks(bench);
+    bench::register_lookup_telemetry_benchmarks(bench);
 
     std::ofstream json_file("benchmark_results.json");
     bench.render(ankerl::nanobench::templates::json(), json_file);

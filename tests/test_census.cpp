@@ -562,7 +562,7 @@ TEST_CASE("the report states the identity of the build that produced it", "[cens
     CHECK(report->hash_epoch != 0);
     CHECK(report->platform_abi_id != 0);
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     CHECK(report->statistics_enabled);
 #else
     CHECK_FALSE(report->statistics_enabled);

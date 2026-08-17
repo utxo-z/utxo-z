@@ -47,21 +47,21 @@ fi
 # built, and only then is ON re-examined. Before the fix, configuring OFF rewrote
 # the shared header out from under ON.
 # ---------------------------------------------------------------------------
-conan build . "${CONAN_SETTINGS[@]}" -o statistics=True  -o with_tests=True -of "${WORK}/on"  --version="${VERSION}" --build=missing > "${WORK}/on.log"  2>&1 \
-    || { cat "${WORK}/on.log"; fail "statistics=True build"; }
-conan build . "${CONAN_SETTINGS[@]}" -o statistics=False -o with_tests=True -of "${WORK}/off" --version="${VERSION}" --build=missing > "${WORK}/off.log" 2>&1 \
-    || { cat "${WORK}/off.log"; fail "statistics=False build"; }
+conan build . "${CONAN_SETTINGS[@]}" -o statistics_level=basic  -o with_tests=True -of "${WORK}/on"  --version="${VERSION}" --build=missing > "${WORK}/on.log"  2>&1 \
+    || { cat "${WORK}/on.log"; fail "statistics_level=basic build"; }
+conan build . "${CONAN_SETTINGS[@]}" -o statistics_level=off -o with_tests=True -of "${WORK}/off" --version="${VERSION}" --build=missing > "${WORK}/off.log" 2>&1 \
+    || { cat "${WORK}/off.log"; fail "statistics_level=off build"; }
 
 readonly ON_HEADER="${WORK}/on/build/Release/include/utxoz/config.hpp"
 readonly OFF_HEADER="${WORK}/off/build/Release/include/utxoz/config.hpp"
 
-[[ -f "${ON_HEADER}"  ]] || fail "no generated config.hpp in the statistics=True build directory"
-[[ -f "${OFF_HEADER}" ]] || fail "no generated config.hpp in the statistics=False build directory"
+[[ -f "${ON_HEADER}"  ]] || fail "no generated config.hpp in the statistics_level=basic build directory"
+[[ -f "${OFF_HEADER}" ]] || fail "no generated config.hpp in the statistics_level=off build directory"
 
-grep -q '^#define UTXOZ_STATISTICS_ENABLED' "${ON_HEADER}" \
-    || fail "the statistics=True build directory does not have statistics enabled"
-grep -q 'undef UTXOZ_STATISTICS_ENABLED' "${OFF_HEADER}" \
-    || fail "the statistics=False build directory does not have statistics disabled"
+grep -q '^#define UTXOZ_STATISTICS_LEVEL 1' "${ON_HEADER}" \
+    || fail "the statistics_level=basic build directory does not have statistics enabled"
+grep -q '^#define UTXOZ_STATISTICS_LEVEL 0' "${OFF_HEADER}" \
+    || fail "the statistics_level=off build directory does not have statistics disabled"
 pass "each build directory kept its own configuration"
 
 # ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ cmake --install "${WORK}/on/build/Release" --prefix "${WORK}/prefix" > "${WORK}/
 [[ -f "${WORK}/prefix/include/utxoz/config.hpp"  ]] || fail "the installed package has no config.hpp"
 [[ -f "${WORK}/prefix/include/utxoz/version.hpp" ]] || fail "the installed package has no version.hpp"
 
-grep -q '^#define UTXOZ_STATISTICS_ENABLED' "${WORK}/prefix/include/utxoz/config.hpp" \
+grep -q '^#define UTXOZ_STATISTICS_LEVEL 1' "${WORK}/prefix/include/utxoz/config.hpp" \
     || fail "the installed config.hpp does not match the configuration it was built with"
 grep -q "${VERSION}" "${WORK}/prefix/include/utxoz/version.hpp" \
     || fail "the installed version.hpp does not carry the version it was built with"

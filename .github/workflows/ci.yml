@@ -907,6 +907,191 @@ jobs:
             exit 1
           fi
 
+  statistics-lookup:
+    needs: [setup]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: 🐧 Linux
+          - os: macos-15
+            name: 🍎 macOS
+          - os: windows-2025
+            name: 🪟 Windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    name: 🔬 Lookup telemetry (${{ matrix.name }})
+    permissions:
+      contents: read
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔧 Select GCC 16
+        if: runner.os == 'Linux'
+        run: |
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes gcc-16 g++-16
+          echo "CC=gcc-16" >> "$GITHUB_ENV"
+          echo "CXX=g++-16" >> "$GITHUB_ENV"
+
+      - name: 🔧 Locate MSVC
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'Visual Studio installation not found' }
+          $toolsetRoot = Join-Path $installation 'VC\Tools\MSVC'
+          $toolset = Get-ChildItem $toolsetRoot -Directory |
+            Where-Object Name -Like '14.44.*' |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $toolset) { throw "MSVC 14.44 is not installed under $toolsetRoot" }
+          $compiler = Join-Path $installation "VC\Tools\MSVC\$toolset\bin\Hostx64\x64\cl.exe"
+          if (-not (Test-Path $compiler)) { throw "MSVC x64 compiler not found at $compiler" }
+          $devShell = Join-Path $installation 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+          Import-Module $devShell
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -vcvars_ver=14.44'
+          @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCToolsInstallDir', 'VCINSTALLDIR', 'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion', 'UCRTVersion', 'UniversalCRTSdkDir') | ForEach-Object {
+            $value = [Environment]::GetEnvironmentVariable($_)
+            if ($value) { "$_=$value" >> $env:GITHUB_ENV }
+          }
+          "CXX=$compiler" >> $env:GITHUB_ENV
+          "VSWHERE=$vswhere" >> $env:GITHUB_ENV
+
+      # Fernando runs the release scripts by hand, from macOS. The Ubuntu copy of
+      # this suite proves the logic; this one proves it survives BSD grep, sed
+      # and wc, which differ from GNU in exactly the places these scripts touch:
+      # character classes, -o counting, and the padding wc puts around a number.
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan==${{ env.CONAN_VERSION }}
+          conan --version
+
+      - name: 🔧 Configure Conan
+        run: conan profile detect --force
+
+      # The same two settings the main matrix gives Windows. Without them Conan
+      # asks for the "Visual Studio 17 2022" generator and toolset v143, which
+      # this runner does not have — it has VS 18 — and Catch2 fails to configure
+      # long before anything of ours is compiled.
+      - name: 🔧 Use selected MSVC with Ninja
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $profile = Join-Path $env:USERPROFILE '.conan2\profiles\default'
+          Add-Content $profile "`n[conf]`ntools.cmake.cmaketoolchain:generator=Ninja`ntools.microsoft.msbuild:vs_version=18"
+
+      # The level that costs something, built and run on every platform we
+      # support: it widens its own counters and adds code to the read path, so
+      # "it compiles on Linux" is not evidence about the other two.
+      - name: 📦 Install dependencies
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+        run: |
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o "utxoz/*:statistics_level=lookup"
+
+      - name: ⚙️ Configure CMake
+        run: cmake --preset conan-release
+
+      - name: 🧪 The level reached the generated header
+        shell: bash
+        run: |
+          set -euo pipefail
+          header=$(find build -name config.hpp -path '*utxoz*' -print -quit)
+          grep -q '^#define UTXOZ_STATISTICS_LEVEL 2' "$header" || {
+            echo "the lookup level did not reach the generated header" >&2
+            grep UTXOZ_STATISTICS_LEVEL "$header" >&2
+            exit 1
+          }
+
+      - name: 🔨 Build
+        run: cmake --build --preset conan-release --parallel
+
+      # The telemetry cases assert exact counts and SKIP at every lower level, so
+      # this job is the only one where they actually run.
+      - name: 🧪 Run tests
+        run: ctest --preset conan-release --output-on-failure
+
+      - name: 🧪 The telemetry cases ran rather than skipped
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The exact names, not a glob: `utxoz_tests*` also matches the
+          # generated `utxoz_tests-<hash>_tests.cmake` that ctest writes beside
+          # the binary, and running that is a permission error rather than a
+          # suite.
+          suite=$(find build -type f \( -name 'utxoz_tests' -o -name 'utxoz_tests.exe' \) -print -quit)
+          test -n "$suite"
+          "$suite" "[telemetry]" | tee telemetry.log
+          grep -q "All tests passed" telemetry.log
+          if grep -qi "skipped" telemetry.log; then
+            echo "a telemetry case skipped in the job built to run them" >&2
+            exit 1
+          fi
+
+  statistics-level-rejected:
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    name: 🚫 An unknown statistics level is refused
+    permissions:
+      contents: read
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🐍 Install Conan
+        run: |
+          pipx install conan==${{ env.CONAN_VERSION }}
+          conan --version
+
+      - name: 🔧 Configure Conan
+        run: conan profile detect --force
+
+      - name: 📦 Install dependencies
+        env:
+          UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
+        run: |
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
+
+      # A typo must not quietly produce the default. Somebody who asked for
+      # "lookups" would otherwise go on to read counters that were never
+      # compiled, and find zeros.
+      - name: 🧪 CMake refuses a level it does not know, and says which
+        run: |
+          set -euo pipefail
+          if cmake -B build-bad -S . \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$PWD/build/build/Release/generators/conan_toolchain.cmake" \
+              -DUTXOZ_STATISTICS_LEVEL=lookups > refusal.log 2>&1; then
+            echo "an unknown statistics level was accepted" >&2
+            exit 1
+          fi
+          grep -q "UTXOZ_STATISTICS_LEVEL is 'lookups'" refusal.log
+          # CMake wraps the message, so the tail of the list lands on the next
+          # line: match the part that cannot be split.
+          grep -q "off, basic" refusal.log
+
+      - name: 🧪 Conan refuses one too
+        run: |
+          set -euo pipefail
+          if conan install . -of build-bad-conan --version="0.0.0-test" --build=missing \
+              -s build_type=Release -o "utxoz/*:statistics_level=lookups" > conan-refusal.log 2>&1; then
+            echo "Conan accepted an unknown statistics level" >&2
+            exit 1
+          fi
+          grep -qi "statistics_level" conan-refusal.log
+
   statistics-disabled:
     needs: [setup]
     runs-on: ubuntu-24.04
@@ -946,7 +1131,7 @@ jobs:
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o "utxoz/*:statistics=False"
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o "utxoz/*:statistics_level=off"
 
       - name: ⚙️ Configure CMake
         run: |
@@ -976,8 +1161,9 @@ jobs:
       # stopped at compilation would have gone green over it.
       - name: 🧪 Verify statistics really are compiled out
         run: |
-          if grep -q '^#define UTXOZ_STATISTICS_ENABLED' build/build/Release/include/utxoz/config.hpp; then
-            echo "this job is supposed to build with statistics disabled" >&2
+          if ! grep -q '^#define UTXOZ_STATISTICS_LEVEL 0' build/build/Release/include/utxoz/config.hpp; then
+            echo "this job is supposed to build with statistics_level=off" >&2
+            grep UTXOZ_STATISTICS_LEVEL build/build/Release/include/utxoz/config.hpp >&2
             exit 1
           fi
 

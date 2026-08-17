@@ -299,7 +299,7 @@ TEST_CASE_METHOD(ReferenceFixture, "Reference: statistics", "[reference]") {
     // count above are kept by the database itself and hold either way. Same
     // split as the full-mode test in test_database.cpp — this one was left
     // behind when that convention was applied.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     CHECK(stats.total_inserts >= 50);
 #endif
 }
