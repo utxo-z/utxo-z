@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786727834527,
+  "lastUpdate": 1786962623459,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -16063,6 +16063,145 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 56.11,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "701b6d129af5d05fa45b26adc08ca9bf929edb27",
+          "message": "feat!: a container's capacity and its file size are one decision, made once (#134)\n\nThey were two, and neither was decided. The file sizes arrived with the initial\nlibrary structure in January and nothing has revisited them since; the capacity\ncame out of `find_optimal_buckets`, a bisection that created and destroyed a\nsegment of the\nfull file size at every probe and read `bad_alloc` as its answer. The result was\nnot a choice but whatever survived the probes — and what actually limited\ncontainer 0 was neither memory nor measurement but a constant, 7864304, sitting\nin the call.\n\n`capacity_policy.hpp` holds both now, per container and per profile, measured by\nthe instrument from #133 on Linux, macOS and Windows.\n\n## Container 0\n\n    bucket_count           7 864 319  ->  15 728 639\n    entries before rotating 6 537 215  ->  13 074 431\n    file                   2048 MiB   ->  1340 MiB\n    a growth fits in it    yes        ->  no\n\nTwice the entries per generation in two thirds of the file, and the step above no\nlonger fits — so a growth cannot complete even if the guard were bypassed.\n\nThe size is not a round number that happens to work. The floor was measured at\n1 337 987 188 bytes on Linux, 48 fewer on macOS and 56 fewer on Windows — a fixed\ndifference, `sizeof(segment_manager)`, constant across all twelve measurements.\nFive per cent on the largest, rounded up to a whole mebibyte, is 1340 MiB, which\nis also a multiple of every page and mapping granularity in use. One size for\nthree platforms: a statement about the rule, not about the files, which remain\ncorrectly refused across platforms by `platform_abi_id`.\n\nThe other four classes and reference keep exactly what they had, recorded rather\nthan discovered and marked as not certified. Choosing them needs data this project\ndoes not have yet — a live histogram of output sizes, survival, which tier answers\na lookup — and the measurements are in doc/capacity-policy.md waiting for it.\n\n## The invariant, and where it is enforced\n\nA generation's bucket count never changes. That is the design: a container that\nfills up gets a new generation and compaction deals with the cost later, so a map\nthat grew instead is a defect even where there was room for it.\n\nThe guard now compares integers — `133/160` of the bucket count, which is\n`0.875 × 0.95` exactly — and takes that count from **the map that is open**, not\nfrom the policy. A generation written under the old policy keeps its own threshold\nof 6 537 215; a new one gets 13 074 431; the fixtures get theirs. The policy\ndecides what a new segment is created with. The file decides how it is operated.\n\nThe float it replaces could not represent a bucket count exactly above 2^24, which\nreference mode already exceeds. The error was far smaller than the margin, and a\nthreshold that decides whether a file rotates should not be computed in a type\nthat rounds.\n\n`rehashes_observed` counts generations whose bucket count moved, in **every**\nbuild rather than behind the statistics switch — an operator running without\nstatistics is exactly who needs to know. It is checked against the count the\ngeneration was opened with, so a growth from any path is caught, not only one that\nan insert witnessed.\n\nIt cannot become an error the caller acts on. It runs after the insert, and a\nretryable failure there would invite a second write of an entry that is already\nstored. The entry stands; the growth is logged and counted, and a build with\nassertions stops rather than burying the evidence.\n\n## Tested at three levels, because they fail separately\n\nThe arithmetic, where an off-by-one lives: the threshold is inclusive, so a map\nholding exactly that many is full and the next insert rotates — stated once so\nthat \"13 074 431 are allowed\" and \"rotate before the 13 074 432nd\" cannot drift\napart.\n\nThe behaviour, driven through the ordinary path at a size every CI run can afford:\ncontainer 4 in the test profile is 959 buckets and fills at 797. Insert to the\nlimit, nothing moved; one more, and a second generation appears while the first\nkeeps its bucket count and its entries; both are still readable, through\n`resolve()` for the one that rotated out. Reference gets its own pass rather than\nan argument by analogy.\n\nAnd the invariant itself, which no assertion can stand in for: the counter, across\nevery class and a rotation, in both configurations.\n\nMutations, each confirmed: removing the guard, moving the threshold to Boost's\ngrowth point, allowing one more insert, changing the requested capacity, and\ndropping the bucket-count check while relaxing the guard all turn the suite red.\nChanging anything in the production table fails the build: geometry 3 is compared\nagainst the table it is defined to be — every file size, capacity and bucket\ncount, for all five containers and reference — rather than against a list of\nfields somebody chose to check. Container 3's file size, the reference file size\nand any bucket count were each moved, and each stopped the build.\n\n`configure()` went from 0.18 s to 0.02 s with production sizes, and the suite from\n86 s to 65 s, but speed was never the argument — the argument is that a size can\nnow be read, checked and defended.\n\nSuites: 259 cases with statistics, 254 without.\n\n## Two thresholds, because there are two questions\n\nThe first version of this used one number for both, and it was the wrong one for\nhalf of them.\n\nA **live** container keeps five per cent of reserve — `133/160` of its bucket\ncount — because it is still receiving inserts and should make a new generation\nwith room to spare rather than at the last possible entry.\n\nA **sealed compaction target** is built once and never inserted into. It needs\nonly to not grow, so its limit is where Boost actually grows: `7 * buckets / 8`,\nin integers. Applying the live threshold to it refused merges that fit perfectly\nwell — two generations totalling fifty entries over the reserve, in a map with\nfive thousand to spare — which is what turned two existing compaction tests red.\n\nThe formula is a claim about Boost, so it is checked against Boost: real maps,\nfilled one entry at a time, at every step this project uses. Three points, and\nthe third is what makes the other two mean anything — at the limit the bucket\ncount holds, and one past it the map grows. Without that control the first two\nwould pass against a map that never grows at all.\n\nA target may therefore end up above the operating threshold, which is fine while\nit is sealed. The moment it becomes the active map, an insert rotates rather than\npushing it further: the guard reads the map's own size and answers before the\ninsert, not after.\n\n## Two guards nothing was watching\n\nBoth of these were written, reviewed and green, and neither was observed by a\ntest — the code could have been deleted and nothing would have said so.\n\n**A duplicate at the limit.** The order matters only when the map is full: below\nthe limit `emplace` answers both questions at once. So the case builds a target\nthat reaches the limit exactly — 12 767 entries plus 672 — and offers a third\nsource of exactly one entry, which makes the outcome independent of the order the\nmap iterates in. When that entry duplicates one already present the answer is\n`duplicate_key`; when it is new, `insufficient_space` and a retry with fewer\nsources. Asking the capacity first turns it red: the duplicate is reported as a\ngroup that is too large, the retry then succeeds, and a locally inconsistent\ndatabase is published as a clean compaction.\n\n**A packed target the next insert must not touch.** Building this state is the\nwhole difficulty, and the first attempt did not build it: the merged target landed\non exactly the growth point, where both thresholds refuse alike, so replacing the\noperating threshold with the growth point left the case green. It now lands\nstrictly between them — the operating threshold plus half the reserve — and the\nmutation turns it red twice over: no new generation appears, and the sealed\ngeneration gains an entry.\n\n## Four assertions that allowed either answer\n\n`compact_all` does not report `insufficient_space` to its caller: a group that\ndoes not fit is refused inside the walk, which retries with fewer sources and\nreports that it finished. Four cases said `if ( ! outcome) CHECK(the error is\ninsufficient_space)`, which asserts nothing at all — measured at each of the four,\nthe returned value is success. They now require it, and the refusal is read where\nit is visible: in the files.\n\n## wasm32, and what the geometry assertion does not say there\n\nThe pinned table was first written in decimal bytes, and `4294967296` does not\nnarrow to a 32-bit `size_t`. That is not a problem with the pin: `4_gib` is\ncomputed in `size_t`, so on wasm32 `reference_file_size` already wraps to **zero**,\nsilently, and has for as long as the constant has existed. The table is now\nwritten in the project's own unit literals, which follow the target's `size_t`\nexactly as the constants do.\n\nSo the assertion says less there than it looks like it says: both sides are the\nsame truncated value, which is agreement rather than certification. Reference mode\ncannot create its production segment where that constant is zero. Issue #135\nrecords it with the options; it is deliberately not fixed here, because fixing it\nmeans changing the type of every configured size and the Boost boundary they cross.\n\n## Compaction\n\nIt now knows before inserting whether an entry fits. A duplicate is rejected first\nand separately — the database being locally inconsistent is a different fact from\nthe group being too large, and it costs no capacity — and a new key is not\nattempted at all if it would take the map past the growth point. A refused group\nleaves every source untouched, publishes nothing, and lets the caller retry with\nfewer sources. The per-entry bucket-count check stays as a detector of something\nunexpected rather than as the mechanism.\n\n## Two tests that were arithmetic on the wrong width\n\n`bucket_step` returns `size_t`, and two checks in the arithmetic case deliberately\nreach past any real geometry — the point of them is that `max_entries_for` takes a\n`uint64_t` and stays exact. Shifting a `size_t` by 35 is undefined where `size_t`\nis 32 bits, so the ladder is built in the wider type there and tied to the real\none where both can represent the answer.\n\nAnd one bound for scanning generations instead of three. Sixteen in four cases,\nthirty-two in one, sixty-four in another: a case that scanned fewer than another\nwould miss a generation and report a smaller database, silently and only\nsometimes.\n\n## Counting a growth once\n\nThe counter compares against the count last *observed*, not the one the generation\nopened with. Comparing against the opening value reports the same growth again on\nevery insert that follows, turning one defect into a figure that measures how much\nwas written afterwards. A second, different growth is a second violation.\n\nDetection is separated from the assertion so the counting can be tested in a build\nwhose assertion would otherwise stop the program.\n\n## geometry_id 3\n\nNeither the config nor the stamp records a capacity, so before this there was\nnothing a reader could check: a binary with a new policy would have opened an\nolder database and operated it with thresholds meant for a different file. From 3\nonwards `geometry_id` identifies the whole storage geometry — the classes, which\npayload goes where, the capacity and the segment size — and geometry 2 is refused\nbefore anything is mapped. There is no migrator. `map_layout_epoch` and\n`hash_epoch` do not move.\n\nFixtures regenerated under geometry 3, with their bucket counts unchanged: the\nphysical difference comes from the identity, not from a capacity that drifted. Two\nruns at a fixed identity produce eighteen identical files.\n\n## What the mutations do and do not show\n\nRed, as they should be: shifting the growth limit by one fails the build on the\nassertion that pins it; counting every insert after a growth instead of the\ntransition fails seven cases; removing the live guard, moving its threshold to the\ngrowth point, allowing one more insert, and changing the requested capacity all\nfail.\n\nNot shown, and worth saying rather than leaving implied: **removing the compaction\nguard changes nothing observable in any configuration these tests can build.** At\nthe ten-megabyte test profile no class can grow at all — going from 959 buckets to\n1919 needs 18.8 MiB — so `bad_alloc` refuses first and the outcome is identical.\nThe guard matters where a file has slack, which today means reference in\nproduction, and that is the case this PR deliberately does not touch.\n\nSuites: 254 cases with statistics, 249 without.\n\n## The guard was untestable, and that was the point\n\nRemoving the compaction guard changed nothing observable, and the reason was not\nthat the guard is unnecessary: at ten megabytes no container can grow at all —\n959 buckets to 1919 needs 18.8 MiB — so `bad_alloc` refused first and the outcome\nwas identical either way. The tests could not tell \"the policy saw that a unique\nentry would not fit\" from \"we tried to grow and the allocator said no\", which\nleaves `bad_alloc` working as an accidental protocol.\n\nA capacity seam fixes that: a small map in the same file leaves room for the step\nabove, so Boost really can grow there. The case opens with that as a control — it\nfills a map in that very segment past the limit and requires the bucket count to\nmove — because without it the rest would pass against a map that could never have\ngrown, which is the mistake being corrected.\n\nWith the room proved present, compaction still grows nothing. Neutralising only\nthe preventive check takes the counter from zero to five.\n\nThe seam is per container, not global: one capacity for every class would ask the\n10240 class for a hundred and fifty megabytes inside a ten-megabyte file, which is\nhow the first attempt failed.\n\n## Smaller things from the same round\n\n`max_size_without_rehash` divides before multiplying, so nothing overflows however\nlarge the bucket count grows, and the remainder term keeps it exactly `floor(7n/8)`.\nIt is documented as a certified property of the Boost version this project\nsupports rather than a universal truth — the empirical tests are the authority and\nthis function is the shorthand.\n\nThe watch keeps both states again. `last_reported` is the deduplication;\n`at_open` stays so that every report can name where the generation started rather\nthan where the previous growth left it. A second growth now reads \"grew to 3839,\nfrom 1919 and originally 959\".\n\nAnd a duplicate key is reported as a duplicate even when the target is at its\nlimit: a database that is locally inconsistent and a group that is too large send\nthe caller to different places, and a duplicate costs no capacity, so it is\nchecked first.\n\nSuites: 256 cases with statistics, 251 without.\n\nThe count the mutation produces is written down where it is asserted, so that\nnobody reads it as an expected value. The assertion is equality with the count\nbefore — any growth at all fails it — and removing the guard yields several\nrather than one because `compact_all` tries the largest group and shrinks on\nrefusal, each attempt growing its own target before the per-entry detector stops\nit. How many depends on how many groups get tried, and is not part of the\nscenario.\n\n## A seam nothing reads\n\nThree of the refusal cases armed `fail_container_open` and said it proved the\nconfig is rejected before anything is mapped. It proved nothing: `open()` never\nreads that failpoint — only the compaction path does — so the seam was inert and\nthe claim was decoration on a test that could not fail either way.\n\nWhat they check now is observable and belongs to the code under test: the\nmodification time of every file before the refused open and after it. And the\nfirst thing that measurement said was that the claim as written was false — an\nopen that refuses still takes the directory's claim and records who holds it, so\n`.utxoz.lock` does change. That is correct behaviour, the refusal is a decision\nthis instance had to hold the database to make, and it is excluded by name with\nthe reason beside it. What must not change is the data, and it does not.\n\n## Capacity is part of the geometry, and now says so\n\n`geometry_id` 3 covers the capacity policy, but nothing pinned it: the classes had\nan assertion and the capacities did not, so a bucket count or a segment size could\nhave moved without the id following. Both now fail the build if they do.\n\nThat surfaced a duplicate: `bucket_step` was defined in the policy header and\nagain in the sizing tool. The tool uses the policy's, which is the point of having\none — an instrument measuring a ladder the store does not use would be measuring\nsomething else.\n\n## Smaller\n\nBelow the limit `emplace` is the only lookup a compaction entry costs; the\nseparate `find` runs only at the limit, where the order genuinely matters and a\nduplicate must still be reported as a duplicate. The dead `bucket_count_before`\nis gone from both insert paths. And the paragraph describing the inclusive\noperating threshold now sits above `max_entries_for`, which is what it describes,\nrather than above the growth-point function it had drifted onto.\n\nOne nitpick is skipped: requiring `compact_all` to fail with `insufficient_space`\nwould be wrong, because it succeeds. It refuses individual groups internally and\nreports that it finished, having merged nothing — checked before deciding.\n\n## Two properties, two observations\n\nModification time proved neither of them. It is not evidence that content is\nintact — a file can be rewritten with the same bytes — and it is not evidence of\nordering, since a segment can be mapped read-write and left alone.\n\n**The data is unchanged** is now a byte-for-byte digest of every persisted file\nbefore and after the refused open, plus a check that nothing half-made was left.\n`.utxoz.lock` stays excluded, with the reason: an open that refuses still takes\nthe directory's claim and records who holds it, so the honest claim is about the\ndata rather than about every file.\n\n**Nothing was mapped** is a counter at the only place this store maps an existing\nsegment, incremented inside `open_existing_segment` itself. Zero after a\ngeometry-mismatch open is the ordering, not an inference from it. A counter rather\nthan a seam that fails when reached: what has to be shown is that the edge was\nnever reached, and a seam that fails on arrival only shows what happens if it is.\n\nAnd the counter has a control, which is what makes it mean anything: the same case\nrepairs the config, opens successfully, and requires the counter to move. Without\nit a counter that never counted would satisfy the zero check, and the ordering\nwould be asserted by a number that is always zero — which is exactly what the\nmutation confirms: neutralising the increment turns that case red only because the\ncontrol is there.",
+          "timestamp": "2026-08-17T12:25:51+02:00",
+          "tree_id": "3eee45d4d9754fd6caab86d1347691fb1cd1c2f4",
+          "url": "https://github.com/utxo-z/utxo-z/commit/701b6d129af5d05fa45b26adc08ca9bf929edb27"
+        },
+        "date": 1786962623074,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 266999.7,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 557969.67,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 484610.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 788542.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 452.49,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 530.41,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12907707.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 26081017.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12711958.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12992.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2291964.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2407346.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 124005.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 13096.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2789.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3641.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2965.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 1072.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 1059.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 1066.49,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 1074.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 1101.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 1089.64,
             "unit": "ops/sec"
           }
         ]
