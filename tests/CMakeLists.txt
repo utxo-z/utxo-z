@@ -35,6 +35,8 @@ add_executable(utxoz_tests
     test_value_initialisation.cpp
     test_failpoint_reset.cpp
     test_fixture_generator.cpp
+    test_census.cpp
+    test_open_for_inspection.cpp
 )
 
 target_link_libraries(utxoz_tests
@@ -91,6 +93,17 @@ target_include_directories(utxoz_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../sr
 target_compile_definitions(utxoz_tests
     PRIVATE UTXOZ_FIXTURE_GENERATOR="$<TARGET_FILE:utxoz_make_format_fixtures>"
             UTXOZ_SIZING_TOOL="$<TARGET_FILE:utxoz_sizing>")
+
+# The census tool is built by UTXOZ_BUILD_TOOLS, which is a separate switch: it
+# is an operational tool and does not belong to the test lifecycle. So the case
+# that runs it is compiled only when it exists, and says so when it does not
+# rather than testing nothing quietly.
+if(TARGET utxoz_census)
+    target_compile_definitions(utxoz_tests
+        PRIVATE UTXOZ_CENSUS_TOOL="$<TARGET_FILE:utxoz_census>")
+else()
+    message(STATUS "utxoz_census not built: the case that runs it is not compiled")
+endif()
 
 # A contract that can only be checked by failing to compile.
 #

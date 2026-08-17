@@ -262,6 +262,18 @@ struct failpoints {
     static inline std::atomic<bool> force_database_id{false};
     static inline std::array<uint8_t, 16> forced_database_id{};
 
+    /// Deletes the config file at the one moment that matters: after the
+    /// directory claim has been taken and before the open decides whether a
+    /// database is there.
+    ///
+    /// It pins an ordering; it does not simulate a crash. If "is there a database
+    /// here" were asked *before* the claim — the shape a caller outside the
+    /// library is forced into — a config that vanished in between would leave
+    /// open-or-create making a new database over the answer already given. Armed,
+    /// this makes that window the whole of the run, and open_existing still
+    /// refuses because the question is asked inside the claim.
+    static inline std::atomic<bool> delete_config_after_claim{false};
+
     /// Fails the removal of the sidecar, and the barrier that confirms it.
     static inline std::atomic<bool> fail_sidecar_removal{false};
 
@@ -311,6 +323,7 @@ struct failpoints {
         forced_capacity.store(0, std::memory_order_relaxed);
         forced_capacity_index.store(0, std::memory_order_relaxed);
         force_database_id.store(false, std::memory_order_relaxed);
+        delete_config_after_claim.store(false, std::memory_order_relaxed);
         forced_database_id.fill(0);
     }
 

@@ -16,6 +16,7 @@
 #include <utility>
 
 #include <utxoz/aliases.hpp>
+#include <utxoz/census.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
@@ -384,6 +385,19 @@ struct db_base {
         }, &f);
     }
 
+    /**
+     * @brief Count what is stored, by walking the files.
+     *
+     * Not a statistic: the counters in `get_statistics()` describe what this
+     * process did since it opened the database, and this describes what is in it.
+     * The cost is a full pass over every generation of every class, and the
+     * report says how long it took and how much it read.
+     *
+     * `const` is a statement about this object and not about safety. It requires
+     * the exclusive directory claim and no concurrent mutation. See census.hpp.
+     */
+    [[nodiscard]] result<census_report> census(census_options const& options = {}) const;
+
     // Statistics
     [[nodiscard]] database_statistics get_statistics();
     void print_statistics();
@@ -429,6 +443,44 @@ struct full_db : db_base {
      */
     [[nodiscard]]
     static result<full_db> open(std::filesystem::path path, bool remove_existing = false);
+
+    /**
+     * @brief Open a database to look at it, creating nothing at all.
+     *
+     * `open()` makes a database where there is none, which is what a store should
+     * do and what an instrument must not: pointed at a mistyped path it would
+     * leave a new empty database behind and then report that it holds nothing.
+     *
+     * "Creates nothing" is meant literally, and that is what makes this a
+     * different kind of open rather than a flag on the usual one. `open()` also
+     * creates the active container of a **class that has no generations**, which
+     * compaction can produce by draining one completely — an ordinary state of a
+     * working database. For a store about to receive inserts, giving it version
+     * zero back is right. For an instrument it is not: a ten-megabyte file made
+     * on the way to measuring is a file the measurement then reports.
+     *
+     * So a class with no generations stays absent here, and is censused as zero
+     * generations and zero entries. The consequence is the contract: **this
+     * object supports `census()` and `close()`, and refuses everything else with
+     * `inspection_only`** — there is no map for the rest to work on, and making
+     * one is the thing being avoided.
+     *
+     * Whether a database exists is asked **under the directory claim**, so there
+     * is no window between deciding and opening. A caller who checked for
+     * themselves beforehand could only have that window.
+     *
+     * Fails with `database_not_found` when the directory is absent, when there is
+     * no database in it, or when there is a config with no generations behind it
+     * at all. Nothing is created — with one documented exception: taking the
+     * claim creates `.utxoz.lock` if it is not there, and that file is permanent
+     * by design (see database_lock). A lock file is not a database and is never
+     * read as one, so what is left behind is a directory this call still refuses.
+     *
+     * A database that *is* there and is wrong returns the error saying so — a
+     * corrupt config is `config_file_corrupt`, not `database_not_found`.
+     */
+    static result<full_db> open_for_inspection(std::filesystem::path path);
+    static result<full_db> open_for_inspection_for_testing(std::filesystem::path path);
 
     /**
      * @brief Open for testing with smaller file sizes (full mode)
@@ -611,6 +663,11 @@ struct reference_db : db_base {
      */
     [[nodiscard]]
     static result<reference_db> open(std::filesystem::path path, bool remove_existing = false);
+
+    /// Open a reference database to look at it, creating nothing. Supports
+    /// census() and close() and refuses the rest; see full_db::open_for_inspection().
+    static result<reference_db> open_for_inspection(std::filesystem::path path);
+    static result<reference_db> open_for_inspection_for_testing(std::filesystem::path path);
 
     /**
      * @brief Open for testing with smaller file sizes (reference mode)

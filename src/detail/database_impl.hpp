@@ -22,6 +22,7 @@
 
 #include <utxoz/aliases.hpp>
 #include <utxoz/database.hpp>
+#include <utxoz/census.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
@@ -68,7 +69,17 @@ struct database_impl {
     database_impl& operator=(database_impl&&) = delete;
 
     // Public interface implementation
+    /// Which of the two questions an open is asking. A typed pair rather than a
+    /// second bool beside `remove_existing`, where `open(path, false, false)`
+    /// would say nothing about which false is which.
+    enum class open_intent {
+        open_or_create,   ///< the historical behaviour: make one if there is none
+        inspection,       ///< read what is there and create nothing at all
+    };
+
     result<> configure(fs::path path, bool remove_existing, storage_mode mode = storage_mode::full);
+    result<> open_for_inspection(fs::path path, storage_mode mode = storage_mode::full);
+    result<> open_for_inspection_for_testing(fs::path path, storage_mode mode = storage_mode::full);
     result<> configure_for_testing(fs::path path, bool remove_existing, storage_mode mode = storage_mode::full);
     void close();
     size_t size() const;
@@ -96,6 +107,10 @@ struct database_impl {
     [[nodiscard]]
     result<reference_resolution> reference_resolve(std::span<lookup_request const> requests) const;
     result<> reference_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
+
+    /// Walks the files. Requires the exclusive claim and no concurrent mutation;
+    /// see census.hpp. Defined in src/census.cpp.
+    [[nodiscard]] result<census_report> census(census_options const& options) const;
 
     database_statistics get_statistics();
     void print_statistics();
@@ -263,6 +278,20 @@ public:
         return {};
     }
 
+    /// An inspection open creates nothing, which includes the active container of
+    /// a class that has no generations. Everything except census() and close()
+    /// would then be working on a container that is not there, so everything
+    /// except census() and close() is refused.
+    ///
+    /// The alternative was to create the missing container and call the result an
+    /// inspection, which is what this whole door exists not to do: an instrument
+    /// that writes a ten-megabyte file on its way to measuring is measuring
+    /// something it made.
+    [[nodiscard]] result<> refuse_if_inspection_only() const {
+        if (inspection_only_) return std::unexpected(error_code::inspection_only);
+        return {};
+    }
+
 private:
 
     // Utilities
@@ -274,7 +303,8 @@ private:
     size_t estimate_memory_usage(size_t index) const;
 
     // Internal configuration
-    result<> configure_internal(fs::path path, bool remove_existing, storage_mode mode);
+    result<> configure_internal(fs::path path, bool remove_existing, storage_mode mode,
+                                open_intent intent);
 
     // Metadata management
     void update_metadata_on_insert(size_t index, size_t version, raw_outpoint const& key, uint32_t height);
@@ -314,6 +344,9 @@ private:
     // Member variables
     fs::path db_path_;
     storage_mode mode_ = storage_mode::full;
+
+    /// Set by open_for_inspection(). See refuse_if_inspection_only().
+    bool inspection_only_ = false;
 
     // Full mode storage
     /// What a new segment gets: its size and the capacity its map is built with,

@@ -470,6 +470,18 @@ void database_impl::load_metadata_from_disk(size_t index, size_t version) {
 // database_impl - Public interface: configure, close, size
 // =============================================================================
 
+result<> database_impl::open_for_inspection(fs::path path, storage_mode mode) {
+    capacity_ = production_capacity;
+    reference_capacity_ = production_reference;
+    return configure_internal(std::move(path), false, mode, open_intent::inspection);
+}
+
+result<> database_impl::open_for_inspection_for_testing(fs::path path, storage_mode mode) {
+    capacity_ = testing_capacity;
+    reference_capacity_ = testing_reference;
+    return configure_internal(std::move(path), false, mode, open_intent::inspection);
+}
+
 result<> database_impl::configure(fs::path path, bool remove_existing, storage_mode mode) {
     // The profile is chosen here and nowhere else. Production fixes the capacity
     // and takes the file size that was measured for it; testing fixes the file
@@ -477,25 +489,45 @@ result<> database_impl::configure(fs::path path, bool remove_existing, storage_m
     // different questions and share no formula.
     capacity_ = production_capacity;
     reference_capacity_ = production_reference;
-    return configure_internal(std::move(path), remove_existing, mode);
+    return configure_internal(std::move(path), remove_existing, mode, open_intent::open_or_create);
 }
 
 result<> database_impl::configure_for_testing(fs::path path, bool remove_existing, storage_mode mode) {
     capacity_ = testing_capacity;
     reference_capacity_ = testing_reference;
-    return configure_internal(std::move(path), remove_existing, mode);
+    return configure_internal(std::move(path), remove_existing, mode, open_intent::open_or_create);
 }
 
-result<> database_impl::configure_internal(fs::path path, bool remove_existing, storage_mode mode) {
+result<> database_impl::configure_internal(fs::path path, bool remove_existing,
+                                           storage_mode mode, open_intent intent) {
     db_path_ = std::move(path);
+    inspection_only_ = (intent == open_intent::inspection);
 
     // Every filesystem question here is asked so that "I could not tell" comes
     // back as an error. Asked the throwing way, an unreadable directory raises
     // out of a result-typed open(); asked the swallowing way, it answers "no"
     // and the database gets recreated over data that is still there.
     std::error_code ec;
-    fs::create_directories(db_path_, ec);
-    if (ec) return std::unexpected(error_code::catalog_unreadable);
+    if (intent == open_intent::inspection) {
+        // Not created. A caller who asked to open a database that already exists
+        // is not asking for a directory to be made for them, and making one is a
+        // side effect on the way to an error.
+        //
+        // status() rather than is_directory(): absence is an answer to this
+        // question and not a failure to answer it, and status() is the one that
+        // reports it that way. is_directory() sets an error for a path that is
+        // not there, which would come back as "the directory could not be read"
+        // — a different problem, sending a person somewhere else.
+        auto const what = fs::status(db_path_, ec);
+        if (ec && what.type() != fs::file_type::not_found) {
+            return std::unexpected(error_code::catalog_unreadable);
+        }
+        if ( ! fs::is_directory(what)) return std::unexpected(error_code::database_not_found);
+        ec.clear();
+    } else {
+        fs::create_directories(db_path_, ec);
+        if (ec) return std::unexpected(error_code::catalog_unreadable);
+    }
 
     // Any claim this instance already held goes first. Pointed at the same
     // directory it would otherwise refuse itself — the lock belongs to an open
@@ -550,8 +582,31 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
 
     // Check config persistence (detect mode mismatch on reopen)
     auto config_path = db_path_ / "utxoz_config.dat";
+
+    // The seam that pins the ordering below. See durability.hpp: it makes the
+    // window between "is there a database here" and "open it" the whole of the
+    // run, and the point is that there is no such window, because both happen
+    // under the claim taken above.
+    if (failpoints::delete_config_after_claim.load(std::memory_order_relaxed)) {
+        std::error_code ignored;
+        fs::remove(config_path, ignored);
+    }
+
     auto const config_exists = path_exists(config_path);
     if ( ! config_exists) return std::unexpected(config_exists.error());
+
+    // Asked here, under the claim, and not by the caller beforehand. A caller
+    // outside the library can only ask before opening, and between their answer
+    // and the open the file can go; then open-or-create would create a database
+    // over the answer they were given. Inside the claim there is no such window.
+    //
+    // Nothing has been created at this point: the claim's own file exists, and a
+    // lock file is not a database and is never read as one.
+    if (intent == open_intent::inspection && ! *config_exists) {
+        log::error("{}: no database here, and open_existing does not create one",
+                   path_display(db_path_));
+        return std::unexpected(error_code::database_not_found);
+    }
 
     // Read and held against this build before a single segment is mapped. A
     // database written under a geometry, a map layout, a hash or a platform this
@@ -636,8 +691,22 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         reference_catalog_.clear();
         for (auto const v : *listed) reference_catalog_.add(v);
 
+        // A config with no generations behind it is not a database to open: it is
+        // the shape a database has for the instant between its config being
+        // written and its first segment existing, or what is left when the data
+        // has been removed and the config has not. Opening it would take the
+        // creation branch below and make segments, which is the one thing
+        // open_existing() promises not to do.
+        if (intent == open_intent::inspection && reference_catalog_.empty()) {
+            log::error("{}: a config with no generations is not a database to open, "
+                       "and open_existing does not create the missing ones",
+                       path_display(db_path_));
+            return std::unexpected(error_code::database_not_found);
+        }
+
         // Whether this is a creation is the catalogue's answer, not the map's.
-        // "db_map was not there" must never become "so I made one".
+        // "db_map was not there" must never become "so I made one". An inspection
+        // never reaches the creation branch: an empty catalogue was refused above.
         bool const fresh = reference_catalog_.empty();
         size_t const latest_version = reference_catalog_.active();
         if (auto const ready = fresh ? reference_create(latest_version)
@@ -697,6 +766,25 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
         });
         if ( ! catalog_error.has_value()) return catalog_error;
 
+        // See the reference branch. Every class of a database that was created
+        // has at least version zero, so all five catalogues empty means the
+        // config is there and the database behind it is not — and the loop below
+        // would create the five segments rather than say so.
+        //
+        // All five, not any one: a class whose generations were all drained by
+        // compaction is legitimately empty and gets version zero back on the next
+        // open, which is ordinary and not this.
+        if (intent == open_intent::inspection) {
+            bool any = false;
+            for (auto const& catalog : catalogs_) any = any || ! catalog.empty();
+            if ( ! any) {
+                log::error("{}: a config with no generations is not a database to "
+                           "open, and open_existing does not create the missing ones",
+                           path_display(db_path_));
+                return std::unexpected(error_code::database_not_found);
+            }
+        }
+
         // As with the catalogue above, the first container that cannot be
         // described stops the open; the ones after it are not even mapped.
         result<> count_error;
@@ -706,6 +794,20 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing, 
             // See the reference branch: the catalogue decides, not the map.
             bool const fresh = catalogs_[I].empty();
             size_t const latest_version = catalogs_[I].active();
+
+            // A class with no generations at all. Compaction can drain one
+            // completely, so this is an ordinary state of a working database and
+            // not damage — and an open-or-create gives it version zero back,
+            // which is right for a store about to receive inserts.
+            //
+            // An inspection must not. Creating a ten-megabyte file on the way to
+            // measuring a database means measuring something this call made, and
+            // the report would carry it. The class stays absent, is censused as
+            // zero generations and zero entries, and every operation that would
+            // need the container it does not have is refused; see
+            // refuse_if_inspection_only().
+            if (fresh && intent == open_intent::inspection) return;
+
             if (auto const ready = fresh ? create_container<I>(latest_version)
                                          : open_existing_container<I>(latest_version);
                 ! ready) {
@@ -2492,10 +2594,33 @@ sizing_report database_impl::get_sizing_report() const {
 void database_impl::print_sizing_report() const {
     auto report = get_sizing_report();
 
+    // What this is, said before the numbers rather than left to be inferred.
+    //
+    // Every figure below except the file size is a counter that started when
+    // this process opened the database: the inserts it performed, the entries it
+    // is holding, the sizes it was handed. A database opened a moment ago and
+    // full of years of data reports almost nothing here, and that is not a
+    // defect — it is what a counter is. Reading the files is census(), which says
+    // so and charges for it.
+    //
+    // The file size is not a measurement either: it is the setting a new segment
+    // is created with, not what any file occupies.
     log::info("=== UTXO-Z Sizing Report ===");
+    log::info("Session counters since this process opened the database, not the");
+    log::info("contents of the files. For what is stored, run census().");
     log::info("");
 
-    for (size_t i = 0; i < container_count; ++i) {
+    // Reference mode fills one container and leaves the rest at zero. Printing
+    // five would be printing four containers that do not exist, in a report whose
+    // whole subject is how much space things take.
+    size_t const printed = (mode_ == storage_mode::reference) ? 1 : container_count;
+    if (mode_ == storage_mode::reference) {
+        log::info("Reference mode: one class of fixed {}-byte records.",
+                  sizeof(reference_value));
+        log::info("");
+    }
+
+    for (size_t i = 0; i < printed; ++i) {
         auto const& c = report.containers[i];
         double file_size_gib = double(c.file_size_setting) / (1024.0 * 1024.0 * 1024.0);
         double file_size_mib = double(c.file_size_setting) / (1024.0 * 1024.0);
@@ -2508,11 +2633,12 @@ void database_impl::print_sizing_report() const {
                       i, c.container_size, file_size_mib);
         }
 
-        log::info("  Files: {}", c.file_count);
-        log::info("  Current entries: {:L}", c.current_entries);
-        log::info("  Historical inserts: {:L}", c.historical_inserts);
-        log::info("  Historical deletes: {:L}", c.historical_deletes);
-        log::info("  Wasted bytes: {:L} ({:.2f} bytes/entry avg)",
+        log::info("  Files (catalogued now): {}", c.file_count);
+        log::info("  Entries inserted by this process and not yet deleted by it: {:L}",
+                  c.current_entries);
+        log::info("  Inserts by this process: {:L}", c.historical_inserts);
+        log::info("  Deletes by this process: {:L}", c.historical_deletes);
+        log::info("  Payload capacity left unused by those inserts: {:L} ({:.2f} bytes/entry avg)",
                   c.total_wasted_bytes, c.avg_waste_per_entry);
         log::info("");
     }
@@ -2532,7 +2658,8 @@ void database_impl::print_sizing_report() const {
         total_count += cnt;
     }
 
-    log::info("--- Global Value Size Histogram ({} distinct sizes) ---", sorted_histogram.size());
+    log::info("--- Sizes of the values this process inserted ({} distinct sizes) ---",
+              sorted_histogram.size());
     for (auto const& [value_size, count] : sorted_histogram) {
         double pct = total_count > 0 ? double(count) / double(total_count) * 100.0 : 0.0;
         log::info("  {} bytes: {:L} ({:.1f}%)", value_size, count, pct);
@@ -3553,6 +3680,14 @@ template result<> database_impl::create_container<1>(size_t);
 template result<> database_impl::create_container<2>(size_t);
 template result<> database_impl::create_container<3>(size_t);
 template result<> database_impl::create_container<4>(size_t);
+
+// The const accessor, because src/census.cpp reads the active maps from another
+// translation unit. The non-const one is used only here and needs no instance.
+template utxo_map<container_sizes[0]> const& database_impl::container<0>() const;
+template utxo_map<container_sizes[1]> const& database_impl::container<1>() const;
+template utxo_map<container_sizes[2]> const& database_impl::container<2>() const;
+template utxo_map<container_sizes[3]> const& database_impl::container<3>() const;
+template utxo_map<container_sizes[4]> const& database_impl::container<4>() const;
 
 template void database_impl::close_container<0>();
 template void database_impl::close_container<1>();
