@@ -225,6 +225,28 @@ enum class error_code : uint8_t {
     /// that one sends an operator looking for damage and this one for a file
     /// that was put somewhere it does not belong.
     segment_misplaced,
+    /// The database was opened for inspection, and this operation is not part of
+    /// inspecting it. An inspection open creates nothing — including the active
+    /// container of a class that has none — so there is no map for most
+    /// operations to work on, and refusing is the honest answer rather than
+    /// creating one on their behalf.
+    inspection_only,
+    /// There is no database here, and the caller asked to open one that already
+    /// exists. Distinct from every error about a database that *is* here and is
+    /// wrong: this one says nothing was read, nothing was written, and nothing
+    /// was created.
+    database_not_found,
+    /// A figure read out of a file cannot be true — an entry whose recorded
+    /// payload length is longer than the class it lives in can hold, a map
+    /// holding more entries than it has buckets, or counts that cannot be
+    /// combined without overflowing sixty-four bits.
+    ///
+    /// Apart from every stamp error above, and not by accident. Those say the
+    /// file is not one of ours, or is not where it claims to be; the config and
+    /// the stamp certify identity and layout, and they say nothing about whether
+    /// each entry is internally consistent. This one says the file passed all of
+    /// that and an entry inside it still cannot be true.
+    entry_corrupt,
 };
 
 /**

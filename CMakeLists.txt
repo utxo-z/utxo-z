@@ -41,6 +41,12 @@ option(UTXOZ_BUILD_EXAMPLES "Build examples" ON)
 option(UTXOZ_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(UTXOZ_BUILD_LARGE_BENCHMARKS "Build large-scale benchmarks (production file sizes, requires significant disk/RAM)" ON)
 option(UTXOZ_BUILD_DOCS "Build documentation" OFF)
+# Operational tools, meaning tools an operator runs against a real database
+# rather than instruments the project uses on itself. They use the public API
+# only, they are installed with the library, and they are deliberately not tied
+# to UTXOZ_BUILD_TESTS: a node operator who builds with tests off still needs to
+# be able to ask what is in their database.
+option(UTXOZ_BUILD_TOOLS "Build operational tools (utxoz_census)" ON)
 option(UTXOZ_CONAN_BUILD "Building via Conan (skip cmake config generation)" OFF)
 
 # Log backend: custom, spdlog, none
@@ -89,6 +95,7 @@ add_library(utxoz::utxoz ALIAS utxoz)
 target_sources(utxoz
     PRIVATE
         src/database.cpp
+        src/census.cpp
         src/statistics.cpp
         src/utils.cpp
         src/log.cpp
@@ -189,6 +196,25 @@ if(UTXOZ_BUILD_EXAMPLES)
 endif()
 
 # Tests
+# Operational tools
+#
+# Defined before the tests, so that the suite can see whether the target exists
+# and compile the case that runs it. The dependency goes that way and only that
+# way: the tool knows nothing about the tests.
+#
+# Outside the test block on purpose. `utxoz_census` answers "what is in this
+# database", which is a question an operator asks about a production directory,
+# so tying it to the test lifecycle would mean a node build could not produce it.
+# It links the public API and nothing else: no internal headers, no test support,
+# no dependency on the fixtures generator or the sizing instrument.
+if(UTXOZ_BUILD_TOOLS)
+    add_executable(utxoz_census tools/census.cpp)
+    target_link_libraries(utxoz_census PRIVATE utxoz)
+    # Only because Boost.Interprocess reaches MSVC's auto-link pragmas through
+    # the public headers; see the note in the test CMakeLists.
+    target_compile_definitions(utxoz_census PRIVATE BOOST_ALL_NO_LIB)
+endif()
+
 if(UTXOZ_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
@@ -218,6 +244,9 @@ if(UTXOZ_BUILD_TESTS)
 
     # The suite runs the generator, so it has to exist before the suite does.
     add_dependencies(utxoz_tests utxoz_make_format_fixtures utxoz_sizing)
+    if(TARGET utxoz_census)
+        add_dependencies(utxoz_tests utxoz_census)
+    endif()
 endif()
 
 # Benchmarks
@@ -243,6 +272,13 @@ install(TARGETS utxoz
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# Install the operational tools. They are installed rather than merely built,
+# because the database worth censusing belongs to a node and the person asking
+# is on that machine, not in this source tree.
+if(UTXOZ_BUILD_TOOLS)
+    install(TARGETS utxoz_census RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 # Install headers
 #
