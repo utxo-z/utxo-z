@@ -99,6 +99,14 @@ inline result<std::unique_ptr<bip::managed_mapped_file>> open_existing_segment(f
         log::error("{}: {} bytes is too small to be a version file", path_display(path), size);
         return std::unexpected(error_code::file_open_failed);
     }
+    if (auto const limit = failpoints::fail_segment_open_after.load(std::memory_order_relaxed);
+        limit != 0
+        && failpoints::segments_mapped.load(std::memory_order_relaxed) >= limit) {
+        log::error("{}: failpoint: refusing to map after {} segments",
+                   path_display(path), limit);
+        return std::unexpected(error_code::file_open_failed);
+    }
+
     try {
         auto mapped = std::make_unique<bip::managed_mapped_file>(bip::open_only, path.c_str());
         // Counted at the edge itself, so a test can ask whether a refusal came

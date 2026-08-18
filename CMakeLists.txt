@@ -46,7 +46,7 @@ option(UTXOZ_BUILD_DOCS "Build documentation" OFF)
 # only, they are installed with the library, and they are deliberately not tied
 # to UTXOZ_BUILD_TESTS: a node operator who builds with tests off still needs to
 # be able to ask what is in their database.
-option(UTXOZ_BUILD_TOOLS "Build operational tools (utxoz_census)" ON)
+option(UTXOZ_BUILD_TOOLS "Build operational tools (utxoz_census, utxoz_verify_unique)" ON)
 option(UTXOZ_CONAN_BUILD "Building via Conan (skip cmake config generation)" OFF)
 
 # Log backend: custom, spdlog, none
@@ -129,6 +129,7 @@ target_sources(utxoz
     PRIVATE
         src/database.cpp
         src/census.cpp
+        src/uniqueness.cpp
         src/statistics.cpp
         src/statistics_json.cpp
         src/utils.cpp
@@ -247,6 +248,14 @@ if(UTXOZ_BUILD_TOOLS)
     # Only because Boost.Interprocess reaches MSVC's auto-link pragmas through
     # the public headers; see the note in the test CMakeLists.
     target_compile_definitions(utxoz_census PRIVATE BOOST_ALL_NO_LIB)
+
+    # A second binary rather than a flag on the first: they answer different
+    # questions and, more to the point, they exit differently. A census that
+    # started returning 2 because of what it found would break every caller that
+    # treats a non-zero status as "the tool failed".
+    add_executable(utxoz_verify_unique tools/verify_unique.cpp)
+    target_link_libraries(utxoz_verify_unique PRIVATE utxoz)
+    target_compile_definitions(utxoz_verify_unique PRIVATE BOOST_ALL_NO_LIB)
 endif()
 
 if(UTXOZ_BUILD_TESTS)
@@ -281,6 +290,9 @@ if(UTXOZ_BUILD_TESTS)
     if(TARGET utxoz_census)
         add_dependencies(utxoz_tests utxoz_census)
     endif()
+    if(TARGET utxoz_verify_unique)
+        add_dependencies(utxoz_tests utxoz_verify_unique)
+    endif()
 endif()
 
 # Benchmarks
@@ -311,7 +323,8 @@ install(TARGETS utxoz
 # because the database worth censusing belongs to a node and the person asking
 # is on that machine, not in this source tree.
 if(UTXOZ_BUILD_TOOLS)
-    install(TARGETS utxoz_census RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS utxoz_census utxoz_verify_unique
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 # Install headers

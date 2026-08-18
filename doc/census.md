@@ -32,12 +32,21 @@ can be stored in two places:
 
 Both are inconsistent states, and compaction says so — it refuses a merge with
 `duplicate_key` and calls the database locally inconsistent — but nothing
-prevents them from arising and nothing reports them today. Worse, which copy
-answers a lookup can depend on the LRU cache; that is issue #136. Reconciling them is a
-second, more expensive walk, with its own algorithm and its own memory bound. It
-is deliberately not in this scope, and `entries` here is a count of stored
-entries rather than of distinct outpoints. The report says so in its own text, so
-a pasted excerpt carries the caveat with it.
+prevents them from arising. Worse, which copy answers a lookup can depend on the
+LRU cache; that is issue #136.
+
+Finding them is a second and more expensive walk, with its own algorithm and its
+own memory bound. It is deliberately not this scope and not a mode of it:
+`verify_unique_outpoints()` answers it, and `doc/uniqueness.md` describes it.
+`entries` here is a count of stored entries rather than of distinct outpoints.
+The report says so in its own text, so a pasted excerpt carries the caveat with
+it.
+
+The two are complementary, and the order matters: **a census tells you what is
+stored, and a verification tells you whether to believe that the two numbers are
+the same one.** In a database that passes the verification they are, and the
+census's payload histogram is a histogram of distinct outpoints as well as of
+copies.
 
 ## Exact, modelled, residual
 

@@ -43,9 +43,11 @@ class UtxozConan(ConanFile):
         "with_examples": False,
         "with_benchmarks": False,
         # The operational tools travel with the package. utxoz_census answers
-        # "what is in this database", which is asked about a production directory
-        # by whoever is running one — so a consumer who installs the library gets
-        # the binary that answers it, not a source tree they have to build again.
+        # "what is in this database" and utxoz_verify_unique answers "is every
+        # outpoint in it stored more than once", and both are asked about a production
+        # directory by whoever is running one — so a consumer who installs the
+        # library gets the binaries that answer them, not a source tree they have
+        # to build again.
         "with_tools": True,
         "with_large_benchmarks": True,
         "log": "custom",

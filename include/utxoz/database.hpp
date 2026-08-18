@@ -17,6 +17,7 @@
 
 #include <utxoz/aliases.hpp>
 #include <utxoz/census.hpp>
+#include <utxoz/uniqueness.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
@@ -398,6 +399,36 @@ struct db_base {
      */
     [[nodiscard]] result<census_report> census(census_options const& options = {}) const;
 
+    /**
+     * @brief Is any outpoint stored more than once, across every class and
+     *        every generation?
+     *
+     * A separate operation and not a mode of `census()`: a census describes what
+     * is there, and this decides whether what is there is allowed to be. The
+     * report carries the verdict, and a database with duplicates is answered
+     * rather than refused — see uniqueness.hpp.
+     *
+     * Considerably more expensive than a census: the data is re-read once per
+     * partition group, inside `verify_options::memory_budget`, and the report
+     * says how many passes that took.
+     *
+     * Same contract as `census()`: `const` is a statement about this object and
+     * not about safety. It requires the exclusive directory claim and no
+     * concurrent mutation.
+     *
+     * Fails with `insufficient_space` when the budget or the pass limit cannot
+     * accommodate the walk — including when a single partition holds more copies
+     * than the budget can hold at once, which no number of passes can help; with
+     * `file_open_failed` or `entry_corrupt` when a generation cannot be read; with
+     * `recovery_required` on a latched store, because an interrupted compaction
+     * can leave a merged generation beside its sources and a verdict rendered on
+     * that would accuse the database of something the interruption did; and with
+     * `closed` on a closed object. There is deliberately **no** error for a
+     * duplicate: that is a successful verification with `unique == false`.
+     */
+    [[nodiscard]] result<uniqueness_report> verify_unique_outpoints(
+        verify_options const& options = {}) const;
+
     // Statistics
     [[nodiscard]] database_statistics get_statistics();
     void print_statistics();
@@ -461,9 +492,9 @@ struct full_db : db_base {
      *
      * So a class with no generations stays absent here, and is censused as zero
      * generations and zero entries. The consequence is the contract: **this
-     * object supports `census()` and `close()`, and refuses everything else with
-     * `inspection_only`** — there is no map for the rest to work on, and making
-     * one is the thing being avoided.
+     * object supports `census()`, `verify_unique_outpoints()` and `close()`, and
+     * refuses everything else with `inspection_only`** — there is no map for the
+     * rest to work on, and making one is the thing being avoided.
      *
      * Whether a database exists is asked **under the directory claim**, so there
      * is no window between deciding and opening. A caller who checked for
@@ -665,7 +696,8 @@ struct reference_db : db_base {
     static result<reference_db> open(std::filesystem::path path, bool remove_existing = false);
 
     /// Open a reference database to look at it, creating nothing. Supports
-    /// census() and close() and refuses the rest; see full_db::open_for_inspection().
+    /// census(), verify_unique_outpoints() and close(), and refuses the rest; see
+    /// full_db::open_for_inspection().
     static result<reference_db> open_for_inspection(std::filesystem::path path);
     static result<reference_db> open_for_inspection_for_testing(std::filesystem::path path);
 

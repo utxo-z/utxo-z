@@ -5,6 +5,7 @@
 #pragma once
 
 #include <utxoz/census.hpp>
+#include <utxoz/uniqueness.hpp>
 #include <utxoz/config.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/logging.hpp>
