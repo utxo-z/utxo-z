@@ -55,11 +55,44 @@ if(NOT DEFINED UTXOZ_LOG_BACKEND)
 endif()
 message(STATUS "Log backend: ${UTXOZ_LOG_BACKEND}")
 
-# Statistics: enabled by default
-if(NOT DEFINED UTXOZ_STATISTICS_ENABLED)
-    set(UTXOZ_STATISTICS_ENABLED ON)
+# Statistics: one cumulative level rather than a switch per counter set.
+#
+#   off     nothing is compiled
+#   basic   the counters that describe what this process did: inserts, probes,
+#           resolutions, lifetimes
+#   lookup  basic, plus the per-class read-path telemetry
+#
+# `lookup` is not the default and is not meant to be. It costs about eleven per
+# cent of a find() that hits, measured, on the path a node spends most of its
+# time in; it is for measurement builds run against a real database. It also
+# widens its own counters, which is why it is a level and not a flag: at `basic`
+# nothing of it is compiled and the older counters keep the size they had. The
+# sharded read-path counters come to 16 KiB per open database at `basic` and
+# 96 KiB at `lookup` — a subtotal of three of them, not the size of every
+# statistic. See doc/statistics-levels.md, which is where these figures are kept
+# so that they are kept in one place.
+#
+# Names, not numbers, because a build log that says "2" says nothing. The numeric
+# form exists only inside the generated header, for `#if` to compare against.
+set(UTXOZ_STATISTICS_LEVEL "basic" CACHE STRING
+    "Statistics compiled in: off, basic, or lookup")
+set_property(CACHE UTXOZ_STATISTICS_LEVEL PROPERTY STRINGS off basic lookup)
+
+if(UTXOZ_STATISTICS_LEVEL STREQUAL "off")
+    set(UTXOZ_STATISTICS_LEVEL_VALUE 0)
+elseif(UTXOZ_STATISTICS_LEVEL STREQUAL "basic")
+    set(UTXOZ_STATISTICS_LEVEL_VALUE 1)
+elseif(UTXOZ_STATISTICS_LEVEL STREQUAL "lookup")
+    set(UTXOZ_STATISTICS_LEVEL_VALUE 2)
+else()
+    # Refused rather than defaulted. A typo that silently produced `basic` would
+    # be a build nobody asked for, and the person who asked for `lookups` would
+    # go on to read counters that were never compiled.
+    message(FATAL_ERROR
+        "UTXOZ_STATISTICS_LEVEL is '${UTXOZ_STATISTICS_LEVEL}'. "
+        "It has to be one of: off, basic, lookup.")
 endif()
-message(STATUS "Statistics: ${UTXOZ_STATISTICS_ENABLED}")
+message(STATUS "Statistics level: ${UTXOZ_STATISTICS_LEVEL} (${UTXOZ_STATISTICS_LEVEL_VALUE})")
 
 # Set variables for config.hpp generation
 set(UTXOZ_LOG_CUSTOM OFF)
@@ -97,6 +130,7 @@ target_sources(utxoz
         src/database.cpp
         src/census.cpp
         src/statistics.cpp
+        src/statistics_json.cpp
         src/utils.cpp
         src/log.cpp
         src/database_impl.cpp

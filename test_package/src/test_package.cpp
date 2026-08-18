@@ -49,7 +49,7 @@
 int main() {
     std::cout << "utxoz " << utxoz::version << '\n';
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     std::cout << "statistics: enabled\n";
 #else
     std::cout << "statistics: disabled\n";

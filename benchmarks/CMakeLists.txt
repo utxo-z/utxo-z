@@ -15,6 +15,7 @@ add_executable(utxoz_benchmarks
     bench_erase.cpp
     bench_mixed_workload.cpp
     bench_storage.cpp
+    bench_lookup_telemetry.cpp
     storage_overhead_report.cpp
 )
 
@@ -23,6 +24,10 @@ target_link_libraries(utxoz_benchmarks
         utxoz::utxoz
         nanobench::nanobench
 )
+
+# The telemetry benchmark drives rotations through the failpoints, which live
+# in an internal header. The rest of the suite uses the public API only.
+target_include_directories(utxoz_benchmarks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
 # Large-scale benchmarks (production file sizes, 2GB containers)
 if(UTXOZ_BUILD_LARGE_BENCHMARKS)

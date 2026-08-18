@@ -15,5 +15,13 @@
 #cmakedefine UTXOZ_LOG_SPDLOG
 #cmakedefine UTXOZ_LOG_NONE
 
-// Statistics collection
-#cmakedefine UTXOZ_STATISTICS_ENABLED
+// How much of the statistics machinery this build carries.
+//
+//   0  off     nothing
+//   1  basic   what this process did: inserts, probes, resolutions, lifetimes
+//   2  lookup  basic, plus the per-class read-path telemetry
+//
+// Cumulative on purpose, so a check reads `>= 1` or `>= 2` and there is one
+// authority rather than a flag per counter set. The level is chosen by name at
+// configure time; this is the number those names produce.
+#define UTXOZ_STATISTICS_LEVEL @UTXOZ_STATISTICS_LEVEL_VALUE@

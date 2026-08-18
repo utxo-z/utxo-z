@@ -58,7 +58,7 @@ std::vector<uint8_t> make_value(size_t size) {
 } // anonymous namespace
 
 // Counter values only exist when recording is compiled in.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
 TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
     auto const path = make_unique_path("counts");
     std::filesystem::remove_all(path);
@@ -123,7 +123,7 @@ TEST_CASE("search statistics count every lookup exactly once", "[statistics]") {
  * fanning the inputs out across N reader threads that all call find().
  */
 // Counter values only exist when recording is compiled in.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
 TEST_CASE("search statistics survive concurrent recorders", "[statistics][concurrency]") {
     auto const path = make_unique_path("threads");
     std::filesystem::remove_all(path);
@@ -271,7 +271,7 @@ TEST_CASE("concurrent misses record a probe and nothing else", "[statistics][con
 }
 
 // Counter values only exist when recording is compiled in.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
 TEST_CASE("search statistics stay bounded", "[statistics]") {
     auto const path = make_unique_path("bounded");
     std::filesystem::remove_all(path);
@@ -313,7 +313,7 @@ TEST_CASE("search statistics stay bounded", "[statistics]") {
  * other records.
  */
 // Counter values only exist when recording is compiled in.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
 TEST_CASE("probe and resolution counters describe different phases",
           "[statistics][contract]") {
     auto const path = make_unique_path("split");
@@ -399,7 +399,7 @@ TEST_CASE("probe and resolution counters describe different phases",
  * also mixed real ages with absolute heights.
  */
 // Counter values only exist when recording is compiled in.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
 TEST_CASE("erases do not contaminate the probe age", "[statistics][contract]") {
     auto const path = make_unique_path("age");
     std::filesystem::remove_all(path);
@@ -456,7 +456,7 @@ TEST_CASE("statistics compile out cleanly", "[statistics]") {
         }
 
         auto const stats = db.get_statistics();
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         CHECK(stats.probes.probes == 100);
 #else
         CHECK(stats.probes.probes == 0);

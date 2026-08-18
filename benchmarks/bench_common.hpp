@@ -25,6 +25,8 @@
 #include <nanobench.h>
 
 #include <utxoz/database.hpp>
+
+#include "detail/durability.hpp"
 #include <utxoz/types.hpp>
 #include <utxoz/utils.hpp>
 
@@ -127,6 +129,9 @@ void register_find_benchmarks(ankerl::nanobench::Bench& bench);
 void register_erase_benchmarks(ankerl::nanobench::Bench& bench);
 void register_mixed_workload_benchmarks(ankerl::nanobench::Bench& bench);
 void register_storage_benchmarks(ankerl::nanobench::Bench& bench);
+/// The read-path counters. Run from a build with statistics and from one
+/// without; the difference between the two runs is what they cost.
+void register_lookup_telemetry_benchmarks(ankerl::nanobench::Bench& bench);
 void run_storage_overhead_report();
 
 } // namespace bench

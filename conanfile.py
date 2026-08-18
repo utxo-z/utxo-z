@@ -33,7 +33,7 @@ class UtxozConan(ConanFile):
         "with_tools": [True, False],
         "with_large_benchmarks": [True, False],
         "log": ["custom", "spdlog", "none"],
-        "statistics": [True, False],
+        "statistics_level": ["off", "basic", "lookup"],
         "sanitizer": ["none", "address", "undefined", "address,undefined", "thread"]
     }
     default_options = {
@@ -49,7 +49,11 @@ class UtxozConan(ConanFile):
         "with_tools": True,
         "with_large_benchmarks": True,
         "log": "custom",
-        "statistics": True,
+        # `basic` is what a node should ship. `lookup` compiles the per-class
+        # read-path telemetry, which costs about eleven per cent of a find() that
+        # hits — measured — and is meant for measurement builds. Figures in
+        # doc/statistics-levels.md.
+        "statistics_level": "basic",
         "sanitizer": "none"
     }
 
@@ -114,7 +118,7 @@ class UtxozConan(ConanFile):
         tc.variables["UTXOZ_BUILD_TOOLS"] = self.options.with_tools
         tc.variables["UTXOZ_BUILD_LARGE_BENCHMARKS"] = self.options.with_large_benchmarks
         tc.variables["UTXOZ_LOG_BACKEND"] = str(self.options.log)
-        tc.variables["UTXOZ_STATISTICS_ENABLED"] = self.options.statistics
+        tc.variables["UTXOZ_STATISTICS_LEVEL"] = str(self.options.statistics_level)
         tc.variables["UTXOZ_CONAN_BUILD"] = True
         if str(self.options.sanitizer) != "none":
             tc.variables["UTXOZ_SANITIZER"] = str(self.options.sanitizer)

@@ -477,7 +477,7 @@ TEST_CASE("full: an incomplete batch counts what it applied and no completed run
         REQUIRE(partial.error.has_value());
 
         auto const after_partial = db.get_statistics();
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         // The deletions it applied really happened, and the entry count already
         // reflects them, so they are counted. The run did not complete, so it is
         // not counted as a run — that number is what the averages divide by.
@@ -495,7 +495,7 @@ TEST_CASE("full: an incomplete batch counts what it applied and no completed run
         REQUIRE_FALSE(rest.error.has_value());
 
         auto const after_complete = db.get_statistics();
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         CHECK(after_complete.deferred.processing_runs == before.deferred.processing_runs + 1);
 #else
         CHECK(after_complete.deferred.processing_runs == before.deferred.processing_runs);
@@ -535,7 +535,7 @@ TEST_CASE("full: a historical deletion records the per-container statistics",
 
         auto const after = db.get_statistics();
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         // Every applied deletion is one delete somewhere, and the totals across
         // containers have to move by exactly the number applied — not by less,
         // which is what dropping the historical half looked like.

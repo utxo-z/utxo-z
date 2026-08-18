@@ -36,6 +36,7 @@ add_executable(utxoz_tests
     test_failpoint_reset.cpp
     test_fixture_generator.cpp
     test_census.cpp
+    test_lookup_telemetry.cpp
     test_open_for_inspection.cpp
 )
 

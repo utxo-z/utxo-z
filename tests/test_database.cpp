@@ -206,7 +206,7 @@ TEST_CASE_METHOD(DatabaseFixture, "Statistics", "[database]") {
 
     // Counters only exist when recording is compiled in; the entry count above
     // is kept by the database itself and holds either way.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     CHECK(stats.total_inserts >= 100);
     CHECK(db_->get_statistics().probes.probes > 0);
 #endif

@@ -414,6 +414,16 @@ private:
 
     // Statistics (mutable to allow const find and resolve operations)
     mutable probe_stats probe_stats_;
+    /// The read path, per class. In reference mode only slot zero is used, and
+    /// it is reported under `reference_class` rather than as container 0.
+    ///
+    /// Compiled away below `UTXOZ_STATISTICS_LEVEL >= 2`, where each element is
+    /// an empty struct. At `lookup` it is five instances of 16 KiB — 80 KiB per
+    /// open database, on top of the 16 KiB the two narrower counter sets take,
+    /// which is 96 KiB for these three sharded counter sets. A subtotal: the
+    /// members below hold maps that grow with the data. Figures in
+    /// doc/statistics-levels.md.
+    mutable std::array<lookup_stats, container_count> lookup_stats_;
     mutable resolution_stats resolution_stats_;
     std::array<container_stats, container_count> container_stats_;
     height_range_stats height_range_stats_;

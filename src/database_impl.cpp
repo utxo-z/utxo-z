@@ -928,7 +928,7 @@ bool database_impl::insert_in_index(raw_outpoint const& key, output_data_span va
                 bool const rehashed = note_rehash_if_grown(
                     Index, rehash_watch_[Index], map.bucket_count());
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 // Update statistics
                 ++container_stats_[Index].total_inserts;
                 ++container_stats_[Index].current_size;
@@ -983,8 +983,11 @@ std::optional<find_result> database_impl::find_in_latest_version(raw_outpoint co
         if (!result) {
             auto& map = container<I>();
             if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 probe_stats_.record_answered(height, it->second.block_height);
+#endif
+#if UTXOZ_STATISTICS_LEVEL >= 2
+                lookup_stats_[I.value].record_answered_from_active();
 #endif
                 auto data = it->second.get_data();
                 result = find_result{bytes(data.begin(), data.end()), it->second.block_height};
@@ -1007,7 +1010,7 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
         if (result == 0) {
             auto& map = container<I>();
             if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 // Track UTXO lifetime
                 uint32_t age = height - it->second.block_height;
                 ++lifetime_stats_.age_distribution[age];
@@ -1021,7 +1024,7 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
 #endif
                 map.erase(it);
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 --container_stats_[I].current_size;
                 ++container_stats_[I].total_deletes;
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[I];
@@ -1068,7 +1071,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
         for (auto const idx : pending) into.push_back(requests[idx]);
     };
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     auto const start_time = std::chrono::steady_clock::now();
 #endif
     log::debug("Applying {} deletions ({} distinct)...", requests.size(), pending.size());
@@ -1197,7 +1200,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 note_dirty(reference_sentinel_index, version);
                 if (auto* meta = reference_catalog_.find_metadata(version)) meta->update_on_delete();
                 failpoints::reference_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 // The same counters the queue-draining path kept. Reference mode
                 // reports through container 0's slot, as it does everywhere else.
                 auto const depth =
@@ -1229,7 +1232,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 note_dirty(Index, version);
                 update_metadata_on_delete(Index, version);
                 failpoints::full_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 // Restored with the rest of the historical path. Dropping these
                 // made a deletion that reached an older file invisible to every
                 // per-container number while the active-version phase kept
@@ -1356,7 +1359,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
         classify_remainder(progress.absent);
     }
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     // Applied deletions are counted whether or not the batch finished: they
     // happened, and the entry count already reflects them. `processing_runs` is
     // not, because it means a run that completed — an incomplete batch that
@@ -2401,7 +2404,7 @@ result<> database_impl::compact_all() {
 // =============================================================================
 
 void database_impl::update_fragmentation_stats() {
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     for_each_index<container_count>([&](auto I) {
         if (segments_[I]) {
             try {
@@ -2460,6 +2463,49 @@ database_statistics database_impl::get_statistics() {
     stats.cached_files_info = get_cached_file_info();
     stats.probes = probe_stats_.get_summary();
     stats.resolution = resolution_stats_.get_summary();
+
+    // The read path, per class. The three figures that have no class come from
+    // the counters that already hold them — a lookup arrives with a key and no
+    // size, and one that is absent was refused by every class — and everything
+    // else is summed from the classes rather than kept a second time.
+    stats.lookups.mode = mode_;
+#if UTXOZ_STATISTICS_LEVEL >= 2
+    stats.lookups.statistics_level = "lookup";
+#elif UTXOZ_STATISTICS_LEVEL >= 1
+    stats.lookups.statistics_level = "basic";
+#else
+    stats.lookups.statistics_level = "off";
+#endif
+    stats.lookups.lookups_received = stats.probes.probes;
+    stats.lookups.deferred = stats.probes.deferred;
+    stats.lookups.absent = stats.resolution.absent;
+#if UTXOZ_STATISTICS_LEVEL >= 2
+    if (mode_ == storage_mode::reference) {
+        // One class, and it is not container 0. Four empty ones would be four
+        // classes that do not exist.
+        auto summary = lookup_stats_[0].get_summary();
+        summary.container_class = reference_class;
+        // One class, so it is asked by every lookup that arrives.
+        summary.active_maps_probed = stats.lookups.lookups_received;
+        stats.lookups.classes.push_back(summary);
+    } else {
+        for (size_t index = 0; index < container_count; ++index) {
+            auto summary = lookup_stats_[index].get_summary();
+            summary.container_class = index;
+            stats.lookups.classes.push_back(summary);
+        }
+        // How often each class was asked, derived here because this is the only
+        // place that can see the classes after it and the global deferred count
+        // at the same time. A class is asked when the answer came from it or from
+        // one after it, or from nowhere at all. Walking backwards makes it one
+        // pass; the deferred lookups asked every class, so they are in all five.
+        size_t reached = stats.lookups.deferred;
+        for (size_t index = container_count; index-- > 0; ) {
+            reached += stats.lookups.classes[index].answered_from_active;
+            stats.lookups.classes[index].active_maps_probed = reached;
+        }
+    }
+#endif
 
     stats.total_inserts = 0;
     stats.total_deletes = 0;
@@ -2521,6 +2567,51 @@ void database_impl::print_statistics() {
     log::info("--- Cache Statistics ---");
     log::info("Cache hit rate: {:.2f}%", stats.cache_hit_rate * 100);
     log::info("Cached files: {}", stats.cached_files_count);
+
+    // The read path, per class. Printed before the probe summary because it is
+    // the finer answer to the same question, and because the two numbers a
+    // reader will want to compare — how often a class was asked and how often it
+    // answered — are next to each other here.
+    log::info("--- Lookups, by class ---");
+    log::info("  statistics level: {}", stats.lookups.statistics_level);
+    if (stats.lookups.classes.empty()) {
+        log::info("  this build carries no per-class lookup telemetry, so there is");
+        log::info("  nothing below — which is not the same as a database that");
+        log::info("  answered nothing. Build with -DUTXOZ_STATISTICS_LEVEL=lookup.");
+    }
+    log::info("  {:>9} {:>12} {:>12} {:>12} {:>12} {:>10} {:>8} {:>8}",
+              "class", "maps probed", "answered", "from history", "gen probes",
+              "files", "cache", "avg ord");
+    for (auto const& c : stats.lookups.classes) {
+        auto const name = c.container_class == reference_class
+            ? std::string("reference") : fmt::format("{}", c.container_class);
+        log::info("  {:>9} {:>12} {:>12} {:>12} {:>12} {:>10} {:>8} {:>8.2f}",
+                  name, c.active_maps_probed, c.answered_from_active,
+                  c.resolved_historical, c.generations_probed, c.files_opened,
+                  c.cache_hits, c.avg_probe_ordinal);
+    }
+    log::info("  received {}, deferred {}, absent {} — these three have no class:",
+              stats.lookups.lookups_received, stats.lookups.deferred, stats.lookups.absent);
+    log::info("  a lookup arrives with a key and no size, and an absent one was");
+    log::info("  refused by every class");
+    log::info("  probe ordinal is how many generation files a key was searched in;");
+    log::info("  version distance is how far back the answering generation was.");
+    log::info("  They are different numbers: compaction leaves gaps in the");
+    log::info("  numbering and the cache is searched before the catalogue.");
+    for (auto const& c : stats.lookups.classes) {
+        if (c.resolved_historical == 0) continue;
+        auto const name = c.container_class == reference_class
+            ? std::string("reference") : fmt::format("{}", c.container_class);
+        log::info("  class {} ordinal 1/2/3/4/5-8/9+: {}/{}/{}/{}/{}/{}  distance: {}/{}/{}/{}/{}/{}",
+                  name,
+                  c.probe_ordinal_histogram[0], c.probe_ordinal_histogram[1],
+                  c.probe_ordinal_histogram[2], c.probe_ordinal_histogram[3],
+                  c.probe_ordinal_histogram[4], c.probe_ordinal_histogram[5],
+                  c.version_distance_histogram[0], c.version_distance_histogram[1],
+                  c.version_distance_histogram[2], c.version_distance_histogram[3],
+                  c.version_distance_histogram[4], c.version_distance_histogram[5]);
+    }
+    log::info("");
 
     log::info("--- Probes ---");
     log::info("Probes: {}", stats.probes.probes);
@@ -2749,6 +2840,7 @@ void database_impl::reset_all_statistics() {
 void database_impl::reset_search_stats() {
     probe_stats_.reset();
     resolution_stats_.reset();
+    for (auto& per_class : lookup_stats_) per_class.reset();
 }
 
 float database_impl::get_cache_hit_rate() const {
@@ -2946,8 +3038,11 @@ std::optional<find_result> database_impl::reference_find(raw_outpoint const& key
 std::optional<find_result> database_impl::reference_find_in_latest(raw_outpoint const& key, uint32_t height) const {
     auto const& map = reference_map();
     if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         probe_stats_.record_answered(height, it->second.height);
+#endif
+#if UTXOZ_STATISTICS_LEVEL >= 2
+        lookup_stats_[0].record_answered_from_active();
 #endif
         bytes data(sizeof(uint32_t) * 2);
         std::memcpy(data.data(), &it->second.file_number, sizeof(uint32_t));
@@ -2961,7 +3056,7 @@ std::optional<find_result> database_impl::reference_find_in_latest(raw_outpoint 
 size_t database_impl::reference_erase_in_latest(raw_outpoint const& key, uint32_t height) {
     auto& map = reference_map();
     if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         uint32_t age = height - it->second.height;
         ++lifetime_stats_.age_distribution[age];
         lifetime_stats_.max_age = std::max(lifetime_stats_.max_age, age);
@@ -3202,8 +3297,11 @@ std::optional<full_find_result> database_impl::full_find(raw_outpoint const& key
         if (!result) {
             auto& map = container<I>();
             if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 probe_stats_.record_answered(height, it->second.block_height);
+#endif
+#if UTXOZ_STATISTICS_LEVEL >= 2
+                lookup_stats_[I.value].record_answered_from_active();
 #endif
                 auto data = it->second.get_data();
                 result = full_find_result{bytes(data.begin(), data.end()), it->second.block_height};
@@ -3253,7 +3351,7 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     // There is no rollback to do on that path any more. The old sweep drained a
     // queue and had to put back what it had consumed; this one consumed nothing,
     // so a failed call simply returns and the caller retries the same span.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     // Accumulated here and published only if the resolution completes.
     //
     // A failed resolution is retried, and the retry does all of this work again.
@@ -3267,10 +3365,49 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     // deferred_stats belongs to deletions; a lookup writing into it made
     // successfully_processed and failed_to_delete move for two unrelated
     // reasons, so neither number described anything.
+#if UTXOZ_STATISTICS_LEVEL >= 2
+    // Fixed size and on the stack. The vector this replaces grew with the number
+    // of keys resolved, which is an allocation on the read path proportional to
+    // the work — and the histogram is what the report wants anyway.
+    //
+    // Inside the guard with the array that uses it: at `basic` nothing here is
+    // reachable, so declaring it there would be a type nobody instantiates.
+    struct class_tally {
+        uint64_t files_opened = 0;
+        uint64_t cache_hits = 0;
+        uint64_t generations_probed = 0;   ///< key-against-file probes, not files
+        uint64_t resolved = 0;
+        uint64_t probe_ordinal_total = 0;
+        uint64_t version_distance_total = 0;
+        std::array<uint64_t, lookup_stats::bucket_count> ordinal_buckets{};
+        std::array<uint64_t, lookup_stats::bucket_count> distance_buckets{};
+
+        void answered(uint64_t probe_ordinal, uint64_t version_distance) {
+            ++resolved;
+            probe_ordinal_total += probe_ordinal;
+            version_distance_total += version_distance;
+            ++ordinal_buckets[lookup_stats::bucket_of(probe_ordinal)];
+            ++distance_buckets[lookup_stats::bucket_of(version_distance)];
+        }
+    };
+#endif
+
     struct {
         uint64_t cache_hits = 0;
         uint64_t cache_misses = 0;
-        std::vector<uint32_t> resolved_depths;
+        /// What the older resolution counters need, accumulated rather than
+        /// collected in a list. This is the part that stays at `basic`: the
+        /// `std::vector<uint32_t>` it replaces grew on the read path once per
+        /// resolved key, and removing it was worth 47% of the sweep on its own.
+        uint64_t resolved = 0;
+        uint64_t version_distance_total = 0;
+#if UTXOZ_STATISTICS_LEVEL >= 2
+        /// How many generation files this resolution has searched so far, across
+        /// every class. A key answered by the nth file cost n file probes, which
+        /// is what `probe_ordinal` means: the cost, not the version number.
+        uint64_t files_probed = 0;
+        std::array<class_tally, container_count> per_class{};
+#endif
     } tally;
 #endif
 
@@ -3288,8 +3425,20 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
             }
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
             cache_hit ? ++tally.cache_hits : ++tally.cache_misses;
+#if UTXOZ_STATISTICS_LEVEL >= 2
+            ++tally.files_probed;
+            auto& mine = tally.per_class[Index];
+            ++mine.files_opened;
+            if (cache_hit) ++mine.cache_hits;
+            // Every key still pending is about to be looked for in this file, so
+            // this is the per-key figure: a thousand keys across three files is
+            // three thousand probes, and a key nobody finds was probed by all of
+            // them. Added once per file rather than once per key, which is the
+            // same number without an atomic in the inner loop.
+            mine.generations_probed += pending.size();
+#endif
 #else
             (void) cache_hit;
 #endif
@@ -3305,9 +3454,21 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
                     pending[keep++] = idx;
                     continue;
                 }
-#ifdef UTXOZ_STATISTICS_ENABLED
-                tally.resolved_depths.push_back(
-                    static_cast<uint32_t>(current_versions_[Index] - version));
+#if UTXOZ_STATISTICS_LEVEL >= 1
+                ++tally.resolved;
+                tally.version_distance_total +=
+                    static_cast<uint64_t>(current_versions_[Index] - version);
+#endif
+#if UTXOZ_STATISTICS_LEVEL >= 2
+                // Two different numbers, which used to be one. `files_probed` is
+                // how many files this key was searched in — its cost. The version
+                // distance is how far back the answering generation sits, which
+                // is not the same: compaction leaves gaps in the numbering, and
+                // the cache is searched before the catalogue, so neither the
+                // order nor the arithmetic of the versions describes the search.
+                tally.per_class[Index].answered(
+                    tally.files_probed,
+                    static_cast<uint64_t>(current_versions_[Index] - version));
 #endif
                 auto data = map_it->second.get_data();
                 resolved.found.emplace(requests[idx].key,
@@ -3391,13 +3552,35 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
 
     // Every version was read, so what is left was looked for everywhere it could
     // have been. Only now is absence a fact.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     // The resolution completed, so what it did is now a fact and can be published.
     for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
     for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
-    for (auto const depth : tally.resolved_depths) {
-        resolution_stats_.record_resolved(depth);
+    // The counter that existed before, with exactly the meaning it had: a version
+    // distance summed over the keys this sweep answered. Handed over as a total
+    // rather than replayed key by key from a list the read path no longer keeps —
+    // which is the part of this work that stays at `basic`.
+    if (tally.resolved > 0) {
+        resolution_stats_.record_resolved_batch(tally.resolved, tally.version_distance_total);
     }
+#if UTXOZ_STATISTICS_LEVEL >= 2
+    for (size_t index = 0; index < container_count; ++index) {
+        auto const& mine = tally.per_class[index];
+        // A class this sweep never touched has nothing to publish. Skipping it
+        // is not only tidiness: every one of these is an atomic increment, and a
+        // sweep that visited one class was otherwise paying for five.
+        if (mine.files_opened == 0 && mine.resolved == 0) continue;
+
+        auto& published = lookup_stats_[index];
+        published.record_file_opened(mine.files_opened, mine.cache_hits);
+        published.record_generations_probed(mine.generations_probed);
+        if (mine.resolved > 0) {
+            published.record_resolved_batch(mine.resolved, mine.probe_ordinal_total,
+                                            mine.version_distance_total,
+                                            mine.ordinal_buckets, mine.distance_buckets);
+        }
+    }
+#endif
 #endif
 
     resolved.absent.reserve(pending.size());
@@ -3446,7 +3629,7 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
                 bool const rehashed = note_rehash_if_grown(
                     reference_container_kind, reference_rehash_watch_, map.bucket_count());
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
                 ++container_stats_[0].total_inserts;
                 ++container_stats_[0].current_size;
                 ++container_stats_[0].value_size_distribution[sizeof(uint32_t) * 2];
@@ -3472,8 +3655,11 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
 std::optional<reference_find_result> database_impl::reference_find_typed(raw_outpoint const& key, uint32_t height) const {
     auto const& map = reference_map();
     if (auto it = map.find(key); it != map.end()) {
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
         probe_stats_.record_answered(height, it->second.height);
+#endif
+#if UTXOZ_STATISTICS_LEVEL >= 2
+        lookup_stats_[0].record_answered_from_active();
 #endif
         return reference_find_result{it->second.height, it->second.file_number, it->second.offset};
     }
@@ -3506,7 +3692,7 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
     // A resolution either covers everything it needed to, or it says so. Every
     // version below the current one can hold a requested key, so one that cannot
     // be read makes absence unprovable for every key still unresolved.
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     // Accumulated here and published only if the resolution completes; a retried
     // attempt would otherwise be counted twice.
     //
@@ -3514,10 +3700,24 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
     // deferred_stats belongs to deletions; a lookup writing into it made
     // successfully_processed and failed_to_delete move for two unrelated
     // reasons, so neither number described anything.
+    // The same shape as the full-mode tally, with one class: reference has one,
+    // and reporting five with four of them empty would be inventing classes.
     struct {
         uint64_t cache_hits = 0;
         uint64_t cache_misses = 0;
-        std::vector<uint32_t> resolved_depths;
+        uint64_t resolved = 0;
+        uint64_t version_distance_total = 0;
+#if UTXOZ_STATISTICS_LEVEL >= 2
+        /// One class, so the count of files probed *is* the count opened and
+        /// `cache_hits` is the whole of this class's cache hits. Full mode keeps
+        /// them apart because there `files_probed` spans every class and the
+        /// per-class figure does not.
+        uint64_t files_probed = 0;
+        uint64_t generations_probed = 0;
+        uint64_t probe_ordinal_total = 0;
+        std::array<uint64_t, lookup_stats::bucket_count> ordinal_buckets{};
+        std::array<uint64_t, lookup_stats::bucket_count> distance_buckets{};
+#endif
     } tally;
 #endif
 
@@ -3532,8 +3732,14 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
             }
             auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
             cache_hit ? ++tally.cache_hits : ++tally.cache_misses;
+#if UTXOZ_STATISTICS_LEVEL >= 2
+            ++tally.files_probed;
+            // Per key, as in full mode: every key still pending is about to be
+            // looked for here, and a key nobody finds was probed by every file.
+            tally.generations_probed += pending.size();
+#endif
 #else
             (void) cache_hit;
 #endif
@@ -3546,9 +3752,20 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
                     pending[keep++] = idx;
                     continue;
                 }
-#ifdef UTXOZ_STATISTICS_ENABLED
-                tally.resolved_depths.push_back(
-                    static_cast<uint32_t>(reference_current_version_ - version));
+#if UTXOZ_STATISTICS_LEVEL >= 1
+                ++tally.resolved;
+                tally.version_distance_total +=
+                    static_cast<uint64_t>(reference_current_version_ - version);
+#endif
+#if UTXOZ_STATISTICS_LEVEL >= 2
+                {
+                    // Cost and age, kept apart. See the full-mode path.
+                    uint64_t const ordinal = tally.files_probed;
+                    uint64_t const distance = reference_current_version_ - version;
+                    tally.probe_ordinal_total += ordinal;
+                    ++tally.ordinal_buckets[lookup_stats::bucket_of(ordinal)];
+                    ++tally.distance_buckets[lookup_stats::bucket_of(distance)];
+                }
 #endif
                 resolved.found.emplace(requests[idx].key,
                     reference_find_result{map_it->second.height, map_it->second.file_number,
@@ -3610,13 +3827,29 @@ result<reference_resolution> database_impl::reference_resolve(std::span<lookup_r
         return std::unexpected(failure);
     }
 
-#ifdef UTXOZ_STATISTICS_ENABLED
+#if UTXOZ_STATISTICS_LEVEL >= 1
     // The resolution completed, so what it did is now a fact and can be published.
     for (uint64_t i = 0; i < tally.cache_hits; ++i) resolution_stats_.record_file_visited(true);
     for (uint64_t i = 0; i < tally.cache_misses; ++i) resolution_stats_.record_file_visited(false);
-    for (auto const depth : tally.resolved_depths) {
-        resolution_stats_.record_resolved(depth);
+    // One class. `lookup_stats_[0]` is where it lives; the report labels it
+    // `reference_class` so nobody reads it as container 0.
+    // Unchanged in meaning, and kept at `basic`: a version distance summed over
+    // the keys this sweep answered.
+    if (tally.resolved > 0) {
+        resolution_stats_.record_resolved_batch(tally.resolved, tally.version_distance_total);
     }
+#if UTXOZ_STATISTICS_LEVEL >= 2
+    if (tally.files_probed > 0 || tally.resolved > 0) {
+        auto& published = lookup_stats_[0];
+        published.record_file_opened(tally.files_probed, tally.cache_hits);
+        published.record_generations_probed(tally.generations_probed);
+        if (tally.resolved > 0) {
+            published.record_resolved_batch(tally.resolved, tally.probe_ordinal_total,
+                                            tally.version_distance_total,
+                                            tally.ordinal_buckets, tally.distance_buckets);
+        }
+    }
+#endif
 #endif
 
     resolved.absent.reserve(pending.size());
