@@ -274,6 +274,16 @@ struct failpoints {
     /// refuses because the question is asked inside the claim.
     static inline std::atomic<bool> delete_config_after_claim{false};
 
+    /// Refuses to map a segment once this many have been mapped in the process.
+    /// Zero disarms it.
+    ///
+    /// It exists for one property that is otherwise untestable: the physical and
+    /// the logical walks read the same files, so any damage that stops the second
+    /// has already stopped the first, and the logical walk's own refusal never
+    /// runs. This lets a case get past the physical walk and fail inside the
+    /// logical one, which is where "never a partial report" has to be proven.
+    static inline std::atomic<uint64_t> fail_segment_open_after{0};
+
     /// Fails the removal of the sidecar, and the barrier that confirms it.
     static inline std::atomic<bool> fail_sidecar_removal{false};
 
@@ -324,6 +334,7 @@ struct failpoints {
         forced_capacity_index.store(0, std::memory_order_relaxed);
         force_database_id.store(false, std::memory_order_relaxed);
         delete_config_after_claim.store(false, std::memory_order_relaxed);
+        fail_segment_open_after.store(0, std::memory_order_relaxed);
         forced_database_id.fill(0);
     }
 

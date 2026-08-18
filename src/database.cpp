@@ -102,6 +102,25 @@ result<census_report> db_base::census(census_options const& options) const {
     return impl_->census(options);
 }
 
+result<uniqueness_report> db_base::verify_unique_outpoints(
+        verify_options const& options) const {
+    if ( ! impl_) return std::unexpected(error_code::closed);
+    // Refused on a latched store, and `census()` above deliberately is not. The
+    // difference is what the two produce.
+    //
+    // A latch means an operation that may have applied part of its work did not
+    // finish, so a merged generation can sit beside the sources it was built
+    // from. Counting that is honest — the census says what is stored, and what is
+    // stored is two copies. Rendering a *verdict* on it is not: this would report
+    // the database as violating uniqueness when what it is actually looking at is
+    // a compaction that was interrupted. That is a false accusation about
+    // integrity, and it is the kind that gets acted on.
+    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) {
+        return std::unexpected(ready.error());
+    }
+    return impl_->verify_unique_outpoints(options);
+}
+
 sizing_report db_base::get_sizing_report() const {
     if (!impl_) return {};
     return impl_->get_sizing_report();

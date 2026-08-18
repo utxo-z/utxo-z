@@ -849,8 +849,9 @@ jobs:
           conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release
 
       # The configuration a node operator actually uses. utxoz_census answers
-      # "what is in this database", which is a question asked about a production
-      # directory, so it must not be reachable only through the test lifecycle.
+      # "what is in this database" and utxoz_verify_unique answers "is it
+      # allowed to be that", and both are asked about a production directory, so
+      # neither may be reachable only through the test lifecycle.
       - name: ⚙️ Configure with tests, examples and benchmarks off
         run: |
           cmake -B build-tools -S . \
@@ -872,6 +873,7 @@ jobs:
         run: |
           set -euo pipefail
           test -x build-tools/utxoz_census
+          test -x build-tools/utxoz_verify_unique
           for unwanted in utxoz_tests utxoz_make_format_fixtures utxoz_sizing; do
             if find build-tools -name "$unwanted" -print -quit | grep -q .; then
               echo "$unwanted was built by a configuration with tests off" >&2
@@ -885,6 +887,8 @@ jobs:
           cmake --install build-tools
           test -x prefix-tools/bin/utxoz_census
           prefix-tools/bin/utxoz_census --help 2>&1 | grep -q "what a database holds"
+          test -x prefix-tools/bin/utxoz_verify_unique
+          prefix-tools/bin/utxoz_verify_unique --help 2>&1 | grep -q "stored more than once"
 
       # A directory that is not a database is refused, and refused with a
       # message rather than a crash. The end-to-end census over real files is a
@@ -904,6 +908,32 @@ jobs:
           leftovers=$(ls -A "$empty" | grep -v '^\.utxoz\.lock$' || true)
           if [ -n "$leftovers" ]; then
             echo "the tool left this behind: $leftovers" >&2
+            exit 1
+          fi
+
+      # The verifier's exit status is its answer, so the status is what this
+      # checks. 1 and not 2: a directory it could not read is not a directory it
+      # has condemned, and a build with tests off is exactly where that
+      # distinction would rot unnoticed.
+      - name: 🧪 The verifier says "I cannot tell" rather than "not unique"
+        run: |
+          set -euo pipefail
+          empty=$(mktemp -d)
+          set +e
+          prefix-tools/bin/utxoz_verify_unique "$empty" --json > /dev/null 2>verify-error.txt
+          status=$?
+          set -e
+          if [ "$status" -ne 1 ]; then
+            echo "expected exit 1 for a directory with no database, got $status" >&2
+            exit 1
+          fi
+          grep -q "there is no database" verify-error.txt
+          # And it created no database on its way out, by the same rule the census
+          # step applies: the claim's own file is permanent by design and is not a
+          # database; nothing else may be there.
+          leftovers=$(ls -A "$empty" | grep -v '^\.utxoz\.lock$' || true)
+          if [ -n "$leftovers" ]; then
+            echo "the verifier left this behind: $leftovers" >&2
             exit 1
           fi
 

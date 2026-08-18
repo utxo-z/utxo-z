@@ -23,6 +23,8 @@
 #include <utxoz/aliases.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/census.hpp>
+
+#include "detail/distinct_keys.hpp"
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
@@ -107,6 +109,24 @@ struct database_impl {
     [[nodiscard]]
     result<reference_resolution> reference_resolve(std::span<lookup_request const> requests) const;
     result<> reference_for_each_entry_typed(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const;
+
+    /// Visits every stored entry of every generation, in a fixed order. Defined
+    /// in src/uniqueness.cpp.
+    template <typename EntryFn>
+    [[nodiscard]] result<> visit_stored_entries(EntryFn&& fn, uint64_t& files_visited) const;
+
+    /// The verdict, assembled from the walk below. Bounded by the budget in
+    /// `verify_options`, refuses rather than exceeding it, and creates nothing on
+    /// disk. Defined in src/uniqueness.cpp.
+    [[nodiscard]] result<uniqueness_report> verify_unique_outpoints(
+        verify_options const& options) const;
+
+    /// The engine. Every distinct key, and every key stored more than once.
+    [[nodiscard]] result<budget_report> walk_distinct_keys(
+        budget_meter& meter,
+        distinct_walk_options const& options,
+        distinct_key_callback const& on_distinct,
+        duplicate_group_callback const& on_group) const;
 
     /// Walks the files. Requires the exclusive claim and no concurrent mutation;
     /// see census.hpp. Defined in src/census.cpp.

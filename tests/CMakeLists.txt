@@ -36,6 +36,7 @@ add_executable(utxoz_tests
     test_failpoint_reset.cpp
     test_fixture_generator.cpp
     test_census.cpp
+    test_uniqueness.cpp
     test_lookup_telemetry.cpp
     test_open_for_inspection.cpp
 )
@@ -99,6 +100,13 @@ target_compile_definitions(utxoz_tests
 # is an operational tool and does not belong to the test lifecycle. So the case
 # that runs it is compiled only when it exists, and says so when it does not
 # rather than testing nothing quietly.
+if(TARGET utxoz_verify_unique)
+    target_compile_definitions(utxoz_tests
+        PRIVATE UTXOZ_VERIFY_TOOL="$<TARGET_FILE:utxoz_verify_unique>")
+else()
+    message(STATUS "utxoz_verify_unique not built: the case that runs it is not compiled")
+endif()
+
 if(TARGET utxoz_census)
     target_compile_definitions(utxoz_tests
         PRIVATE UTXOZ_CENSUS_TOOL="$<TARGET_FILE:utxoz_census>")
