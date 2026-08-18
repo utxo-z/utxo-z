@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786996182525,
+  "lastUpdate": 1787042451645,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -16341,6 +16341,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "close+reopen 50K (123B)",
             "value": 1048.67,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9aeb84f9223ca22627e7b704aa96dd497a93ea3d",
+          "message": "feat: measure how lookups are actually resolved, by class and by generation (#138)\n\nThe census counts what is stored. This counts what the read path does with it,\nwhich is the other half of what choosing a geometry needs: how often each class\nis asked, how often it answers, how many generation files a lookup costs, and how\nfar back the answer was found.\n\n## One cumulative level, not a switch per counter set\n\n    UTXOZ_STATISTICS_LEVEL = off | basic | lookup      CMake and Conan, default basic\n\n`off` compiles nothing. `basic` is what this process did — inserts, probes,\nresolutions, lifetimes — and is the default. `lookup` is `basic` plus the\nper-class read-path telemetry this commit adds. Cumulative, so the code asks\n`>= 1` or `>= 2` and there is one authority rather than a boolean per counter\nset; names rather than numbers, because a build log that says \"2\" says nothing.\nAn unknown value is refused by both CMake and Conan, with the list — a typo must\nnot quietly produce the default, or whoever asked for `lookups` reads counters\nthat were never compiled and finds zeros.\n\nThe old `statistics` boolean is gone rather than kept alongside it.\n\n## The width is part of the level\n\n`sharded_counters` is parameterised on its field count instead of carrying one\nwidth wide enough for the widest user. That was the mistake in the first version:\ngoing from 8 fields to 32 doubled every instance in every build, including builds\nthat never enable the widest user. Measured per open database:\n\n    off      7 bytes\n    basic    16 KiB   (two 8 KiB counter sets, exactly what they were before)\n    lookup   96 KiB   (those two, plus five 16 KiB per-class sets)\n\n## Three numbers that used to be one, and one that was never a class\n\n**A full-mode lookup is not addressed to a class.** The caller supplies a key,\nnot a size, and `find()` probes the active maps in class order until one answers.\nSo \"the class of a lookup\" exists only for a lookup that was answered, and an\nabsent one belongs to no class at all. `lookups_received`, `deferred` and\n`absent` are therefore global and say so in the output; everything else is per\nclass.\n\n**The depth that existed was a version distance, not an order of search.**\n`current_versions_[Index] - version` is how far back a generation is numbered.\nCompaction removes generations, so the numbering has gaps, and the file cache is\nsearched before the catalogue, so the order of the search is not the order of the\nversions either. This now carries both, named for what they are:\n\n    probe_ordinal      how many generation files a key was searched in — the cost\n    version_distance   how far back the answering generation sits — the age\n\nA test pins them apart rather than arguing they differ: the same key, two sweeps.\nCold, it is found in the second file searched — ordinal 2, distance 2. Warm, the\ncache puts that file first, so it is found in the first — ordinal 1, distance\nstill 2. One number could have said the search got cheaper or that the data got\nyounger, and those are different facts.\n\n**Files visited were counted per sweep, not per key.** A thousand keys across\nthree files recorded three. `generations_probed` is now per key, so a key nobody\nfinds is charged for every file it was searched in — the sum is exact, and it is\naccumulated once per file as `pending.size()` rather than once per key, so the\ninner loop touches no atomic.\n\n## Where it counts\n\n    full_find, find_in_latest_version   where the search stopped, and which class\n                                        answered\n    full_resolve, reference_resolve     per file: opened, cache hit, and one\n                                        probe per pending key\n                                        per answer: ordinal and version distance\n    published                           once per sweep per class, and only when\n                                        the sweep completed — an abandoned\n                                        attempt is retried and must not be\n                                        counted twice\n\n`active_maps_probed` is **derived**, not counted: the suffix sum of \"the search\nstopped here\" over this class and the ones after it. That is not tidiness. The\nfirst version incremented a counter per class per lookup and measured **+160%**\non a key that misses everywhere — five atomic increments on five cache lines for\none lookup. One increment and a suffix sum give the same numbers for 36%.\n\nThe `std::vector<uint32_t>` of depths the sweep used to allocate is gone; the\nhistogram is fixed-size and on the stack.\n\n## What it costs, isolated\n\nStatistics on against statistics off answers a different question: it measures\nevery counter in the build, and two of the three sets existed before this. So the\nmeasurement is by level, on the same head, plus the parent for reference. Seven\ninterleaved rounds, medians in nanoseconds:\n\n                                       parent      head        head        head\n                                        basic       off       basic      lookup\n    active hit, first class             38.47     31.12       35.02       38.80\n    miss, every class probed            17.53     13.82       17.81       17.83\n    sweep of 256 keys / 3 generations  14 954    13 116      13 013      13 298\n    mixed, 9 active hits to 1 historical 532.2     451.5       526.2       576.2\n\n**The telemetry costs +10.8% on a find that hits and nothing on one that misses.**\nNot the +42% first reported: that was statistics on against off, and most of it\nwas pre-existing.\n\n**The default level got faster.** head `basic` against parent `basic`: -9.0% on a\nhit and -13.0% on the sweep. Two reasons, both of them counters that stopped\nbeing counted:\n\n  - `probes` is `answered + deferred`, so the third increment on the hot path was\n    arithmetic all along;\n  - `active_maps_probed[i]` is `(answered by class i or after) + deferred`,\n    because the search stops at the first class that answers. Counting it\n    directly measured +160% on a lookup that misses everywhere; counting only\n    where the search stopped was still an atomic for a number addition had.\n\nThat second one is why a miss now costs nothing at `lookup`: there is no counter\nleft on that path.\n\n**And at `lookup` a hit costs what the parent's `basic` cost** — 38.80 against\n38.47, inside the spread. The telemetry is paid for by what the derivation saved.\n\n**Compiled out, this head is the parent**: head `off` against parent `off` is\nwithin 2% on every workload, by minima; that column's medians are contaminated by\none slow round and are not used.\n\n**Resolution.** Median and minimum agree to within 0.4–3.4% in every cell except\nthe contaminated one, so a difference of five per cent or more is real and\nanything under it is not. The sweep's +2.2% at `lookup` is at that boundary; the\nmixed workload's +9.5% is above it.\n\nNo threshold is proposed. One optimisation was tried and reverted: folding a\nhit's two increments into a single shard lookup made no measurable difference.\n\n## Without statistics\n\nEvery counter, every tally field and every recording call is inside\n`UTXOZ_STATISTICS_ENABLED`. So `basic` keeps the sweep improvement — the `std::vector<uint32_t>` of depths\nis gone at every level — and compiles none of the telemetry.\n\nWhat remains at every level is the shape of the report: the types exist,\n`get_statistics()` and `to_json()` work, and `statistics_level` says which kind of\ndocument it is. At `basic` the per-class list is **empty** rather than five rows\nof zeros, which would read as a database nobody queried. One test asserts all of\nthat from the same source at every level, so they cannot drift.\n\n`rehashes_observed` is untouched. It is a safety counter compiled into every\nbuild and it does not belong with telemetry.\n\n`rotations_per_container` is also untouched, and still reports the active version\nnumber rather than a count of rotations. Correcting it needs a real counter plus\ntests over rotation, compaction and renumbering; it is a known debt, out of scope\nhere, and deliberately not papered over.\n\n## Tests\n\nFifteen cases, every one asserting exact numbers. A counter that is merely\nnon-zero proves only that something incremented it.\n\nAn active hit in the first class and in a later one — the second showing the four\nclasses before it being asked and the fifth not. A miss asking all five. A key in\nthe newest historical generation at ordinal 1, one in the oldest at ordinal 2, an\nabsent key charged for both files. A sweep of three keys over two files counting\nfive probes, which is the case that tells \"generations probed\" from \"files\nopened\" — with one key in a batch they are the same number. Two classes counted\napart. Repetition moving each counter exactly seven times. Reference reporting one\nclass labelled reference, with its history. Cold and warm cache. Compaction, where\nthe histograms must still account for the key exactly once.\n\nMutations, each confirmed red: counting a lookup twice; omitting the active\ngeneration; omitting a historical generation; attributing the answer to the wrong\nclass; recording an absent key as found; confusing generations probed with files\nopened; and using the version distance as if it were the ordinal.\n\nThe counters are not free in memory either, and an earlier version of this said\nthey were on the grounds that a shard is padded to a cache line anyway. That is\nwrong: eight fields are 64 bytes and fit one 128-byte shard, thirty-two are 256\nand take two, so an instance goes from 8 KiB to 16 KiB. A full-mode database now\nholds seven of them — probes, resolutions, and five classes — which is 112 KiB\nagainst the 16 KiB the two older sets took. About 96 KiB more per open database,\nonce, not per operation.\n\nSuites, all three levels: **310 at `lookup` with nothing skipped, 310 at `basic`\nand 305 at `off` with 26 skipped** — the cases that assert exact counts say\nnothing when the counters are not compiled, and reporting them as passed would\noverstate the suite's coverage.\n\nCI covers the three levels, the two platforms beyond Linux for `lookup`, and both\nrefusals: CMake and Conan each rejecting a level they do not know.",
+          "timestamp": "2026-08-18T10:36:44+02:00",
+          "tree_id": "a8d1cdac32de2855beeeb1c46a2a0e50f4b02979",
+          "url": "https://github.com/utxo-z/utxo-z/commit/9aeb84f9223ca22627e7b704aa96dd497a93ea3d"
+        },
+        "date": 1787042450896,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 809808.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 809051.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 862199.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 1024248.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 605.53,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 545.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 16461359.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 33139714.12,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 15878170.3,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 16187.62,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2866297.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2944256.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 141770.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 15001.34,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2685.26,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3853.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3827.58,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 1313.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 1308.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 1320.39,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 1276.46,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 1282.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 1280.8,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: active hit, first class",
+            "value": 16727273.43,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: miss, every class probed",
+            "value": 33462528.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: sweep of 256 keys over three generations",
+            "value": 40113.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: mixed 9 active hits to 1 historical",
+            "value": 1095309.71,
             "unit": "ops/sec"
           }
         ]
