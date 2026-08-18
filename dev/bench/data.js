@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787042451645,
+  "lastUpdate": 1787093226813,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -16500,6 +16500,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "telemetry: mixed 9 active hits to 1 historical",
             "value": 1095309.71,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "466f19f7ad8e79b87655f6b4d2f9a1e2a2aea55c",
+          "message": "feat: verify that no outpoint is stored more than once, and answer with a verdict (#139)\n\nA correct UTXO set holds each outpoint at most once, across every class and every\ngeneration. Nothing in the write path enforces that, so whether a given database\nsatisfies it is a question that has to be asked of the files.\n\n`verify_unique_outpoints()` asks it.\n\n## Why this is not a census\n\nAn earlier draft of this counted distinct outpoints as a second `census()` scope\nand described the duplicates it found — a multiplicity histogram, four\noverlapping shape totals, an exclusive breakdown by flag combination. All of that\nwas built on the premise that duplicated keys are a population worth describing\nstatistically.\n\nThey are not. They are corruption, and the report a broken database deserves is a\nverdict and a place to start looking, not a distribution. The taxonomy is gone,\nthe scope is gone, and `census_report` is byte-for-byte what it was: same fields,\nsame `schema_version`, same JSON.\n\nWhat is kept is the part that was never in question — the bounded walk, the\npartitioning, the budget — because verifying uniqueness postmortem needs exactly\nthat walk whatever is later decided about enforcing it at insert or during\ncompaction.\n\n## A verdict, not an error\n\nA database with duplicates is not a database this can fail to read. The walk\nfinishes, every figure it reports is exact, and the answer is `unique == false`.\nThere is no `error_code` for a duplicate and `entry_corrupt` is not reused for\none: *the verification could not be completed* and *the verification completed and\nthe answer is no* are different facts, and only the first is about the instrument.\n\n`utxoz_verify_unique` puts that in its exit status — 0 no outpoint is stored more\nthan once, 2 some outpoint is, 1 could not tell — which is why it is a second\nbinary rather than a flag on the census.\n\nThe invariant is \"at most one copy\", and the wording says so. \"Every outpoint is\nstored exactly once\" was in four places and was wrong in all of them: an empty\ndatabase stores no outpoint at all and satisfies the invariant, which a test\nasserts — so the text contradicted the suite. A census that started returning 2 because of what it found would break\nevery caller that reads a non-zero status as \"the tool failed\".\n\n## It still does not choose a winner\n\nFor a key whose copies disagree there is no \"the value of this key\": the store has\nno precedence across classes and, in history, which copy answers can depend on the\nfile cache (issue #136). This reports how many copies exist and where they are,\nand stops. Repair is a rebuild from the blocks into a new directory, verified and\nthen swapped in — not a choice made here.\n\n## Outpoints are withheld unless asked for\n\nAn outpoint identifies an output on a public chain. By default a finding gives the\nmultiplicity and the locations — class, generation, whether the generation is\nactive — and not the key, so a report can be pasted into an issue without a second\nthought. `include_outpoints` puts them in, for whoever is going to look at the\nentries.\n\nNo substitute form. A truncated hash would be neither private — it is reversible\nagainst the chain — nor useful, since it cannot be fed back to `find()`.\n\nThe document says which it is (`\"outpoints_included\": false`) rather than leaving\nit to be inferred from an absence, because a report with no findings and one with\nthe outpoints withheld would otherwise look the same.\n\n## The sample is bounded, and so is what holds it\n\n`keys_with_multiple_copies` is the count; the findings are a sample of at most\n`max_findings` keys locating at most `max_locations_per_finding` copies each,\ndefaults 16 and 16. Both omissions are reported, so a truncated sample never reads\nas a complete one. Without the caps, one key with a million copies would be a\nmillion lines.\n\nThe sample is collected in two flat vectors metered by the same allocator as the\nrecords, each reserved exactly once so that nothing grows and no two blocks are\never alive at the same moment, and converted into the public `duplicate_finding`s\nafter the walk, when the records are no longer held.\n\n**The returned report is outside the budget, and the contract says so.** Claiming\notherwise would mean claiming that `reserve(n)` allocates exactly n — the standard\npromises *at least* — and evidence from three implementations is not a structural\nproperty. What is bounded instead is the shape: at most `max_findings` findings of\nat most `max_locations_per_finding` locations each, published as\n`report_bytes_estimate`, and never growing with the database. The dangerous part,\nthe part proportional to what is stored, is inside the meter; the report is small,\ncapped, and lives after the walk.\n\nDeclaring the final size and filling the public vectors directly — which is what\nthis did first — is not the same promise. It accounts for neither geometric\ngrowth, nor a `capacity()` larger than what was asked for, nor the moment during a\nreallocation when the old block and the new one are both alive. With\n`max_findings` at 17 a plain vector ends up holding 32 having briefly held 16 and\n32 together, against 17 accounted for; the report would have said the ceiling was\nhonoured while the operation held more, which is the exact property the metered\nallocator exists to provide. A case now runs 1, 16, 17 and 33 findings and pins\nthe composition, and another fills a sample of 17 for real.\n\n## The budget is enforced, not described\n\nThe first version of this computed what it expected to hold and reported it. That\nis a description, and two things follow from the difference:\n\n  - a container allocated beside the records would not appear in the figure, so\n    the report could say the ceiling was honoured while the process held\n    considerably more. The contract said \"budget\"; the code delivered an estimate;\n  - a reservation known to be too large was refused after being described, which\n    on a real database is the difference between a diagnostic and a `bad_alloc`.\n\nNow the walk holds its records in a `counted_vector`, and it is the allocator that\nasks the meter. A request past the ceiling is refused **before the system is asked\nfor the memory**, and `estimated_peak` is the most the meter ever had outstanding\n— observed, not predicted.\n\nWhat the ceiling covers is a list pinned by a test rather than a claim, and every\nentry but one is a real allocation the meter saw: the planning counters, the group\nlist, the sample, and the records. The exception is the sort's allowance\n(1 048 576), because introsort's own stack has no allocator to route through.\n\nThe counters and the group list were plain vectors under a hand-computed allowance\nof 192 KiB. The worst case they can actually reach — a reallocation holding two\nblocks at once — comes to **196 608 bytes against an allowance of 196 608**. It\nheld, by nothing but one allocator's growth factor, and the `static_assert` that\nwas supposed to guard it compared the *final* sizes rather than the transient. They\nare metered now, and the group list is reserved to its exact maximum of one group\nper prefix so that it never grows: 96 KiB always, half what the allowance set\naside, and a figure the meter knows rather than one somebody has to keep right.\n\nThe headroom is held back rather than subtracted in a report — the meter's ceiling\nis the budget without it, so the walk cannot reach it.\n\n`files_revisited` is `generations_visited` now, because that is what it counts: the\nactive generation of a class is already mapped and is walked without opening\nanything, so the old name overstated the I/O by every active generation. On the\nmeasured database the visits are five times the opens.\n\n`duplicate_group` can only be built from metered storage. A copy of a group would\ntherefore have to be metered too, which is what stops the old bug returning as\nsomebody's convenience — and a copy into a default-allocator vector does not\ncompile at all.\n\nOne meter serves the whole operation rather than the engine alone: the walk takes\nit rather than making it, so `fixed_overhead` is what the meter actually holds\nbefore the records rather than a sum of the terms somebody remembered.\n\nA release that does not match an acquisition leaves the meter **unbalanced**, and\nan unbalanced meter authorises nothing further. It used to clamp to zero, with a\ncomment saying that clamping would hide the defect — which is what clamping did:\nit hid the mismatch and then handed out memory against a figure that had stopped\ndescribing what was held.\n\nRefusing later acquisitions is not enough on its own: a mismatch in the *last*\ndeallocation of all has nothing after it to refuse. So the metered containers live\nin a scope of their own and the books are checked once every one of them has been\ndestroyed, in the walk and in its caller both. A meter that lost track did not\nhonour a ceiling, and there is no verdict to give on that basis.\n\nIt is not a sandbox: code that calls the global allocator directly is outside any\nin-process budget, and doc/uniqueness.md says so.\n\n## Exact, bounded, and with no temporary file\n\nUnchanged from the walk this replaces, and restated because it is the substance:\n\n    1. a planning pass counts entries per 12-bit prefix — counters only;\n    2. prefixes are grouped so each group's records fit the budget, from the\n       counts just observed rather than an estimate;\n    3. each group is walked, collected, sorted by key, grouped;\n    4. a prefix that cannot fit is refused with the budget it would have needed.\n\nNothing is written. No temporary directory, no cleanup path, no residue on any\nfailure path, because nothing is created. The partition hash is ours — FNV-1a with\na splitmix finaliser — deliberately not the map's, which `hash_epoch` pins. A\ncollision is never an equality: the hash chooses the group, membership is a\n`memcmp` of thirty-six bytes.\n\n**The cost is re-reading, and it is reported rather than implied.** Measured on a\n500 005-entry database (500 000 distinct outpoints, five stored twice), 1.3 GB on\ndisk, warm cache:\n\n    256 MiB (default)  1 planning + 1 data pass    1.0 M examined    219 ms\n    16 MB              1 planning + 3 data passes  2.0 M examined    344 ms\n    4 MB               1 planning + 12 data passes 6.5 M examined    856 ms\n\nSame verdict and same counts from all three; the cost is linear in the partitions.\n`estimated_peak` came to 56 028 721, 15 998 600 and 3 999 952 bytes against those\nbudgets — inside each. `report_bytes_estimate` was 5 392, 5 408 and 5 480: it moves with the number of\npasses, which the budget bounds, and not with the database. It is an estimate\ncomputed from the requested element counts and is **not** described as an upper\nbound — `reserve` promises at least what it was asked for, so excess capacity and\ntransients are the standard library's. `duration_per_pass_ms` is in both renderings, because a\nsmall budget re-reads the whole database once per group and where the time went is\nwhat says whether to raise it. Resident memory was 1.38, 1.37 and 1.35 GB, dominated by the\ndatabase's own mapped pages, which no budget here can bound. doc/uniqueness.md says\nso rather than letting a reader take the figure for what `ps` will show.\n\n## Tests — 45 cases, exact numbers\n\nThe verdict on a clean database and on an empty one. Duplicates across\ngenerations of one class; across two classes; across both at once, with the\nlocations asserted in each dimension; historical-only; five copies of one key. A\ndeliberate partition collision, found by search rather than hard-coded, counted as\ntwo keys.\n\nThe sample: no outpoint anywhere in the JSON or the text without the opt-in, and\nthe real key with it; `max_findings` and `max_locations_per_finding` honoured while\nthe counts stay uncapped; a sample too large for the allowance refused, and an\noverflowing one too. The verdict with `max_findings = 0`, where there is no sample\nat all and the answer is still no.\n\nThe budget: the meter itself, refusing at the boundary and taking nothing when it\nrefuses; a `counted_vector` past the ceiling throwing without reaching the\nallocator; the composition of the fixed overhead, term by term; a small budget\nforcing 13 partitions and reporting identical figures; the peak inside the budget\nand equal to its parts; a budget too small, refused **before any collecting pass**\n— asserted on the segment-mapping counter, so \"before the work\" is a measurement\nrather than a comment; a pass limit; a prefix that cannot be split; a sample the\nbudget cannot hold, and the same sample against a budget that can. Determinism\nacross a warmed file cache. An unreadable generation, and a failure during the\ncollecting passes, each producing no report and no verdict.\n\nA latched store: refused with `recovery_required` rather than judged, while the\ncensus on the same object still answers.\n\nThe tool: exit 0 on a unique database, exit 2 with duplicates — with the outpoints\nwithheld and then, with the flag, present — and exit 1 for a missing directory, a\ndirectory holding no database, a budget that cannot hold the work, and a malformed\noption. `--text` producing something that is not JSON, and `--mode=reference`\nreading a database the default mode cannot. An argument that begins with a dash\ntreated as an option rather than as a directory. A report that could not be\nwritten in full answering 1 rather than a verdict (Linux only: /dev/full is what\nmakes a write fail on demand, and the behaviour it pins is not platform-specific\neven though the way to provoke it is). And the help text carrying the defaults\nthat `verify_options` actually holds.\n\nAnd that the census neither answers this question nor changed to ask it.\n\n## A verdict is not rendered on a latched store\n\n`census()` does not consult the recovery latch and this does, which is a\ndeliberate difference rather than an inconsistency. A latch means an operation\nthat may have applied part of its work did not finish, so a merged generation can\nsit beside the sources it was built from. Counting that is honest — two copies are\ntwo copies, and the census says what is stored. Rendering a *verdict* on it is\nnot: it would report the database as violating uniqueness when what it is looking\nat is a compaction that was interrupted. That is a false accusation about\nintegrity, and it is the kind that gets acted on.\n\n## The narrowing guard is checked where 32-bit code is built, not where it is not\n\nThe counts are `uint64_t` and `reserve` takes a `size_t`, so on wasm32 a count above\n2^32 narrows on the way in and `reserve` succeeds at a size nobody asked for.\n\nA case written as `if constexpr (sizeof(size_t) < 8)` would have compiled there and\nexecuted nowhere: the wasm job builds the library and runs no `ctest`, and this\nsuite could not run there in any case — it needs a real filesystem and\nmemory-mapped files. \"The case exists\" is not coverage if no job runs it.\n\nThe record count of a partition group narrows through the same cast and is guarded\nthe same way.\n\nFitting `size_t` is not fitting a vector, and that gap is reachable from the\ncommand line rather than from a damaged database — on libstdc++, which caps\n`max_size()` at `PTRDIFF_MAX / sizeof(T)`: about 1.28e17 for a `sampled_finding`,\nagainst an overflow check that admits counts up to 2.56e17. Between them lies a\nwindow where `--max-findings` narrows cleanly and `reserve` answers with\n`length_error`. libc++ caps at `SIZE_MAX / sizeof(T)`, where the two coincide and\nthe window is empty — which is why the case asserts the contract (a count a vector\nwill not hold comes back as `insufficient_space`) rather than which guard refuses\nit. Every reservation is now checked against the vector's own\n`max_size()` first, for the diagnostic, and `length_error` is caught as a backstop\n— a reservation a vector will not make is a refusal this API owes its caller, not\nan exception crossing the library boundary.\n\nSo the width is a parameter of the primitives, and **production calls wrappers that\ntake no width at all** — the freedom to pass the wrong one is removed rather than\nreviewed. `count_fits_addressable(count, addressable)` and\n`sample_fits_addressable(findings, locations, addressable)` are driven from Linux at\n16, 32 and 64 bits; `count_fits_platform` and `sample_fits_platform` are what the\nwalk calls. Both are pinned by `static_assert`, and under\n`#if SIZE_MAX < UINT64_MAX` the assertions are about the wrapper itself, which only\na 32-bit build evaluates.\n\nTwo mutations of the primitive **do not compile**: the boundary is checked by the\ncompiler on every platform this ships to. A mutation that deliberately bypasses the\nwrapper and calls the primitive with a 64-bit width survives on a 64-bit build,\nwhere the two are the same value — as any deliberate bypass of any abstraction\nwould. What changed is that it is now a bypass rather than a slip.\n\n## Mutations\n\nForty-five applied: thirty-six red, three that no longer compile, six that\nsurvive.\n\nThe published figure in the previous revision of this message — \"eighteen applied,\nseventeen red\" — was wrong, and wrong in both directions: it undercounted what had\nbeen run and the parts did not add up. These are counted from the runs.\n\nThe two that were the reason the budget changed are red now:\n\n  - **materialising a duplicate group into a second vector** — metered, so the\n    peak rises and the identity between the peak and its parts breaks. The same\n    copy into a default-allocator vector **does not compile**: `duplicate_group`\n    can only be built from metered storage;\n  - **removing the pre-pass group validation** — caught on the segment-mapping\n    counter, which is what makes \"refused before the work\" observable rather than\n    asserted in a comment.\n\nThe rest, each red: the verdict taken from the sample instead of the counts; a\nduplicate counted as a distinct key; grouping by partition prefix instead of by\nkey; historical generations skipped; the class not recorded on a copy; the pass\nlimit ignored; a fit predicate that always accepts; a partial report when a pass\nfails; `include_outpoints` ignored; `max_findings` ignored;\n`max_locations_per_finding` ignored; the sample not declared to the walk; the\nbookkeeping left out of the ceiling; a meter that never refuses; the headroom\nhanded out instead of held back; the recovery latch not consulted before a\nverdict; the tool exiting 0 whatever the verdict; a failure to open reported as a\nverdict; a failed walk reported as not-unique; the tool's `--mode` ignored;\n`--text` producing JSON anyway; a dash-prefixed argument taken for a directory;\nthe result of writing the report ignored; the help text restating a default\ninstead of reading it; the sample collected in the public vectors again; the\nsample reserved geometrically instead of once; the report's own storage not taken\nfrom the ceiling; an unbalanced release clamped instead of failing closed; the\nper-pass durations left out of the JSON.\n\nSix survive, and none is a coverage gap:\n\n  - reporting the peak as `record_capacity × record_bytes + fixed_overhead +\n    headroom` instead of what the meter observed. While nothing else is metered\n    the two are equal, which is exactly what the identity test asserts. The reason\n    to prefer the meter's figure is that it stays right if something else ever\n    *is* metered — and the mutation guarding that is the group copy above, which\n    is red;\n  - removing the check that the collecting pass found what the planning pass\n    counted. Nothing can make the two disagree while the exclusivity contract\n    holds, so no test reaches it — the same category as the arithmetic guards in\n    census_arithmetic.hpp, and the code says so where it sits;\n  - removing the balance check after the metered containers are destroyed. Nothing\n    in the production path unbalances the meter, so no test can reach it through\n    the walk; the mechanism it depends on is unit-tested directly, including the\n    case where the mismatch happens with nothing left to acquire;\n  - the call site choosing a 64-bit width instead of this platform's. On a\n    64-bit build the two are the same value, so nothing can observe it. The width\n    is a named constant so that the wiring is one reviewable word, and everything\n    the guard *decides* is checked below.\n\nA second limit, unchanged: a mutation comparing the full 64-bit hash instead of the\nkey survives, because no test can produce a 64-bit collision — the birthday bound\nis 2^32 keys. The realistic form of that bug, grouping by the prefix, is caught,\nand the comparison itself is a `memcmp` of thirty-six bytes read directly.\n\nSuites: 352 cases at the default statistics level, 347 with statistics off.\n\n## Out of scope\n\nNo geometry, capacities, file sizes, rotation threshold, compaction, precedence\npolicy, issue #136, `find()` API or container selection. Where the invariant\nshould be enforced — at insert, during compaction, postmortem, or several of\nthose — is not decided here; a postmortem verifier is needed under every one of\nthose answers, and this is it. Comparing the contents of duplicate copies is\ncancelled: under this invariant there should be no copies to compare.",
+          "timestamp": "2026-08-19T00:42:16+02:00",
+          "tree_id": "8b910c54d00bdba15178e2fa0bf41c5c6c6666f9",
+          "url": "https://github.com/utxo-z/utxo-z/commit/466f19f7ad8e79b87655f6b4d2f9a1e2a2aea55c"
+        },
+        "date": 1787093226435,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 244948.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 262963.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 427755.61,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 287728.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 330.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 343.77,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 12478282.03,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 25661230.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 12123599.91,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 12036.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2034335.05,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2347927.83,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 84457.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 10866.38,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2208.18,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3089.07,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 2205.97,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 980.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 956.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 1011.59,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 1004.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 1017.6,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 1010.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: active hit, first class",
+            "value": 12954845.92,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: miss, every class probed",
+            "value": 25969045.47,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: sweep of 256 keys over three generations",
+            "value": 31153.33,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: mixed 9 active hits to 1 historical",
+            "value": 857689.45,
             "unit": "ops/sec"
           }
         ]
