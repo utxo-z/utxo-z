@@ -284,6 +284,38 @@ struct failpoints {
     /// logical one, which is where "never a partial report" has to be proven.
     static inline std::atomic<uint64_t> fail_segment_open_after{0};
 
+    /// Makes the next N inserts throw `bip::bad_alloc` at the `emplace`, as a full
+    /// segment does. Zero disarms it.
+    ///
+    /// Filling a segment until the allocator happens to refuse is not a test: it
+    /// depends on a geometry, it takes a hundred thousand inserts, and it cannot
+    /// say *which* insert failed. The recovery this seam exercises — rotate once,
+    /// retry once — has to be asserted exactly, and set to two it reaches the
+    /// second refusal on a generation created moments earlier, which is the other
+    /// branch.
+    static inline std::atomic<uint64_t> fail_insert_emplace{0};
+
+    /// With the above: perform the `emplace` and *then* throw, leaving the key in
+    /// the map and the size moved.
+    ///
+    /// This is the one state the container promises cannot happen, and the store
+    /// answers it by latching. There is no way to reach it from data — it would
+    /// mean making Boost break its own guarantee — so it is reached from here,
+    /// which is what lets the refusal be tested at all rather than reasoned about.
+    static inline std::atomic<bool> fail_insert_after_mutating{false};
+
+    /// True when an insert should refuse now, consuming one of the N.
+    [[nodiscard]] static bool consume_insert_failure() {
+        auto remaining = fail_insert_emplace.load(std::memory_order_relaxed);
+        while (remaining != 0) {
+            if (fail_insert_emplace.compare_exchange_weak(
+                    remaining, remaining - 1, std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Fails the removal of the sidecar, and the barrier that confirms it.
     static inline std::atomic<bool> fail_sidecar_removal{false};
 
@@ -327,6 +359,8 @@ struct failpoints {
         fail_container_open.store(false, std::memory_order_relaxed);
         segments_mapped.store(0, std::memory_order_relaxed);
         fail_sidecar_removal.store(false, std::memory_order_relaxed);
+        fail_insert_emplace.store(0, std::memory_order_relaxed);
+        fail_insert_after_mutating.store(false, std::memory_order_relaxed);
         before_target_publish.store(nullptr, std::memory_order_relaxed);
         forced_merge_id.store(0, std::memory_order_relaxed);
         force_rotations.store(0, std::memory_order_relaxed);

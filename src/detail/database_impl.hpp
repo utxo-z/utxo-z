@@ -24,7 +24,10 @@
 #include <utxoz/database.hpp>
 #include <utxoz/census.hpp>
 
+#include <optional>
+
 #include "detail/distinct_keys.hpp"
+#include "detail/insert_transition.hpp"
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
@@ -164,7 +167,15 @@ private:
 
     // Core operations implementation
     template<size_t Index>
-    bool insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height);
+    result<bool> insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height);
+
+    /// Replaces the active generation and records why. Returns rather than
+    /// throwing: a rotation that cannot make its file leaves the class with no
+    /// active container, which every caller has to be able to hear about.
+    template<size_t Index>
+    [[nodiscard]] result<> rotate_for(rotation_cause cause);
+
+    [[nodiscard]] result<> reference_rotate_for(rotation_cause cause);
 
     // Find helpers
     std::optional<find_result> find_in_latest_version(raw_outpoint const& key, uint32_t height) const;
@@ -193,8 +204,12 @@ private:
 
 
     // Safety checks
+    /// `free_bytes`, when given, receives the segment's free space — which this
+    /// already walks the free list to obtain. The diagnostic an insert needs if
+    /// it later throws is the same figure, and asking twice per insert doubled
+    /// the cost of the whole operation: the walk is O(free list), not O(1).
     template<size_t Index>
-    bool can_insert_safely() const;
+    bool can_insert_safely(uint64_t* free_bytes = nullptr) const;
 
     template<size_t Index>
     bool can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map,
@@ -258,6 +273,30 @@ private:
     /// closed and reopened, which runs recovery.
     bool cleanup_pending_ = false;
 
+    /**
+     * @brief Set once, never cleared: this instance may not be used again.
+     *
+     * It carries the code it answers with, because two different facts reach it
+     * and folding them into one would tell an operator the wrong thing:
+     *
+     *  - `entry_corrupt` — the active map moved under a `bad_alloc`, contradicting
+     *    the guarantee `emplace` documents. Nothing on disk records it and no
+     *    reopen repairs it; see refuse_if_integrity_latched();
+     *  - `file_open_failed` — a rotation could not create the next generation.
+     *    The data is intact, but `close_container()` has already released the
+     *    previous one and set `containers_[Index]` to null, which
+     *    `container<Index>()` dereferences. The class has no active map, so the
+     *    instance cannot serve it and must stop rather than find that out by
+     *    dereferencing nothing.
+     *
+     * In memory only. The code says so where it is read.
+     */
+    std::optional<error_code> integrity_latched_;
+
+    /// Why generations were replaced. Present in every build; see rotation_causes.
+    std::array<rotation_causes, container_count> rotation_causes_{};
+    rotation_causes reference_rotation_causes_{};
+
     /// The exclusive claim on the database directory, held for the life of this
     /// instance and released by its destructor. Nothing releases it by hand.
     database_lock lock_;
@@ -296,6 +335,47 @@ public:
     result<> refuse_if_recovery_pending() const {
         if (cleanup_pending_) return std::unexpected(error_code::recovery_required);
         return {};
+    }
+
+    /**
+     * @brief Refuses every operation once the active map contradicted the
+     *        guarantee `emplace` makes.
+     *
+     * Separate from `refuse_if_recovery_pending()` and deliberately not folded
+     * into it, because the two describe different situations and call for
+     * different actions.
+     *
+     * A pending cleanup means a merge published its target and could not retire
+     * everything it superseded. There is a sidecar on disk, and the next open
+     * settles it: `recovery_required` is an honest instruction because a restart
+     * really does recover.
+     *
+     * This is not that. If the map moved under a `bad_alloc` there is no sidecar,
+     * no merge record and no target marker — nothing a reopen could read to know
+     * anything happened, and nothing to rebuild the map from. **This latch does
+     * not survive a restart**, and the next open would map the same file and use
+     * it: `validate_stamp` certifies the format identity, not the coherence of
+     * what the file holds. Calling that `recovery_required` would tell an
+     * operator to do the one thing that erases the only evidence.
+     *
+     * So it answers `entry_corrupt`, which already means "these figures cannot
+     * describe anything real", and the log says what to do instead: stop, and
+     * verify or rebuild before opening it again. Making the quarantine survive a
+     * restart is a persisted mark, with its own format and its own questions
+     * about who may lift it; that is not this.
+     */
+    [[nodiscard]]
+    result<> refuse_if_integrity_latched() const {
+        if (integrity_latched_) return std::unexpected(*integrity_latched_);
+        return {};
+    }
+
+    /// Both of the above, for the callers that want to say "usable at all" once.
+    /// The causes stay distinct in what they return.
+    [[nodiscard]]
+    result<> refuse_if_unusable() const {
+        if (auto const intact = refuse_if_integrity_latched(); ! intact) return intact;
+        return refuse_if_recovery_pending();
     }
 
     /// An inspection open creates nothing, which includes the active container of
@@ -345,7 +425,7 @@ private:
     [[nodiscard]] result<> reference_create(size_t version);
     void reference_close_container();
     void reference_new_version();
-    bool reference_can_insert_safely() const;
+    bool reference_can_insert_safely(uint64_t* free_bytes = nullptr) const;
     result<> compact_reference_container();
     result<> reference_for_each_key(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     result<> reference_for_each_entry(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
