@@ -106,6 +106,43 @@ std::vector<uint8_t> payload_for(size_t index, uint8_t fill = 0x5A) {
     return std::vector<uint8_t>(index == 0 ? 8 : container_capacities[index - 1] + 1, fill);
 }
 
+/// Opens a fresh database, or stops the case where it failed.
+///
+/// Returns by value so the fixtures below can initialise their member from it;
+/// `REQUIRE` is here rather than in a constructor body so that a database that
+/// would not open never becomes an object that half exists.
+template <typename Db>
+Db opened_or_fail(fs::path const& dir) {
+    auto opened = Db::open_for_testing(dir, true);
+    REQUIRE(opened.has_value());
+    return std::move(*opened);
+}
+
+/// A database with one entry in it, which is where most of these cases start.
+///
+/// Thirty sections opened the same database, checked the same result, moved it
+/// out of the same `expected` and stored the same first key. None of those five
+/// lines said anything about the case they belonged to — what a case is *about*
+/// begins at the failpoint it arms.
+///
+/// Derived from `temp_db` rather than holding one, so `dir` still names the
+/// directory and the destruction order is the one the five lines had: the
+/// database closes first, and the files are still there while it does.
+struct full_with_one : temp_db {
+    full_db db;
+    explicit full_with_one(size_t index) : db(opened_or_fail<full_db>(dir)) {
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+    }
+};
+
+/// The same, in reference mode, whose entry is a file number and an offset.
+struct reference_with_one : temp_db {
+    reference_db db;
+    reference_with_one() : db(opened_or_fail<reference_db>(dir)) {
+        REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+    }
+};
+
 /// Asserts a refusal, in the order the two questions have to be asked.
 ///
 /// `std::expected::error()` on a result that holds a value is undefined, so the
@@ -616,11 +653,8 @@ TEST_CASE("reference: the same three outcomes", "[transition]") {
 
     // Recovered.
     {
-        temp_db t;
-        auto opened = reference_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+        reference_with_one t;
+        auto& db = t.db;
 
         failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
         auto const stored = db.insert(key_of(2), 2, 2, 800001);
@@ -636,11 +670,8 @@ TEST_CASE("reference: the same three outcomes", "[transition]") {
 
     // Refused on the second failure.
     {
-        temp_db t;
-        auto opened = reference_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+        reference_with_one t;
+        auto& db = t.db;
 
         failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
         auto const refused = db.insert(key_of(2), 2, 2, 800001);
@@ -652,11 +683,8 @@ TEST_CASE("reference: the same three outcomes", "[transition]") {
 
     // Latched.
     {
-        temp_db t;
-        auto opened = reference_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+        reference_with_one t;
+        auto& db = t.db;
 
         failpoints::fail_insert_after_mutating.store(true, std::memory_order_relaxed);
         failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
@@ -721,11 +749,8 @@ TEST_CASE("a diagnostic that fails does not change what an insert decides",
 
     SECTION("recovered") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
 
         failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
@@ -749,11 +774,8 @@ TEST_CASE("a diagnostic that fails does not change what an insert decides",
 
     SECTION("refused on the second failure") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
 
         failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
         failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
@@ -767,11 +789,8 @@ TEST_CASE("a diagnostic that fails does not change what an insert decides",
 
     SECTION("latched") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
 
         failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
@@ -794,11 +813,8 @@ TEST_CASE("a diagnostic that fails does not change what an insert decides",
 TEST_CASE("reference: a diagnostic that fails does not change what an insert decides",
           "[transition]") {
     failpoints::scoped_reset const disarm;
-    temp_db t;
-    auto opened = reference_db::open_for_testing(t.dir, true);
-    REQUIRE(opened.has_value());
-    auto db = std::move(*opened);
-    REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+    reference_with_one t;
+    auto& db = t.db;
 
     failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
     failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
@@ -906,11 +922,8 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
 
     SECTION("a rotation reports the generation that was active, not one less than the new") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
 
         // The generation's own identifier, from the census that reports it, and
         // not from rotations_per_container — that is a count of rotations, and a
@@ -947,11 +960,8 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
         // neither may be described in the future tense, because a rotation that
         // then fails leaves the earlier line standing as a false statement.
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
 
         log_capture capture;
         failpoints::force_rotations.store(1, std::memory_order_relaxed);
@@ -981,11 +991,8 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
         // afterwards has to come from the generation the retry actually ran on —
         // before the refresh was added it printed the untouched initial value.
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
 
         log_capture capture;
         failpoints::force_rotations.store(1, std::memory_order_relaxed);
@@ -1016,11 +1023,8 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
         // same 32336 bytes on both. The two implementations are numerically
         // indistinguishable here; only the code says which segment was asked.
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
 
         log_capture capture;
         failpoints::force_rotations.store(1, std::memory_order_relaxed);
@@ -1077,11 +1081,8 @@ TEST_CASE("a message that cannot be built changes nothing an insert decided",
 
     SECTION("the recoverable failure still rotates once and retries once") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
         auto const rotations_before = generations_of(db, index);
 
@@ -1106,11 +1107,8 @@ TEST_CASE("a message that cannot be built changes nothing an insert decided",
 
     SECTION("the second failure still returns insufficient_space") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
 
         failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
@@ -1127,11 +1125,8 @@ TEST_CASE("a message that cannot be built changes nothing an insert decided",
 
     SECTION("the contradicted map still counts, latches and refuses") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
         auto const rotations_before = generations_of(db, index);
 
@@ -1158,11 +1153,8 @@ TEST_CASE("a message that cannot be built changes nothing an insert decided",
         failpoints::scoped_reset const disarm;
 
         {
-            temp_db t;
-            auto opened = reference_db::open_for_testing(t.dir, true);
-            REQUIRE(opened.has_value());
-            auto db = std::move(*opened);
-            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            reference_with_one t;
+            auto& db = t.db;
             failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
             failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
             auto const stored = db.insert(key_of(2), 2, 2, 800001);
@@ -1178,11 +1170,8 @@ TEST_CASE("a message that cannot be built changes nothing an insert decided",
         }
 
         {
-            temp_db t;
-            auto opened = reference_db::open_for_testing(t.dir, true);
-            REQUIRE(opened.has_value());
-            auto db = std::move(*opened);
-            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            reference_with_one t;
+            auto& db = t.db;
             failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
             failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
             auto const refused = db.insert(key_of(2), 2, 2, 800001);
@@ -1194,11 +1183,8 @@ TEST_CASE("a message that cannot be built changes nothing an insert decided",
         }
 
         {
-            temp_db t;
-            auto opened = reference_db::open_for_testing(t.dir, true);
-            REQUIRE(opened.has_value());
-            auto db = std::move(*opened);
-            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            reference_with_one t;
+            auto& db = t.db;
             failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
             failpoints::fail_insert_after_mutating.store(true, std::memory_order_relaxed);
             failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
@@ -1221,11 +1207,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
 
     SECTION("the recoverable failure still rotates once and retries once") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
         auto const rotations_before = generations_of(db, index);
 
@@ -1254,11 +1237,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
 
     SECTION("the second failure still returns insufficient_space and rotates no further") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
 
         result<bool> refused;
@@ -1281,11 +1261,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
 
     SECTION("the contradicted map still counts, latches and refuses") {
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
         auto const rotations_before = generations_of(db, index);
 
@@ -1315,11 +1292,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
         // The rotation itself logs on failure, after counting and latching. That
         // log is behind the boundary too, so the caller still gets a code.
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
 
         result<bool> refused;
         {
@@ -1338,11 +1312,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
         // A `return false` gated by a log line: before the boundary, a refusing
         // backend turned "this key is already here" into an exception.
         failpoints::scoped_reset const disarm;
-        temp_db t;
-        auto opened = full_db::open_for_testing(t.dir, true);
-        REQUIRE(opened.has_value());
-        auto db = std::move(*opened);
-        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        full_with_one t{index};
+        auto& db = t.db;
         auto const files_before = files_for(t.dir, index);
 
         result<bool> again;
@@ -1362,11 +1333,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
         failpoints::scoped_reset const disarm;
 
         {
-            temp_db t;
-            auto opened = reference_db::open_for_testing(t.dir, true);
-            REQUIRE(opened.has_value());
-            auto db = std::move(*opened);
-            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            reference_with_one t;
+            auto& db = t.db;
 
             result<bool> stored;
             {
@@ -1385,11 +1353,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
         }
 
         {
-            temp_db t;
-            auto opened = reference_db::open_for_testing(t.dir, true);
-            REQUIRE(opened.has_value());
-            auto db = std::move(*opened);
-            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            reference_with_one t;
+            auto& db = t.db;
 
             result<bool> refused;
             {
@@ -1404,11 +1369,8 @@ TEST_CASE("a log that throws changes nothing an insert decided", "[transition]")
         }
 
         {
-            temp_db t;
-            auto opened = reference_db::open_for_testing(t.dir, true);
-            REQUIRE(opened.has_value());
-            auto db = std::move(*opened);
-            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            reference_with_one t;
+            auto& db = t.db;
 
             result<bool> contradicted;
             {
