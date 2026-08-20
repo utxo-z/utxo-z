@@ -913,10 +913,12 @@ result<> database_impl::rotate_for(rotation_cause cause) {
         // nothing is not an option.
         ++rotation_causes_[Index].failed;
         integrity_latched_ = error_code::file_open_failed;
-        log::error("container {} could not rotate ({}): {}. No generation was made and "
-                   "this instance will not serve this class again; the stored data is "
-                   "intact and a new instance can open it",
-                   Index, to_string(cause), e.what());
+        diagnose([&] {
+            log::error("container {} could not rotate ({}): {}. No generation was made "
+                       "and this instance will not serve this class again; the stored "
+                       "data is intact and a new instance can open it",
+                       Index, to_string(cause), e.what());
+        });
         return std::unexpected(error_code::file_open_failed);
     }
     if (cause == rotation_cause::preventive) ++rotation_causes_[Index].preventive;
@@ -951,17 +953,21 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
         // half of the question and no more. A copy in an older generation is a
         // different contract and this does not look for it.
         if (auto const& current = container<Index>(); current.find(key) != current.end()) {
-            log::warn("insert: duplicate key at the rotation threshold, so not rotating. "
-                      "container={} generation={} height={} outpoint={}",
-                      Index, current_versions_[Index], height, outpoint_to_string(key));
+            diagnose([&] {
+                log::warn("insert: duplicate key at the rotation threshold, so not "
+                          "rotating. container={} generation={} height={} outpoint={}",
+                          Index, current_versions_[Index], height, outpoint_to_string(key));
+            });
             return false;
         }
-        log::debug("container {} reached its insert limit; rotating. generation={} "
-                   "size={} buckets={} live_max_load={} effective_limit={}",
-                   Index, current_versions_[Index], container<Index>().size(),
-                   container<Index>().bucket_count(), container<Index>().max_load(),
-                   effective_insert_limit(container<Index>().bucket_count(),
-                                          container<Index>().max_load()));
+        diagnose([&] {
+            log::debug("container {} reached its insert limit; rotating. generation={} "
+                       "size={} buckets={} live_max_load={} effective_limit={}",
+                       Index, current_versions_[Index], container<Index>().size(),
+                       container<Index>().bucket_count(), container<Index>().max_load(),
+                       effective_insert_limit(container<Index>().bucket_count(),
+                                              container<Index>().max_load()));
+        });
         if (auto const rotated = rotate_for<Index>(rotation_cause::preventive); ! rotated) {
             return std::unexpected(rotated.error());
         }
@@ -1001,8 +1007,10 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
             }
             auto [it, inserted] = map.emplace(key, val);
             if ( ! inserted) {
-                log::warn("insert: duplicate key at height {}, outpoint={}, container={}",
-                    height, outpoint_to_string(key), Index);
+                diagnose([&] {
+                    log::warn("insert: duplicate key at height {}, outpoint={}, "
+                              "container={}", height, outpoint_to_string(key), Index);
+                });
             }
             if (inserted) {
                 ++entries_count_;
@@ -1030,62 +1038,82 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
                 update_metadata_on_insert(Index, current_versions_[Index], key, height);
 
                 if (attempt > 1) {
-                    log::info("insert retry after capacity rotation succeeded: container={} "
-                              "new_generation={} attempt={}/2 height={} outpoint={} "
-                              "size={} buckets={} live_max_load={}",
-                              Index, current_versions_[Index], attempt, height,
-                              outpoint_to_string(key), map.size(), map.bucket_count(),
-                              map.max_load());
+                    // The entry is in and the bookkeeping is done; what is left is
+                    // the account of it, and an account that cannot be written must
+                    // not turn a stored entry into an exception.
+                    diagnose([&] {
+                        log::info("insert retry after capacity rotation succeeded: "
+                                  "container={} new_generation={} attempt={}/2 height={} "
+                                  "outpoint={} size={} buckets={} live_max_load={}",
+                                  Index, current_versions_[Index], attempt, height,
+                                  outpoint_to_string(key), map.size(), map.bucket_count(),
+                                  map.max_load());
+                    });
                 }
             }
             return inserted;
 
         } catch (bip::bad_alloc const& e) {
-            // Everything the next reader of this log would otherwise have to
-            // reconstruct. Read after the throw, from the same map: under the
-            // guarantee `emplace` documents these are the figures it had before.
+            // Read after the throw, from the same map: under the guarantee
+            // `emplace` documents these are the figures it had before. All three
+            // accessors are `noexcept`, and the probe is best-effort, so reaching
+            // the classification cannot itself fail.
             auto& after_map = container<Index>();
             auto const after = snapshot_of(after_map);
             bool const key_present_after = after_map.find(key) != after_map.end();
             auto const free_after = free_bytes_best_effort(segments_[Index].get());
             auto const state = classify_post_exception(before, after, key_present_after);
 
-            auto const shared = fmt::format(
-                "container={} generation={} attempt={}/2 outpoint={} height={} "
-                "payload_size={} size_before={} size_after={} buckets_before={} "
-                "buckets_after={} live_max_load_before={} live_max_load_after={} "
-                "rotation_threshold={} no_rehash_limit={} segment_bytes={} "
-                "free_before={} free_after={} key_present_after={} exception={}",
-                Index, current_versions_[Index], attempt, outpoint_to_string(key), height,
-                value.size(), before.size, after.size, before.bucket_count,
-                after.bucket_count, before.live_max_load, after.live_max_load,
-                max_entries_for(before.bucket_count),
-                max_size_without_rehash(before.bucket_count),
-                segment_size, free_bytes_display(free_before),
-                free_bytes_display(free_after),
-                key_present_after ? "true" : "false", e.what());
+            // Everything the next reader of this log would otherwise have to
+            // reconstruct — built on demand, and only from inside `diagnose`.
+            // Assembling it allocates, and until it was moved in here a failure
+            // to allocate the *message* could leave the failure it describes
+            // uncounted, unlatched and unhandled.
+            auto const shared = [&] {
+                return fmt::format(
+                    "container={} generation={} attempt={}/2 outpoint={} height={} "
+                    "payload_size={} size_before={} size_after={} buckets_before={} "
+                    "buckets_after={} live_max_load_before={} live_max_load_after={} "
+                    "rotation_threshold={} no_rehash_limit={} segment_bytes={} "
+                    "free_before={} free_after={} key_present_after={} exception={}",
+                    Index, current_versions_[Index], attempt, outpoint_to_string(key),
+                    height, value.size(), before.size, after.size, before.bucket_count,
+                    after.bucket_count, before.live_max_load, after.live_max_load,
+                    max_entries_for(before.bucket_count),
+                    max_size_without_rehash(before.bucket_count),
+                    segment_size, free_bytes_display(free_before),
+                    free_bytes_display(free_after),
+                    key_present_after ? "true" : "false", e.what());
+            };
 
             if (state == post_exception_state::map_mutated) {
                 // The container did something it documents it will not do. There
                 // is no sidecar, no merge record and nothing to rebuild the map
                 // from, so there is no recovery to instruct and this instance
                 // stops here.
+                //
+                // Counted and latched before a word is written about it.
                 ++rotation_causes_[Index].unexpected_post_exception;
                 integrity_latched_ = error_code::entry_corrupt;
-                log::critical("insert: the active map changed after a failed allocation, "
-                              "which contradicts the container's guarantee. Not rotating "
-                              "and not retrying. Stop this process and verify or rebuild "
-                              "the database before opening it again; this latch does not "
-                              "survive a restart. {}", shared);
+                diagnose([&] {
+                    log::critical("insert: the active map changed after a failed "
+                                  "allocation, which contradicts the container's "
+                                  "guarantee. Not rotating and not retrying. Stop this "
+                                  "process and verify or rebuild the database before "
+                                  "opening it again; this latch does not survive a "
+                                  "restart. {}", shared());
+                });
                 return std::unexpected(error_code::entry_corrupt);
             }
 
             if (attempt == 2) {
                 // A generation made moments ago could not take one entry. Nothing
                 // is corrupt and nothing is worth rotating again.
-                log::error("insert: a newly created generation could not take a single "
-                           "entry. This is capacity or configuration, not corruption. {}",
-                           shared);
+                diagnose([&] {
+                    log::error("insert: a newly created generation could not take a "
+                               "single entry. This is capacity or configuration, not "
+                               "corruption. {}", shared());
+                });
                 return std::unexpected(error_code::insufficient_space);
             }
 
@@ -1093,30 +1121,38 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
             // rotation is safe. `emplace` finds the key before it grows, so a
             // throw already proves the key was absent — the duplicate question
             // the preventive path has to ask does not arise here.
-            log::info("insert: allocation failed; map unchanged; rotating and retrying. "
-                      "cause=allocator_refused_growth {}", shared);
+            //
             // Read before the rotation rather than reconstructed after it. A
             // version number is an identity and the sequence has holes in it
             // wherever compaction has drained one, so `new - 1` names a
             // generation only for as long as the numbering happens to be dense.
             // See version_catalog.hpp.
             auto const old_generation = current_versions_[Index];
+            diagnose([&] {
+                log::info("insert: allocation failed; map unchanged; rotating and "
+                          "retrying. cause=allocator_refused_growth {}", shared());
+            });
             if (auto const rotated = rotate_for<Index>(rotation_cause::capacity_exception);
                     ! rotated) {
                 return std::unexpected(rotated.error());
             }
             // The retry runs on the new generation, so its diagnostic must too.
             free_before = free_bytes_best_effort(segments_[Index].get());
-            log::info("insert: rotated after a failed allocation: container={} "
-                      "old_generation={} new_generation={} height={} outpoint={}",
-                      Index, old_generation, current_versions_[Index],
-                      height, outpoint_to_string(key));
+            diagnose([&] {
+                log::info("insert: rotated after a failed allocation: container={} "
+                          "old_generation={} new_generation={} height={} outpoint={}",
+                          Index, old_generation, current_versions_[Index],
+                          height, outpoint_to_string(key));
+            });
         }
     }
 
     // Unreachable: the loop returns on success, on the second failure and on
     // every classified refusal above.
-    log::error("insert: exhausted the single retry without a decision, container={}", Index);
+    diagnose([&] {
+        log::error("insert: exhausted the single retry without a decision, container={}",
+                   Index);
+    });
     return std::unexpected(error_code::insufficient_space);
 }
 
@@ -3804,9 +3840,12 @@ result<> database_impl::reference_rotate_for(rotation_cause cause) {
         // already closed when this fails.
         ++reference_rotation_causes_.failed;
         integrity_latched_ = error_code::file_open_failed;
-        log::error("the reference container could not rotate ({}): {}. No generation was "
-                   "made and this instance will not serve it again; the stored data is "
-                   "intact and a new instance can open it", to_string(cause), e.what());
+        diagnose([&] {
+            log::error("the reference container could not rotate ({}): {}. No generation "
+                       "was made and this instance will not serve it again; the stored "
+                       "data is intact and a new instance can open it",
+                       to_string(cause), e.what());
+        });
         return std::unexpected(error_code::file_open_failed);
     }
     if (cause == rotation_cause::preventive) ++reference_rotation_causes_.preventive;
@@ -3825,17 +3864,23 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
         // copy into the empty one. One probe, only on the path that has already
         // decided to rotate.
         if (auto const& current = reference_map(); current.find(key) != current.end()) {
-            log::warn("reference_insert_typed: duplicate key at the rotation threshold, "
-                      "so not rotating. generation={} height={} outpoint={}",
-                      reference_current_version_, height, outpoint_to_string(key));
+            diagnose([&] {
+                log::warn("reference_insert_typed: duplicate key at the rotation "
+                          "threshold, so not rotating. generation={} height={} "
+                          "outpoint={}",
+                          reference_current_version_, height, outpoint_to_string(key));
+            });
             return false;
         }
-        log::debug("the reference container reached its insert limit; rotating. "
-                   "generation={} size={} buckets={} live_max_load={} effective_limit={}",
-                   reference_current_version_, reference_map().size(),
-                   reference_map().bucket_count(), reference_map().max_load(),
-                   effective_insert_limit(reference_map().bucket_count(),
-                                          reference_map().max_load()));
+        diagnose([&] {
+            log::debug("the reference container reached its insert limit; rotating. "
+                       "generation={} size={} buckets={} live_max_load={} "
+                       "effective_limit={}",
+                       reference_current_version_, reference_map().size(),
+                       reference_map().bucket_count(), reference_map().max_load(),
+                       effective_insert_limit(reference_map().bucket_count(),
+                                              reference_map().max_load()));
+        });
         if (auto const rotated = reference_rotate_for(rotation_cause::preventive); ! rotated) {
             return std::unexpected(rotated.error());
         }
@@ -3866,8 +3911,10 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
             }
             auto [it, inserted] = map.emplace(key, val);
             if (!inserted) {
-                log::warn("reference_insert_typed: duplicate key at height {}, outpoint={}",
-                    height, outpoint_to_string(key));
+                diagnose([&] {
+                    log::warn("reference_insert_typed: duplicate key at height {}, "
+                              "outpoint={}", height, outpoint_to_string(key));
+                });
             }
             if (inserted) {
                 ++entries_count_;
@@ -3887,12 +3934,16 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
                 reference_catalog_.metadata(reference_current_version_).update_on_insert(key, height);
 
                 if (attempt > 1) {
-                    log::info("reference insert retry after capacity rotation succeeded: "
-                              "new_generation={} attempt={}/2 height={} outpoint={} "
-                              "size={} buckets={} live_max_load={}",
-                              reference_current_version_, attempt, height,
-                              outpoint_to_string(key), map.size(), map.bucket_count(),
-                              map.max_load());
+                    // See insert_in_index: the entry is stored, so the account of
+                    // it must not be able to undo the report of it.
+                    diagnose([&] {
+                        log::info("reference insert retry after capacity rotation "
+                                  "succeeded: new_generation={} attempt={}/2 height={} "
+                                  "outpoint={} size={} buckets={} live_max_load={}",
+                                  reference_current_version_, attempt, height,
+                                  outpoint_to_string(key), map.size(), map.bucket_count(),
+                                  map.max_load());
+                    });
                 }
             }
             return inserted;
@@ -3904,56 +3955,71 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
             auto const free_after = free_bytes_best_effort(reference_segment_.get());
             auto const state = classify_post_exception(before, after, key_present_after);
 
-            auto const shared = fmt::format(
-                "container=reference generation={} attempt={}/2 outpoint={} height={} "
-                "payload_size={} size_before={} size_after={} buckets_before={} "
-                "buckets_after={} live_max_load_before={} live_max_load_after={} "
-                "rotation_threshold={} no_rehash_limit={} segment_bytes={} "
-                "free_before={} free_after={} key_present_after={} exception={}",
-                reference_current_version_, attempt, outpoint_to_string(key), height,
-                sizeof(uint32_t) * 2, before.size, after.size, before.bucket_count,
-                after.bucket_count, before.live_max_load, after.live_max_load,
-                max_entries_for(before.bucket_count),
-                max_size_without_rehash(before.bucket_count),
-                segment_size, free_bytes_display(free_before),
-                free_bytes_display(free_after),
-                key_present_after ? "true" : "false", e.what());
+            // Assembled only from inside `diagnose`; see insert_in_index for
+            // what a throw from here used to cost.
+            auto const shared = [&] {
+                return fmt::format(
+                    "container=reference generation={} attempt={}/2 outpoint={} height={} "
+                    "payload_size={} size_before={} size_after={} buckets_before={} "
+                    "buckets_after={} live_max_load_before={} live_max_load_after={} "
+                    "rotation_threshold={} no_rehash_limit={} segment_bytes={} "
+                    "free_before={} free_after={} key_present_after={} exception={}",
+                    reference_current_version_, attempt, outpoint_to_string(key), height,
+                    sizeof(uint32_t) * 2, before.size, after.size, before.bucket_count,
+                    after.bucket_count, before.live_max_load, after.live_max_load,
+                    max_entries_for(before.bucket_count),
+                    max_size_without_rehash(before.bucket_count),
+                    segment_size, free_bytes_display(free_before),
+                    free_bytes_display(free_after),
+                    key_present_after ? "true" : "false", e.what());
+            };
 
             if (state == post_exception_state::map_mutated) {
                 ++reference_rotation_causes_.unexpected_post_exception;
                 integrity_latched_ = error_code::entry_corrupt;
-                log::critical("reference insert: the active map changed after a failed "
-                              "allocation, which contradicts the container's guarantee. "
-                              "Not rotating and not retrying. Stop this process and verify "
-                              "or rebuild the database before opening it again; this latch "
-                              "does not survive a restart. {}", shared);
+                diagnose([&] {
+                    log::critical("reference insert: the active map changed after a "
+                                  "failed allocation, which contradicts the container's "
+                                  "guarantee. Not rotating and not retrying. Stop this "
+                                  "process and verify or rebuild the database before "
+                                  "opening it again; this latch does not survive a "
+                                  "restart. {}", shared());
+                });
                 return std::unexpected(error_code::entry_corrupt);
             }
 
             if (attempt == 2) {
-                log::error("reference insert: a newly created generation could not take a "
-                           "single entry. This is capacity or configuration, not "
-                           "corruption. {}", shared);
+                diagnose([&] {
+                    log::error("reference insert: a newly created generation could not "
+                               "take a single entry. This is capacity or configuration, "
+                               "not corruption. {}", shared());
+                });
                 return std::unexpected(error_code::insufficient_space);
             }
 
-            log::info("reference insert: allocation failed; map unchanged; rotating and "
-                      "retrying. cause=allocator_refused_growth {}", shared);
             // Captured, not reconstructed; see insert_in_index.
             auto const old_generation = reference_current_version_;
+            diagnose([&] {
+                log::info("reference insert: allocation failed; map unchanged; rotating "
+                          "and retrying. cause=allocator_refused_growth {}", shared());
+            });
             if (auto const rotated = reference_rotate_for(rotation_cause::capacity_exception);
                     ! rotated) {
                 return std::unexpected(rotated.error());
             }
             free_before = free_bytes_best_effort(reference_segment_.get());
-            log::info("reference insert: rotated after a failed allocation: "
-                      "old_generation={} new_generation={} height={} outpoint={}",
-                      old_generation, reference_current_version_,
-                      height, outpoint_to_string(key));
+            diagnose([&] {
+                log::info("reference insert: rotated after a failed allocation: "
+                          "old_generation={} new_generation={} height={} outpoint={}",
+                          old_generation, reference_current_version_,
+                          height, outpoint_to_string(key));
+            });
         }
     }
 
-    log::error("reference insert: exhausted the single retry without a decision");
+    diagnose([] {
+        log::error("reference insert: exhausted the single retry without a decision");
+    });
     return std::unexpected(error_code::insufficient_space);
 }
 

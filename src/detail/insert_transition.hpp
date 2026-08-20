@@ -42,6 +42,7 @@
 #pragma once
 
 #include <cstdint>
+#include <new>
 #include <stdexcept>
 #include <string>
 
@@ -155,6 +156,37 @@ static_assert(classify_post_exception({10, 100, 87}, {10, 100, 87}, true)
                   == post_exception_state::map_mutated,
               "the key the insert threw on is in the map: it went in and reported failure");
 
+/**
+ * @brief Runs a diagnostic and swallows anything it throws.
+ *
+ * Everything a failed insert reports is built at the moment of reporting:
+ * `fmt::format` allocates, `outpoint_to_string` allocates, and the emission
+ * itself ends in a callback this library does not own and cannot constrain. Any
+ * of the three can throw.
+ *
+ * That matters because the reporting sits in the middle of a decision. Before
+ * this boundary existed, a throw from the format string was enough to leave a
+ * contradicted map uncounted and unlatched; a throw from the callback was enough
+ * to skip the one rotation and the one retry a recoverable failure is owed, or
+ * to present a rotation that had already completed as an exception. In every
+ * case a caller that asked for an error code got an exception instead, from a
+ * path whose entire purpose is to hand back a classified error code.
+ *
+ * So the rule is that the functional state — the counter, the latch, the
+ * rotation, the return — is settled first, and everything said about it is said
+ * from inside here. A log that could not be written is a log that was not
+ * written; it is never a decision that was not taken.
+ */
+template <typename Emit>
+void diagnose(Emit&& emit) noexcept {
+    try {
+        emit();
+    } catch (...) {
+        // Deliberately silent: the only way to report that reporting failed is
+        // to report, and that is the thing that just failed.
+    }
+}
+
 /// No figure. Distinct from zero, which is a segment with nothing left in it —
 /// the opposite end of the range and the more alarming reading of the two.
 inline constexpr uint64_t free_bytes_unavailable = UINT64_MAX;
@@ -192,6 +224,9 @@ template <typename Segment>
 /// How that figure appears in a log line. A sentinel printed as a number would
 /// read as eighteen exabytes free, which is worse than saying nothing.
 [[nodiscard]] inline std::string free_bytes_display(uint64_t bytes) {
+    if (failpoints::fail_diagnostic_format.load(std::memory_order_relaxed)) {
+        throw std::bad_alloc();
+    }
     return bytes == free_bytes_unavailable ? std::string("unavailable")
                                            : std::to_string(bytes);
 }

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,22 @@ void refused_with(char const* what, Result const& outcome, error_code expected) 
     INFO(what);
     REQUIRE_FALSE(outcome.has_value());
     CHECK(outcome.error() == expected);
+}
+
+/// The identifier of the generation inserts currently go to, from the census.
+///
+/// Distinct from the rotation count below, which happens to hold the same number
+/// today and is not the same statement.
+std::optional<uint64_t> active_generation(full_db& db, size_t index) {
+    auto const report = db.census();
+    if ( ! report) return std::nullopt;
+    for (auto const& cl : report->classes) {
+        if (cl.container_class != index) continue;
+        for (auto const& g : cl.generations_detail) {
+            if (g.active) return g.generation;
+        }
+    }
+    return std::nullopt;
 }
 
 /// How many generations a class has been through, which is what the statistics
@@ -814,10 +831,15 @@ namespace {
 /// alternative is a field that can quietly start naming the wrong file, which is
 /// how a diagnostic stops being evidence.
 struct log_capture {
-    log_capture() { set_log_callback([this](log_level, std::string_view m) {
-        lines.emplace_back(m);
-    }); }
-    ~log_capture() { set_log_callback(nullptr); }
+    /// Restores whatever was installed rather than clearing. `get_log_callback`
+    /// is already part of the public logging API, so no test-only mechanism is
+    /// needed to do this properly — and clearing unconditionally would silently
+    /// disarm an outer scope's callback, which is how one test starts depending
+    /// on having run after another.
+    log_capture() : previous(get_log_callback()) {
+        set_log_callback([this](log_level, std::string_view m) { lines.emplace_back(m); });
+    }
+    ~log_capture() { set_log_callback(previous); }
     log_capture(log_capture const&) = delete;
     log_capture& operator=(log_capture const&) = delete;
 
@@ -830,17 +852,27 @@ struct log_capture {
         return out;
     }
 
+    log_callback_t previous;
     std::vector<std::string> lines;
 };
 
 /// The value of `field=` in a log line, as text. Empty when the field is absent,
 /// which fails the comparison rather than passing it.
+///
+/// The name has to start the line or follow a space, or `generation` finds
+/// itself inside `old_generation=` and reports the wrong number — with both
+/// fields on the same line, and the shorter one a prefix of the longer, that is
+/// not a hypothetical.
 std::string field_in(std::string const& line, std::string const& field) {
-    auto const at = line.find(field + "=");
-    if (at == std::string::npos) return {};
-    auto const from = at + field.size() + 1;
-    auto const to = line.find_first_of(" ", from);
-    return line.substr(from, to == std::string::npos ? std::string::npos : to - from);
+    auto const needle = field + "=";
+    for (size_t at = line.find(needle); at != std::string::npos;
+         at = line.find(needle, at + 1)) {
+        if (at != 0 && line[at - 1] != ' ') continue;
+        auto const from = at + needle.size();
+        auto const to = line.find(' ', from);
+        return line.substr(from, to == std::string::npos ? std::string::npos : to - from);
+    }
+    return {};
 }
 
 } // namespace
@@ -861,7 +893,15 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
         auto db = std::move(*opened);
         REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
 
-        auto const before = generations_of(db, index);
+        // The generation's own identifier, from the census that reports it, and
+        // not from rotations_per_container — that is a count of rotations, and a
+        // count and an identity only coincide while nothing has ever disturbed
+        // the numbering. Reading the identity from the field that holds one is
+        // what keeps this case honest if they ever diverge.
+        auto const before = active_generation(db, index);
+        REQUIRE(before.has_value());
+        auto const rotations_before = generations_of(db, index);
+
         log_capture capture;
         failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
         REQUIRE(db.insert(key_of(2), payload_for(index), 800001).has_value());
@@ -871,9 +911,14 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
         // Read before the call, so it names a generation rather than an offset
         // from one. The two agree while the numbering is dense; the point is that
         // the line no longer depends on it being dense.
-        CHECK(field_in(rotated[0], "old_generation") == std::to_string(before));
-        CHECK(field_in(rotated[0], "new_generation") == std::to_string(before + 1));
-        CHECK(generations_of(db, index) == before + 1);
+        CHECK(field_in(rotated[0], "old_generation") == std::to_string(*before));
+        auto const after = active_generation(db, index);
+        REQUIRE(after.has_value());
+        CHECK(field_in(rotated[0], "new_generation") == std::to_string(*after));
+        CHECK(*after > *before);
+
+        // The rotation count is a separate claim, asserted separately.
+        CHECK(generations_of(db, index) == rotations_before + 1);
         db.close();
     }
 
@@ -940,6 +985,393 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
             CHECK(reported != "0");
         }
         db.close();
+    }
+#endif
+}
+
+#if defined(UTXOZ_LOG_CUSTOM)
+namespace {
+
+/// A log backend that refuses, for as long as it is in scope.
+///
+/// The callback is the one part of the diagnostic this library does not own: it
+/// runs arbitrary caller code, and there is nothing it can be assumed not to do.
+/// Arming it to throw exercises the whole diagnostic boundary at once — the
+/// formatting behind it is inside the same guarded lambda, so a decision that
+/// survives this survives an allocation failure in `fmt::format` too.
+struct throwing_log {
+    throwing_log() : previous(get_log_callback()) {
+        set_log_callback([](log_level, std::string_view) {
+            throw std::runtime_error("the log backend refused");
+        });
+    }
+    ~throwing_log() { set_log_callback(previous); }
+    throwing_log(throwing_log const&) = delete;
+    throwing_log& operator=(throwing_log const&) = delete;
+    log_callback_t previous;
+};
+
+} // namespace
+#endif
+
+TEST_CASE("a message that cannot be built changes nothing an insert decided",
+          "[transition]") {
+    // The other half of the boundary. The case below arms the emission to fail;
+    // this one arms the *building* of the message, which is a plain allocation
+    // and fails the way allocations fail. Both halves sit inside the same
+    // guarded lambda, and the decision is settled before either runs.
+    constexpr size_t index = 0;
+
+    SECTION("the recoverable failure still rotates once and retries once") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+        auto const rotations_before = generations_of(db, index);
+
+        failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+        auto const stored = db.insert(key_of(2), payload_for(index), 800001);
+        failpoints::fail_diagnostic_format.store(false, std::memory_order_relaxed);
+
+        REQUIRE(stored.has_value());
+        CHECK(*stored);
+        auto const stats = db.get_statistics();
+        CHECK(stats.rotations_by_cause[index].capacity_exception == 1);
+        CHECK(stats.rotations_by_cause[index].failed == 0);
+        CHECK(generations_of(db, index) == rotations_before + 1);
+        CHECK(files_for(t.dir, index) == files_before + 1);
+        auto const unique = db.verify_unique_outpoints();
+        REQUIRE(unique.has_value());
+        CHECK(unique->unique);
+        CHECK(unique->physical_entries == 2);
+        db.close();
+    }
+
+    SECTION("the second failure still returns insufficient_space") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+
+        failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
+        auto const refused = db.insert(key_of(2), payload_for(index), 800001);
+        failpoints::fail_diagnostic_format.store(false, std::memory_order_relaxed);
+
+        refused_with("a message-less second refusal", refused,
+                     error_code::insufficient_space);
+        CHECK(db.get_statistics().rotations_by_cause[index].capacity_exception == 1);
+        CHECK(files_for(t.dir, index) == files_before + 1);
+        db.close();
+    }
+
+    SECTION("the contradicted map still counts, latches and refuses") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+        auto const rotations_before = generations_of(db, index);
+
+        failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_after_mutating.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+        auto const contradicted = db.insert(key_of(2), payload_for(index), 800001);
+        failpoints::fail_insert_after_mutating.store(false, std::memory_order_relaxed);
+        failpoints::fail_diagnostic_format.store(false, std::memory_order_relaxed);
+
+        refused_with("a message-less contradiction", contradicted,
+                     error_code::entry_corrupt);
+        auto const stats = db.get_statistics();
+        CHECK(stats.rotations_by_cause[index].unexpected_post_exception == 1);
+        CHECK(stats.rotations_by_cause[index].completed() == 0);
+        CHECK(generations_of(db, index) == rotations_before);
+        CHECK(files_for(t.dir, index) == files_before);
+        refused_with("and the latch is set", db.insert(key_of(3), payload_for(index), 800002),
+                     error_code::entry_corrupt);
+        db.close();
+    }
+
+    SECTION("reference: the same three outcomes") {
+        failpoints::scoped_reset const disarm;
+
+        {
+            temp_db t;
+            auto opened = reference_db::open_for_testing(t.dir, true);
+            REQUIRE(opened.has_value());
+            auto db = std::move(*opened);
+            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
+            failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+            auto const stored = db.insert(key_of(2), 2, 2, 800001);
+            failpoints::fail_diagnostic_format.store(false, std::memory_order_relaxed);
+            REQUIRE(stored.has_value());
+            CHECK(*stored);
+            CHECK(db.get_statistics().rotations_by_cause[0].capacity_exception == 1);
+            auto const unique = db.verify_unique_outpoints();
+            REQUIRE(unique.has_value());
+            CHECK(unique->unique);
+            CHECK(unique->physical_entries == 2);
+            db.close();
+        }
+
+        {
+            temp_db t;
+            auto opened = reference_db::open_for_testing(t.dir, true);
+            REQUIRE(opened.has_value());
+            auto db = std::move(*opened);
+            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
+            failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
+            auto const refused = db.insert(key_of(2), 2, 2, 800001);
+            failpoints::fail_diagnostic_format.store(false, std::memory_order_relaxed);
+            refused_with("reference: a message-less second refusal", refused,
+                         error_code::insufficient_space);
+            CHECK(db.get_statistics().rotations_by_cause[0].capacity_exception == 1);
+            db.close();
+        }
+
+        {
+            temp_db t;
+            auto opened = reference_db::open_for_testing(t.dir, true);
+            REQUIRE(opened.has_value());
+            auto db = std::move(*opened);
+            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+            failpoints::fail_diagnostic_format.store(true, std::memory_order_relaxed);
+            failpoints::fail_insert_after_mutating.store(true, std::memory_order_relaxed);
+            failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+            auto const contradicted = db.insert(key_of(2), 2, 2, 800001);
+            failpoints::fail_insert_after_mutating.store(false, std::memory_order_relaxed);
+            failpoints::fail_diagnostic_format.store(false, std::memory_order_relaxed);
+            refused_with("reference: a message-less contradiction", contradicted,
+                         error_code::entry_corrupt);
+            CHECK(db.get_statistics().rotations_by_cause[0].unexpected_post_exception == 1);
+            db.close();
+        }
+    }
+}
+
+TEST_CASE("a log that throws changes nothing an insert decided", "[transition]") {
+#if ! defined(UTXOZ_LOG_CUSTOM)
+    SKIP("a throwing backend can only be installed through the callback");
+#else
+    constexpr size_t index = 0;
+
+    SECTION("the recoverable failure still rotates once and retries once") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+        auto const rotations_before = generations_of(db, index);
+
+        result<bool> stored;
+        {
+            throwing_log const refuse;
+            failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+            stored = db.insert(key_of(2), payload_for(index), 800001);
+        }
+
+        REQUIRE(stored.has_value());
+        CHECK(*stored);
+        auto const stats = db.get_statistics();
+        CHECK(stats.rotations_by_cause[index].capacity_exception == 1);
+        CHECK(stats.rotations_by_cause[index].unexpected_post_exception == 0);
+        CHECK(stats.rotations_by_cause[index].failed == 0);
+        CHECK(generations_of(db, index) == rotations_before + 1);
+        CHECK(files_for(t.dir, index) == files_before + 1);
+
+        auto const unique = db.verify_unique_outpoints();
+        REQUIRE(unique.has_value());
+        CHECK(unique->unique);
+        CHECK(unique->physical_entries == 2);
+        db.close();
+    }
+
+    SECTION("the second failure still returns insufficient_space and rotates no further") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+
+        result<bool> refused;
+        {
+            throwing_log const refuse;
+            failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
+            refused = db.insert(key_of(2), payload_for(index), 800001);
+        }
+
+        refused_with("a blind second refusal", refused, error_code::insufficient_space);
+        CHECK(db.get_statistics().rotations_by_cause[index].capacity_exception == 1);
+        CHECK(files_for(t.dir, index) == files_before + 1);   // one rotation, not two
+
+        auto const unique = db.verify_unique_outpoints();
+        REQUIRE(unique.has_value());
+        CHECK(unique->unique);
+        CHECK(unique->physical_entries == 1);                 // the refused entry is not there
+        db.close();
+    }
+
+    SECTION("the contradicted map still counts, latches and refuses") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+        auto const rotations_before = generations_of(db, index);
+
+        result<bool> contradicted;
+        {
+            throwing_log const refuse;
+            failpoints::fail_insert_after_mutating.store(true, std::memory_order_relaxed);
+            failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+            contradicted = db.insert(key_of(2), payload_for(index), 800001);
+            failpoints::fail_insert_after_mutating.store(false, std::memory_order_relaxed);
+        }
+
+        refused_with("a blind contradiction", contradicted, error_code::entry_corrupt);
+        auto const stats = db.get_statistics();
+        CHECK(stats.rotations_by_cause[index].unexpected_post_exception == 1);
+        CHECK(stats.rotations_by_cause[index].completed() == 0);
+        CHECK(generations_of(db, index) == rotations_before);
+        CHECK(files_for(t.dir, index) == files_before);
+        refused_with("and the latch is set", db.insert(key_of(3), payload_for(index), 800002),
+                     error_code::entry_corrupt);
+        refused_with("for everything", db.verify_unique_outpoints(),
+                     error_code::entry_corrupt);
+        db.close();
+    }
+
+    SECTION("a rotation that could not be made still latches with its own code") {
+        // The rotation itself logs on failure, after counting and latching. That
+        // log is behind the boundary too, so the caller still gets a code.
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+
+        result<bool> refused;
+        {
+            throwing_log const refuse;
+            failpoints::fail_after_segment_create.store(true, std::memory_order_relaxed);
+            failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+            refused = db.insert(key_of(2), payload_for(index), 800001);
+        }
+
+        refused_with("a blind failed rotation", refused, error_code::file_open_failed);
+        CHECK(db.get_statistics().rotations_by_cause[index].failed == 1);
+        db.close();
+    }
+
+    SECTION("the duplicate at the threshold still answers false rather than throwing") {
+        // A `return false` gated by a log line: before the boundary, a refusing
+        // backend turned "this key is already here" into an exception.
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+
+        result<bool> again;
+        {
+            throwing_log const refuse;
+            failpoints::force_rotations.store(1, std::memory_order_relaxed);
+            again = db.insert(key_of(1), payload_for(index), 800001);
+        }
+
+        REQUIRE(again.has_value());
+        CHECK_FALSE(*again);
+        CHECK(files_for(t.dir, index) == files_before);   // it did not rotate
+        db.close();
+    }
+
+    SECTION("reference: the same three outcomes") {
+        failpoints::scoped_reset const disarm;
+
+        {
+            temp_db t;
+            auto opened = reference_db::open_for_testing(t.dir, true);
+            REQUIRE(opened.has_value());
+            auto db = std::move(*opened);
+            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+
+            result<bool> stored;
+            {
+                throwing_log const refuse;
+                failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+                stored = db.insert(key_of(2), 2, 2, 800001);
+            }
+            REQUIRE(stored.has_value());
+            CHECK(*stored);
+            CHECK(db.get_statistics().rotations_by_cause[0].capacity_exception == 1);
+            auto const unique = db.verify_unique_outpoints();
+            REQUIRE(unique.has_value());
+            CHECK(unique->unique);
+            CHECK(unique->physical_entries == 2);
+            db.close();
+        }
+
+        {
+            temp_db t;
+            auto opened = reference_db::open_for_testing(t.dir, true);
+            REQUIRE(opened.has_value());
+            auto db = std::move(*opened);
+            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+
+            result<bool> refused;
+            {
+                throwing_log const refuse;
+                failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
+                refused = db.insert(key_of(2), 2, 2, 800001);
+            }
+            refused_with("reference: a blind second refusal", refused,
+                         error_code::insufficient_space);
+            CHECK(db.get_statistics().rotations_by_cause[0].capacity_exception == 1);
+            db.close();
+        }
+
+        {
+            temp_db t;
+            auto opened = reference_db::open_for_testing(t.dir, true);
+            REQUIRE(opened.has_value());
+            auto db = std::move(*opened);
+            REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+
+            result<bool> contradicted;
+            {
+                throwing_log const refuse;
+                failpoints::fail_insert_after_mutating.store(true, std::memory_order_relaxed);
+                failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+                contradicted = db.insert(key_of(2), 2, 2, 800001);
+                failpoints::fail_insert_after_mutating.store(false, std::memory_order_relaxed);
+            }
+            refused_with("reference: a blind contradiction", contradicted,
+                         error_code::entry_corrupt);
+            CHECK(db.get_statistics().rotations_by_cause[0].unexpected_post_exception == 1);
+            refused_with("reference: and the latch is set",
+                         db.insert(key_of(3), 3, 3, 800002), error_code::entry_corrupt);
+            db.close();
+        }
     }
 #endif
 }

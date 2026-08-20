@@ -295,6 +295,16 @@ struct failpoints {
     /// branch.
     static inline std::atomic<uint64_t> fail_insert_emplace{0};
 
+    /// Makes assembling a diagnostic message throw, as a heap that will not give
+    /// out another string does.
+    ///
+    /// Consulted by `free_bytes_display`, which every failed insert calls while
+    /// building its log line and nothing else calls at all. It stands in for the
+    /// whole message-building step — `fmt::format` and `outpoint_to_string`
+    /// allocate on the same line and fail the same way — and it is the only way
+    /// to show that a decision already taken survives the account of it failing.
+    static inline std::atomic<bool> fail_diagnostic_format{false};
+
     /// Makes the diagnostic free-memory probe throw.
     ///
     /// The probe is only ever read to fill in a log line, and the code that reads
@@ -366,11 +376,18 @@ struct failpoints {
         crash_at.store(crash_point::none, std::memory_order_relaxed);
         fail_directory_barrier_at.store(dir_barrier::none, std::memory_order_relaxed);
         fail_container_open.store(false, std::memory_order_relaxed);
+        // Absent until a test armed one of them and every case that ran
+        // afterwards began failing to create a container. Both are set by
+        // test_format_barrier and by the rotation cases, and both had to be
+        // stored back by hand there because this did not reach them.
+        fail_after_segment_create.store(false, std::memory_order_relaxed);
+        fail_after_segment_stamp.store(false, std::memory_order_relaxed);
         segments_mapped.store(0, std::memory_order_relaxed);
         fail_sidecar_removal.store(false, std::memory_order_relaxed);
         fail_insert_emplace.store(0, std::memory_order_relaxed);
         fail_insert_after_mutating.store(false, std::memory_order_relaxed);
         fail_free_memory_probe.store(false, std::memory_order_relaxed);
+        fail_diagnostic_format.store(false, std::memory_order_relaxed);
         before_target_publish.store(nullptr, std::memory_order_relaxed);
         forced_merge_id.store(0, std::memory_order_relaxed);
         force_rotations.store(0, std::memory_order_relaxed);
