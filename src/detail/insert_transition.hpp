@@ -176,6 +176,14 @@ static_assert(classify_post_exception({10, 100, 87}, {10, 100, 87}, true)
  * rotation, the return — is settled first, and everything said about it is said
  * from inside here. A log that could not be written is a log that was not
  * written; it is never a decision that was not taken.
+ *
+ * "Settled first" is meant literally, and it took a second pass to make the code
+ * mean it: the recoverable path used to announce "rotating and retrying" and
+ * then rotate, which put a diagnostic in front of the one action that branch
+ * exists to take — and left a line that a failed rotation immediately
+ * contradicted. Every site now acts and then reports what happened, which is why
+ * the figures a rotation invalidates (the generation, the free-byte count) are
+ * copied before it rather than read through afterwards.
  */
 template <typename Emit>
 void diagnose(Emit&& emit) noexcept {

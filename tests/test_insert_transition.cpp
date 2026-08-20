@@ -878,6 +878,25 @@ std::string field_in(std::string const& line, std::string const& field) {
 } // namespace
 #endif
 
+TEST_CASE("a field name is read whole, not as a suffix of a longer one", "[transition]") {
+#if ! defined(UTXOZ_LOG_CUSTOM)
+    SKIP("field_in only exists alongside the log reader");
+#else
+    // The line the diagnostic actually emits carries both names, and the shorter
+    // one is a suffix of the longer. Reading `generation` off it used to return
+    // `old_generation`'s value; nothing about that reads as wrong at the call
+    // site, which is why it is asserted here rather than left to a comment.
+    std::string const line =
+        "insert: rotated. container=0 old_generation=4 new_generation=7 height=800001";
+    CHECK(field_in(line, "old_generation") == "4");
+    CHECK(field_in(line, "new_generation") == "7");
+    CHECK(field_in(line, "generation").empty());
+    CHECK(field_in(line, "container") == "0");
+    CHECK(field_in(line, "height") == "800001");   // the last field, with no trailing space
+    CHECK(field_in(line, "absent").empty());
+#endif
+}
+
 TEST_CASE("the failure diagnostic names the generation it retired and the segment it "
           "measured", "[transition]") {
 #if ! defined(UTXOZ_LOG_CUSTOM)
@@ -906,7 +925,7 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
         failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
         REQUIRE(db.insert(key_of(2), payload_for(index), 800001).has_value());
 
-        auto const rotated = capture.matching("rotated after a failed allocation");
+        auto const rotated = capture.matching("the generation was rotated and the entry");
         REQUIRE(rotated.size() == 1);
         // Read before the call, so it names a generation rather than an offset
         // from one. The two agree while the numbering is dense; the point is that
@@ -919,6 +938,40 @@ TEST_CASE("the failure diagnostic names the generation it retired and the segmen
 
         // The rotation count is a separate claim, asserted separately.
         CHECK(generations_of(db, index) == rotations_before + 1);
+        db.close();
+    }
+
+    SECTION("nothing is announced before it has happened") {
+        // The ordering the contract claims, read off the log. Two rotations in
+        // one insert — one preventive, one after a refused allocation — and
+        // neither may be described in the future tense, because a rotation that
+        // then fails leaves the earlier line standing as a false statement.
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+
+        log_capture capture;
+        failpoints::force_rotations.store(1, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+        REQUIRE(db.insert(key_of(2), payload_for(index), 800001).has_value());
+
+        // Each rotation is reported once, after the fact, naming both ends.
+        auto const preventive = capture.matching("reached its insert limit and was rotated");
+        REQUIRE(preventive.size() == 1);
+        CHECK(field_in(preventive[0], "old_generation") == "0");
+        CHECK(field_in(preventive[0], "new_generation") == "1");
+
+        auto const recovered = capture.matching("the generation was rotated and the entry");
+        REQUIRE(recovered.size() == 1);
+        CHECK(field_in(recovered[0], "old_generation") == "1");
+        CHECK(field_in(recovered[0], "new_generation") == "2");
+
+        // And the failure's own figures name the generation that failed, not the
+        // one made to replace it — the copy taken before the rotation.
+        CHECK(field_in(recovered[0], "generation") == "1");
         db.close();
     }
 
