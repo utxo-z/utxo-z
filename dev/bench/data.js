@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787093226813,
+  "lastUpdate": 1787229964665,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -16659,6 +16659,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "telemetry: mixed 9 active hits to 1 historical",
             "value": 857689.45,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fff255837299f9b1a41c6191d3b9863e703ac83d",
+          "message": "fix: rotate before Boost decides to grow, and verify what a failed insert left (#140)\n\n* fix: rotate before Boost decides to grow, and verify what a failed insert left\n\nA real initial block download logged this twice, on the 44-byte class:\n\n    [error] [UTXO-Z] Error inserting into container 0: boost::interprocess::bad_alloc\n\nBoth times the store rotated, retried, and carried on; the download finished,\ncompacted, and a uniqueness walk over the 59 125 454 entries it produced found\nno outpoint stored twice. So nothing was lost. But `error` was the wrong level\nfor an event the store recovered from, and — more to the point — the event\nshould not have happened at all.\n\n## Why the guard was late\n\nThe store rotates when a map holds `max_entries_for(bucket_count)` entries: a\nfixed fraction of capacity, chosen to sit below the point at which Boost would\ngrow the map. `capacity_policy.hpp` asserts exactly that, and the assertion is\ntrue of a *new* map.\n\nBoost's threshold is not fixed. `foa/core.hpp::recover_slot` lowers it on erase:\n\n    /* If this slot potentially caused overflow, we decrease the maximum load\n     * so that average probe length won't increase unboundedly in repeated\n     * insert/erase cycles (drift). */\n    size_ctrl.ml -= group_type::maybe_caused_overflow(pc);\n\nOn a workload that erases nearly as much as it inserts, that walks Boost's growth\npoint down toward the operating threshold and past it. Then the store believes it\nhas room, Boost decides to grow, and the segment — sized so that the map fills it\n— has 67 MB free against a bucket array of 1.32 GB. The allocator refuses.\n\nClass 0 took 398 800 611 inserts against 354 992 550 erases over 13 generations.\nThe two thresholds start 688 128 entries apart, so about 2.5 % of the erases in a\ngeneration having touched an overflowed group is enough to cross.\n\nThe first test in `test_insert_transition.cpp` reproduces the drift on a real map\nwith no failpoint at all. It needs two conditions that are easy to miss and are\nwritten down there: the map has to be nearly full, and the keys have to look like\ntxids. Sequential keys spread so evenly that nothing overflows and the threshold\nnever moves — the first version of that test churned four million of them and\nmeasured no drift whatsoever.\n\n## What changed\n\n**The guard asks the map, not the policy alone.** The limit is now\n\n    min(max_entries_for(bucket_count), map.max_load())\n\n`max_load()` is public and `noexcept`. The off-by-one comes from\n`foa/table.hpp::emplace_impl`, which grows when `size >= max_load()`, so a map\none entry short is still safe — the same shape the operating threshold already\nhad, which is why the two combine by taking the smaller.\n\n**A key already in the active map no longer rotates.** This is a hole that was\nalready open: the guard rotated without asking whether this insert would insert.\n`emplace` looks a key up before it grows, so a key that is present never grows the\nmap — but rotating on it sealed the generation holding it and put a second copy in\nthe empty one. Two copies of one outpoint, made by the guard meant to keep the\nfile healthy. It never fired in the real download, and it is closed now with one\nprobe, taken only on the path that has already decided to rotate. It closes the\nactive map's half of the question and no more.\n\n**The `bad_alloc` path verifies before it retries.** It reads size, bucket count\nand the live growth point before the `emplace` and again after the throw, asks\nwhether the key is there, and classifies:\n\n  - unchanged and the key absent — the guarantee held. `info`, one rotation, one\n    retry, and a second `info` when the retry succeeds;\n  - anything else — the container contradicted what `emplace` documents.\n    `critical`, the instance latches, `entry_corrupt`, no rotation and no retry;\n  - a second failure on a generation created moments ago — capacity or\n    configuration, not corruption. `error` and `insufficient_space`.\n\nBoost's guarantee is quoted where it is relied on: the new arrays are allocated\nbefore the `try`, deleted and rethrown if the element cannot be built, and the\nsize is incremented only after the rehash completes. The documented carve-out is\nthe hash function, and `outpoint_hash::operator()` is `noexcept`.\n\n**One rotation and one retry, where there were three.** On a segment that cannot\ntake a single entry the old loop made three files before giving up — up to 4.2 GB\nof empty generations for class 0.\n\n**A rotation that fails now latches too.** `new_version` closes the previous\ncontainer before it makes the next one, so a failure leaves `containers_[Index]`\nnull and `container<Index>()` dereferences it. That is not corruption — the data\nis intact and a new instance can open it — but this instance has nowhere to put\nthe next entry of that class, and finding that out by dereferencing nothing is\nnot an option. It answers `file_open_failed`.\n\n## The latch is not a recovery\n\n`cleanup_pending_` means a merge published its target and could not retire what it\nsuperseded: there is a sidecar on disk and the next open settles it, so\n`recovery_required` is honest. This is not that. A map that moved under a\n`bad_alloc` has no sidecar, no merge record and nothing to rebuild from, and the\nlatch is a bool in memory that a restart erases — after which `open()` maps the\nsame file and uses it, because `validate_stamp` certifies the format identity and\nnot the coherence of what the file holds.\n\nSo the latch carries the code it answers with, `entry_corrupt` here, and the log\nsays to stop and verify or rebuild rather than to restart. Making the quarantine\nsurvive a restart is a persisted mark with its own format and its own question\nabout who may lift it; that is a separate piece of work.\n\nIt blocks the instance, not just the two inserts: inserts, finds, resolutions,\ndeletes, compaction, traversals, census and the uniqueness walk. `sync()` and\n`census()` consult the integrity latch and deliberately not the recovery one —\na census over a half-applied compaction is honest, and flushing a map that is not\nwhat it claims is the one thing not worth doing.\n\n## Counters\n\n`preventive`, `capacity_exception`, `failed` and `unexpected_post_exception`, per\ncontainer, separate from `rehash_count` because a rotation is not a rehash.\nPresent in every build including one compiled with statistics off: they are a\nhandful of rare operational transitions, and the reason they exist is that the\ninvestigation into the first one had to be reconstructed from a log line carrying\nnothing. `failed` completed no rotation and is not part of the total;\n`unexpected_post_exception` rotates nothing at all.\n\n## Tests — 14 cases\n\nThe drift itself, on a real map, without a failpoint. The same drift end to end:\na map driven below its growth point, reopened through the public API, where the\nnext insert of a new key rotates before Boost can grow it — that case goes red the\nmoment the guard stops consulting `max_load()`, which is what makes the guard\ntested rather than merely asserted.\n\nThe effective limit at both thresholds. The classifier on each of its inputs. A\nkey already present at the rotation threshold: no rotation, `false`, the\ngeneration count unchanged, and one copy — asked of `verify_unique_outpoints()`\nrather than inferred. The same in reference mode. A new key at the threshold,\nwhich does rotate and is counted as preventive.\n\nThe exceptional path is reached from a seam rather than by filling a segment\nuntil the allocator happens to refuse: that depends on a geometry, takes a hundred\nthousand inserts, and cannot say which insert failed. `fail_insert_emplace` makes\nexactly the next N inserts throw, so each branch is asserted exactly — one\ncapacity-exception rotation, one new file, a successful retry, one physical copy\nand no map that grew; a second failure refused with `insufficient_space` without a\nsecond rotation or a second file; and, with `fail_insert_after_mutating`, the state\nthe container promises cannot happen, which latches the instance and is then\nrefused by insert, find, resolve, deletes, compaction, sync, traversal, census and\nthe uniqueness walk alike. A rotation that cannot make its file leaves no file and\nno catalogue entry, latches with `file_open_failed`, and a new instance opens what\nwas already there. Reference mode covers the same three outcomes.\n\nSuites: 361 cases at `lookup`, 361 at `basic`, 356 with statistics off.\n\n## What the benchmark against the parent found\n\nIt found a regression I had put there. The diagnostic captured the segment's free\nbytes before every `emplace` — and `can_insert_safely()` already walks the free\nlist on every insert to get the same figure. Two walks instead of one, on a list\nwhose length is not O(1): `insert P2PKH (43B)` went from about 30 ns to 61 ns.\nThe guard now hands the value it already paid for to the caller, and there is one\nwalk again.\n\nAfter that, the aggregate benchmarks over four alternating runs of each binary,\ncomparing minima:\n\n    bulk insert 10K (P2PKH)      -2.1 %\n    bulk insert 10K (chain mix)  +1.4 %\n    simulated IBD (100 blocks)   +0.8 %\n\nThose average ten thousand inserts each, which is what a per-insert change needs.\nThe single-insert micro-benchmarks are not usable here and the numbers say so: the\nparent measured 58.04 ns and then 78.74 ns for `insert 123B` on the same binary,\na 36 % spread, and across runs they disagree in direction — +5 % on P2PKH against\n+121 % on P2SH, which do the same work in the same container. The largest deltas\nanywhere in the suite are -8.5 % to +2.4 %, and the improvements outnumber the\nregressions, which is what noise looks like.\n\n## Not here\n\nNo geometry, capacity, file size or epoch changes. No persisted quarantine. The\nobservation that `can_insert_safely()` calls `get_free_memory()` on every insert,\nwhich walks the segment's free list, is recorded as separate performance debt.\n\n* fix: keep the failure diagnostic from overruling the failure\n\nFour corrections to the recovery path, all on the same theme: the log line\nthat explains a failed insert must not be able to change what that insert\ndecided, and must not name things it inferred.\n\n- The free-memory probe is read inside the `catch` whose remaining work is\n  to classify the map, latch the instance and count the cause. It is a\n  subtraction over three fields of the segment header and in practice\n  cannot fail, but it is not declared `noexcept` — and a throw escaping\n  from there would have discarded all three, turning a classified refusal\n  into an unhandled exception. It is now read best-effort, and returns a\n  sentinel the log prints as \"unavailable\" rather than a figure.\n\n- `free_before` was taken once, before the guard, and then reported by\n  every attempt. After a rotation the attempt runs on a different segment,\n  so the line could compare one generation's free bytes with another's —\n  and after a rotation forced without reaching the segment it reported the\n  untouched initial value, which as a zero read as \"no bytes left\". It is\n  seeded with the sentinel and re-read after each rotation that completed.\n\n- The retired generation is captured before the rotation instead of\n  reconstructed as `new - 1`. A version number is an identity, not a\n  position; version_catalog.hpp documents that the numbering has holes in\n  it wherever compaction has drained one.\n\n- The tests read `.error()` without first establishing that the result held\n  no value, which is undefined and lets a case that wrongly succeeded pass\n  by reading a dead union member. `refused_with` asks the two questions in\n  the order they have to be asked, and labels which operation failed.\n\nNew coverage: the probe's own contract; all three insert outcomes driven\nwith the probe failing throughout, in both modes; and the diagnostic itself,\nread back through the public log callback.\n\n* fix: settle the decision before saying anything about it\n\nA failed insert has to end in a classified error code. Everything it says\nabout the failure — assembling the message and emitting it — could throw,\nand until now that was enough to change the outcome:\n\n- `fmt::format` built the shared diagnostic before anything was decided, so\n  a failure to allocate the *message* left a contradicted map uncounted,\n  unlatched, and reported as an unrelated exception;\n- the log at the end of a *successful* rotation ran inside `rotate_for`'s\n  `catch (std::exception const&)`, so a refusing backend turned a generation\n  that exists on disk into `file_open_failed`, refused the retry the insert\n  was owed, and latched the instance out of the size class for good;\n- the log before the rotation gated the rotation itself, and the log after a\n  stored entry gated the report of it.\n\nTwo boundaries, at the two places a throw can start:\n\n- `utxoz::log` never propagates. Formatting and emission both run inside a\n  guard, and the six level functions are `noexcept`. The backend ends in a\n  spdlog sink or a caller's callback, neither of which this library owns.\n- `detail::diagnose` guards what the caller builds — `fmt::format`,\n  `outpoint_to_string`, `free_bytes_display` are the caller's arguments and\n  are evaluated before the log call is entered.\n\nThe state a failure needs — the counter, the latch, the rotation, the return\n— is now settled before either boundary is crossed, in full and reference\nalike.\n\nAlso, found while testing the above: `failpoints::clear()` never reached\n`fail_after_segment_create` or `fail_after_segment_stamp`. A case that armed\none made every case after it fail to create a container, which is precisely\nwhat test_failpoint_reset exists to prevent; two call sites had been storing\nthem back by hand. Both are now cleared and both are pinned by that test.\n\nAnd three corrections to the diagnostic tests: `log_capture` restores the\ncallback it displaced rather than clearing one it does not own; `field_in`\nmatches a whole field name, so `generation` no longer reads the value of\n`old_generation`; and the generation identifier is read from `census()`,\nwhich reports identities, rather than from the rotation count, which is a\ndifferent statement that happens to share a value.\n\n* fix: report the rotation that happened, not the one about to\n\nThe `diagnose` contract says the counter, the latch, the rotation and the\nreturn are settled before anything is said about them. The recoverable path\ndid not honour it: it emitted \"rotating and retrying\" and then called\n`rotate_for()`. Nothing could escape — `diagnose` catches and `utxoz::log`\nis `noexcept` — but the ordering was still wrong on its own terms, and it\nleft a line that a failed rotation then contradicted two lines later.\n\nBoth rotation sites now act first and describe the outcome afterwards, in\nfull and reference alike:\n\n- the preventive rotation reports `old_generation`/`new_generation` and the\n  figures of the sealed map, snapshotted while it was still open;\n- the recoverable one reports the rotation it made, or, when the rotation\n  could not be made, the figures of the failure that wanted it — which\n  `rotate_for`'s own message does not carry.\n\nFor that to be truthful the shared diagnostic must not read anything a\nrotation replaces, so the generation and the free-byte count are copied when\nthe handler is entered rather than read through when the message is built.\nWithout the copies the failure's own `generation=` field named the\ngeneration created to replace it.\n\nAlso: a direct case for `field_in`, which reads `generation` off a line that\ncarries `old_generation` and `new_generation` too.",
+          "timestamp": "2026-08-20T14:41:03+02:00",
+          "tree_id": "a621b8b2f04dc42928c17b0d69d158d56c58dcc6",
+          "url": "https://github.com/utxo-z/utxo-z/commit/fff255837299f9b1a41c6191d3b9863e703ac83d"
+        },
+        "date": 1787229964278,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 406370.08,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 533879.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 544766.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 866834.35,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 506.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 574.36,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 14899633.88,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 26944310.57,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 14291921.02,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 14183.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2227719.54,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2308187.06,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 125048.56,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 13336.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 2998.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 3920.1,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3240.13,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 1105.22,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 1100.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 1093.89,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 1098.85,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 1113.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 1101.81,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: active hit, first class",
+            "value": 15051681.09,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: miss, every class probed",
+            "value": 26614488.29,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: sweep of 256 keys over three generations",
+            "value": 32060.75,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: mixed 9 active hits to 1 historical",
+            "value": 874130.41,
             "unit": "ops/sec"
           }
         ]
