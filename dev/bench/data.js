@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787229964665,
+  "lastUpdate": 1787235704068,
   "repoUrl": "https://github.com/utxo-z/utxo-z",
   "entries": {
     "Benchmark": [
@@ -16818,6 +16818,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "telemetry: mixed 9 active hits to 1 historical",
             "value": 874130.41,
+            "unit": "ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "fpelliccioni@gmail.com",
+            "name": "Fernando Pelliccioni",
+            "username": "fpelliccioni"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "21d483f5e47776b7d77db7484b3bf9b4891e5a94",
+          "message": "test: name the repeated setup, and hold clear() to every seam (#141)\n\n* test: name the setup thirty sections were repeating\n\nFive lines — open, check, move, store the first key — appeared identically in\nthirty places and said nothing about the case they belonged to. A case's\nsubject starts at the failpoint it arms.\n\n`full_with_one` and `reference_with_one` derive from `temp_db` rather than\nholding one, so `dir` still names the directory and the destruction order is\nunchanged: the database closes while its files are still there.\n\nNo case's failpoints or assertions change; the suite runs the same 366\nassertions in the same 23 cases at all three statistics levels.\n\n* test: hold clear() to every seam, not to six of them\n\nThe case is named \"clear() reaches every seam\" and named six of the\nthirty-four. That is how `fail_after_segment_create` came to sit outside\n`clear()` unnoticed until a case armed it and every case that ran afterwards\nfailed to create a container, pointing at nothing.\n\nAll thirty-four are now armed, proved to have been armed — a subset check\nagainst a `clear()` that reset nothing would have passed as readily — and\nchecked afterwards, from one list used for all three so they cannot drift.\n`forced_database_id` and `before_target_publish` are handled beside it,\nbeing an array and a function pointer.\n\nThe array is checked byte by byte rather than at its ends. `first_byte_not`\nreturns the index instead of a bool so a failure names the byte: an `all_of`\nwould report `false`, which says nothing about where. Verified by leaving\nbyte 7 dirty in `clear()` — the edge-only form passed, this one reports\n`7 == -1`.\n\nAdding a seam still means adding a line here, but it is one line in one\nplace, and a seam missing from `clear()` now fails in this file rather than\nsomewhere unrelated. Verified by dropping three different seams from\n`clear()`: each names itself.",
+          "timestamp": "2026-08-20T16:07:26+02:00",
+          "tree_id": "defb5a11a08ecb21fb55f07ef623566e1a0e07af",
+          "url": "https://github.com/utxo-z/utxo-z/commit/21d483f5e47776b7d77db7484b3bf9b4891e5a94"
+        },
+        "date": 1787235703231,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "insert P2PKH (43B)",
+            "value": 965738.84,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert P2SH (41B)",
+            "value": 1285782.82,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 123B",
+            "value": 1353907.51,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert 89B",
+            "value": 1774732.76,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (P2PKH)",
+            "value": 396.64,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "bulk insert 10K (chain mix)",
+            "value": 511.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (latest version)",
+            "value": 8537809.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find miss",
+            "value": 22441169.23,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "find hit (chain mix)",
+            "value": 14312075.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "batch find 1K hits",
+            "value": 15839.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes hit (1 entry)",
+            "value": 2526709.32,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes miss (1 entry)",
+            "value": 2889899.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes (100 entries)",
+            "value": 146209.98,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "apply_deletes 1K",
+            "value": 17226.25,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "simulated IBD (100 blocks)",
+            "value": 3045.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "insert-heavy workload (1K inserts, 100 finds)",
+            "value": 4419.27,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "read-heavy workload (5K finds on 1K entries)",
+            "value": 3795.79,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 1K (P2PKH)",
+            "value": 2283.5,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (P2PKH)",
+            "value": 876.99,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (P2PKH)",
+            "value": 168.78,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 100K (P2PKH)",
+            "value": 236.16,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 10K (123B)",
+            "value": 2285.31,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "close+reopen 50K (123B)",
+            "value": 1642,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: active hit, first class",
+            "value": 15672558.11,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: miss, every class probed",
+            "value": 22009148.55,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: sweep of 256 keys over three generations",
+            "value": 41786.52,
+            "unit": "ops/sec"
+          },
+          {
+            "name": "telemetry: mixed 9 active hits to 1 historical",
+            "value": 1001698.95,
             "unit": "ops/sec"
           }
         ]
