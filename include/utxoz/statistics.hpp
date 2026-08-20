@@ -468,6 +468,36 @@ struct fragmentation_stats {
 };
 
 /**
+ * @brief Why generations were replaced, counted for every build.
+ *
+ * Outside `UTXOZ_STATISTICS_LEVEL` on purpose. These are rare operational
+ * transitions — a handful over an entire initial block download — and the reason
+ * they exist is that the last investigation had to be reconstructed from a log
+ * line that carried nothing. Making them optional would mean the next one starts
+ * from the same place.
+ *
+ * They cost nothing when nothing happens: an increment on a path that runs once
+ * per full generation.
+ */
+struct rotation_causes {
+    /// The policy asked for the rotation and it completed.
+    uint64_t preventive = 0;
+    /// A `bad_alloc` asked for it, the map was intact, and it completed.
+    uint64_t capacity_exception = 0;
+    /// A rotation was asked for and could not be made. **Not** a completed
+    /// rotation, and deliberately not added to either of the two above.
+    uint64_t failed = 0;
+    /// The map contradicted its guarantee after a `bad_alloc`. No rotation was
+    /// attempted, which is why this is counted here rather than as a failure.
+    uint64_t unexpected_post_exception = 0;
+
+    /// Completed rotations, by cause. Excludes `failed`, which completed nothing.
+    [[nodiscard]] constexpr uint64_t completed() const noexcept {
+        return preventive + capacity_exception;
+    }
+};
+
+/**
  * @brief Complete database statistics
  */
 struct database_statistics {
@@ -500,6 +530,17 @@ struct database_statistics {
     
     // File rotation statistics
     std::array<size_t, container_count> rotations_per_container{};
+
+    /// Why those rotations happened, per container. Filled in every build,
+    /// including one compiled with statistics off: these are a handful of rare
+    /// operational transitions, not hot-path telemetry, and the reason they are
+    /// counted is that the investigation into the first one had to be
+    /// reconstructed from a log line that carried nothing.
+    ///
+    /// `failed` is not a rotation that happened and is not part of
+    /// `rotations_per_container`; `unexpected_post_exception` rotates nothing at
+    /// all. See detail/insert_transition.hpp for the transitions that move them.
+    std::array<rotation_causes, container_count> rotations_by_cause{};
     
     // Memory usage estimates
     std::array<size_t, container_count> memory_usage_per_container{};

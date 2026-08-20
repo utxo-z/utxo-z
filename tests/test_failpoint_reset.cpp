@@ -35,6 +35,11 @@ TEST_CASE("clear() reaches every seam, including the newest", "[failpoints]") {
     failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
     failpoints::fail_container_open.store(true, std::memory_order_relaxed);
     failpoints::forced_merge_id.store(77, std::memory_order_relaxed);
+    // Added after both were found missing from clear(): a case armed the first
+    // one and the container creation of every case after it failed, which is
+    // exactly the symptom this file exists to prevent.
+    failpoints::fail_after_segment_create.store(true, std::memory_order_relaxed);
+    failpoints::fail_after_segment_stamp.store(true, std::memory_order_relaxed);
 
     REQUIRE(failpoints::force_rotations.load(std::memory_order_relaxed) == 3);
     REQUIRE(failpoints::force_database_id.load(std::memory_order_relaxed));
@@ -49,6 +54,8 @@ TEST_CASE("clear() reaches every seam, including the newest", "[failpoints]") {
     CHECK_FALSE(failpoints::fail_sync_file.load(std::memory_order_relaxed));
     CHECK_FALSE(failpoints::fail_container_open.load(std::memory_order_relaxed));
     CHECK(failpoints::forced_merge_id.load(std::memory_order_relaxed) == 0);
+    CHECK_FALSE(failpoints::fail_after_segment_create.load(std::memory_order_relaxed));
+    CHECK_FALSE(failpoints::fail_after_segment_stamp.load(std::memory_order_relaxed));
 }
 
 TEST_CASE("the guard disarms on the way out, including the way out an exception takes",

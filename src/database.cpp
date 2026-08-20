@@ -45,8 +45,8 @@ deletion_progress db_base::apply_deletes(std::span<deferred_deletion_entry const
     // more than once, so the contract on deletion_progress held everywhere
     // except where a caller is most likely to be looping over the result.
     if ( ! impl_) return detail::refuse_deletions(requests, error_code::closed);
-    if ( ! impl_->refuse_if_recovery_pending()) {
-        return detail::refuse_deletions(requests, error_code::recovery_required);
+    if (auto const usable = impl_->refuse_if_unusable(); ! usable) {
+        return detail::refuse_deletions(requests, usable.error());
     }
     if ( ! impl_->refuse_if_inspection_only()) {
         return detail::refuse_deletions(requests, error_code::inspection_only);
@@ -66,8 +66,13 @@ durability_level platform_durability() noexcept {
 result<> db_base::sync() {
     if ( ! impl_) return std::unexpected(error_code::closed);
     // No recovery guard here — sync() is what a caller reaches for *because*
-    // something went wrong — but an inspection has nothing to make durable that
-    // it did not find already durable.
+    // something went wrong — but the integrity latch is different: it says a map
+    // is not what it claims, and making that durable is the one thing not worth
+    // doing. An inspection, likewise, has nothing to make durable that it did not
+    // find already durable.
+    if (auto const intact = impl_->refuse_if_integrity_latched(); ! intact) {
+        return std::unexpected(intact.error());
+    }
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) {
         return std::unexpected(usable.error());
     }
@@ -76,14 +81,14 @@ result<> db_base::sync() {
 
 result<> db_base::compact_all() {
     if (!impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->compact_all();
 }
 
 result<> db_base::for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->for_each_key_impl(cb, ctx);
 }
@@ -99,13 +104,25 @@ void db_base::print_statistics() {
 
 result<census_report> db_base::census(census_options const& options) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
+    // The integrity latch and not the recovery one, which is the same split
+    // sync() makes. A census over a half-applied compaction is honest — it says
+    // what is stored, and what is stored is two copies. A census over a map that
+    // contradicted its own guarantee is not: its figures are read out of a
+    // structure that has stopped describing anything.
+    if (auto const intact = impl_->refuse_if_integrity_latched(); ! intact) {
+        return std::unexpected(intact.error());
+    }
     return impl_->census(options);
 }
 
 result<uniqueness_report> db_base::verify_unique_outpoints(
         verify_options const& options) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
-    // Refused on a latched store, and `census()` above deliberately is not. The
+    if (auto const intact = impl_->refuse_if_integrity_latched(); ! intact) {
+        return std::unexpected(intact.error());
+    }
+    // Refused on a store with a pending cleanup too, and `census()` above
+    // deliberately is not. The
     // difference is what the two produce.
     //
     // A latch means an operation that may have applied part of its work did not
@@ -193,14 +210,14 @@ result<full_db> full_db::open_for_inspection_for_testing(std::filesystem::path p
 
 result<bool> full_db::insert(raw_outpoint const& key, output_data_span value, uint32_t height) {
     if (!impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->insert(key, value, height);
 }
 
 result<full_find_result> full_db::find(raw_outpoint const& key, uint32_t height) const {
     if (!impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     auto r = impl_->full_find(key, height);
     // not_resolved, not not_found: the active versions did not have it, and they
@@ -211,14 +228,14 @@ result<full_find_result> full_db::find(raw_outpoint const& key, uint32_t height)
 
 result<full_resolution> full_db::resolve(std::span<lookup_request const> requests) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->full_resolve(requests);
 }
 
 result<> full_db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->for_each_entry_impl(cb, ctx);
 }
@@ -266,14 +283,14 @@ result<reference_db> reference_db::open_for_inspection_for_testing(std::filesyst
 
 result<bool> reference_db::insert(raw_outpoint const& key, uint32_t file_number, uint32_t offset, uint32_t height) {
     if (!impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->reference_insert_typed(key, height, file_number, offset);
 }
 
 result<reference_find_result> reference_db::find(raw_outpoint const& key, uint32_t height) const {
     if (!impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     auto r = impl_->reference_find_typed(key, height);
     // not_resolved, not not_found: see full_db::find().
@@ -283,14 +300,14 @@ result<reference_find_result> reference_db::find(raw_outpoint const& key, uint32
 
 result<reference_resolution> reference_db::resolve(std::span<lookup_request const> requests) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->reference_resolve(requests);
 }
 
 result<> reference_db::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, uint32_t, uint32_t), void* ctx) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
-    if (auto const ready = impl_->refuse_if_recovery_pending(); ! ready) return std::unexpected(ready.error());
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
     if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return std::unexpected(usable.error());
     return impl_->reference_for_each_entry_typed(cb, ctx);
 }
