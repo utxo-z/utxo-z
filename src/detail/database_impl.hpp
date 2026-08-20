@@ -204,10 +204,16 @@ private:
 
 
     // Safety checks
-    /// `free_bytes`, when given, receives the segment's free space — which this
-    /// already walks the free list to obtain. The diagnostic an insert needs if
-    /// it later throws is the same figure, and asking twice per insert doubled
-    /// the cost of the whole operation: the walk is O(free list), not O(1).
+    /// `free_bytes`, when given, receives the segment's free space, which this
+    /// already reads. The diagnostic an insert needs if it later throws is the
+    /// same figure, so it is passed out rather than asked for again: the read is
+    /// a subtraction over the segment header, but the header is a different
+    /// mapped page from the map's buckets, and reading it twice per insert
+    /// measurably cost more than reading it once.
+    ///
+    /// Left untouched when the answer is "no" — the size check and the rotation
+    /// seam both refuse before reaching the segment — so the caller must seed it
+    /// with `free_bytes_unavailable` and not with zero.
     template<size_t Index>
     bool can_insert_safely(uint64_t* free_bytes = nullptr) const;
 

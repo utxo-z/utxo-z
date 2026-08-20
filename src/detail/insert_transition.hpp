@@ -42,10 +42,13 @@
 #pragma once
 
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 #include <utxoz/statistics.hpp>
 
 #include "detail/capacity_policy.hpp"
+#include "detail/durability.hpp"
 
 namespace utxoz::detail {
 
@@ -151,6 +154,47 @@ static_assert(classify_post_exception({10, 100, 87}, {10, 200, 87}, false)
 static_assert(classify_post_exception({10, 100, 87}, {10, 100, 87}, true)
                   == post_exception_state::map_mutated,
               "the key the insert threw on is in the map: it went in and reported failure");
+
+/// No figure. Distinct from zero, which is a segment with nothing left in it —
+/// the opposite end of the range and the more alarming reading of the two.
+inline constexpr uint64_t free_bytes_unavailable = UINT64_MAX;
+
+/**
+ * @brief The free bytes in a segment, for the log line and for nothing else.
+ *
+ * `managed_mapped_file::get_free_memory()` is a subtraction over three fields of
+ * the segment header — it does not walk the free list and in practice cannot
+ * fail — but it is not declared `noexcept`, so the compiler must treat it as
+ * throwing, and the two places that read it cannot afford one:
+ *
+ *  - the guard, which already wraps it and answers "no" on a throw;
+ *  - the `catch` that handles a failed insert, whose remaining work is to
+ *    classify the map, latch the instance and count the cause. A throw escaping
+ *    from there would discard all three and turn a classified refusal into an
+ *    unhandled exception — a diagnostic overruling a decision.
+ *
+ * So it is read here, best-effort, and the result is a value the caller can
+ * print. No decision reads it.
+ */
+template <typename Segment>
+[[nodiscard]] uint64_t free_bytes_best_effort(Segment const* segment) noexcept {
+    try {
+        if (failpoints::fail_free_memory_probe.load(std::memory_order_relaxed)) {
+            throw std::runtime_error("failpoint: free-memory probe");
+        }
+        if (segment == nullptr) return free_bytes_unavailable;
+        return segment->get_free_memory();
+    } catch (...) {
+        return free_bytes_unavailable;
+    }
+}
+
+/// How that figure appears in a log line. A sentinel printed as a number would
+/// read as eighteen exabytes free, which is worse than saying nothing.
+[[nodiscard]] inline std::string free_bytes_display(uint64_t bytes) {
+    return bytes == free_bytes_unavailable ? std::string("unavailable")
+                                           : std::to_string(bytes);
+}
 
 /// Why a rotation was asked for. Only the two that complete one; a rotation that
 /// fails is counted by its own field and has no cause to attribute.

@@ -926,11 +926,16 @@ result<> database_impl::rotate_for(rotation_cause cause) {
 
 template<size_t Index>
 result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height) {
-    // The guard walks the segment's free list, which is not O(1). Its answer is
-    // the same figure the diagnostic below wants, so it is taken from there
-    // rather than asked for a second time — asking twice doubled the cost of an
-    // insert, which is what the benchmark against the parent showed.
-    uint64_t free_before = 0;
+    // The guard already reads the segment's free bytes, and that is the figure
+    // the diagnostic below wants. Taking it from there rather than asking again
+    // keeps the common path to one read of the segment header — a different
+    // mapped page from the one the map lives in, so a second read of it is a
+    // second chance to miss.
+    //
+    // Seeded with the sentinel, not with zero: the guard writes nothing when it
+    // refuses on the size check or when a seam forces the rotation, and "no
+    // segment measured" must not be logged as "no bytes left".
+    uint64_t free_before = free_bytes_unavailable;
     if ( ! can_insert_safely<Index>(&free_before)) {
         // The guard says the next insert would make the map grow. Only an insert
         // that actually inserts can: `emplace` looks the key up first and returns
@@ -960,6 +965,10 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
         if (auto const rotated = rotate_for<Index>(rotation_cause::preventive); ! rotated) {
             return std::unexpected(rotated.error());
         }
+        // The figure the guard measured describes the generation that was just
+        // sealed. Every attempt below has to report the segment it actually ran
+        // on, or the log compares one file's free bytes with another's.
+        free_before = free_bytes_best_effort(segments_[Index].get());
     }
 
     // Prepare value. Value-initialised: set_data() defines everything from the
@@ -1038,7 +1047,7 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
             auto& after_map = container<Index>();
             auto const after = snapshot_of(after_map);
             bool const key_present_after = after_map.find(key) != after_map.end();
-            auto const free_after = segments_[Index] ? segments_[Index]->get_free_memory() : 0;
+            auto const free_after = free_bytes_best_effort(segments_[Index].get());
             auto const state = classify_post_exception(before, after, key_present_after);
 
             auto const shared = fmt::format(
@@ -1052,7 +1061,8 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
                 after.bucket_count, before.live_max_load, after.live_max_load,
                 max_entries_for(before.bucket_count),
                 max_size_without_rehash(before.bucket_count),
-                segment_size, free_before, free_after,
+                segment_size, free_bytes_display(free_before),
+                free_bytes_display(free_after),
                 key_present_after ? "true" : "false", e.what());
 
             if (state == post_exception_state::map_mutated) {
@@ -1085,13 +1095,21 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
             // the preventive path has to ask does not arise here.
             log::info("insert: allocation failed; map unchanged; rotating and retrying. "
                       "cause=allocator_refused_growth {}", shared);
+            // Read before the rotation rather than reconstructed after it. A
+            // version number is an identity and the sequence has holes in it
+            // wherever compaction has drained one, so `new - 1` names a
+            // generation only for as long as the numbering happens to be dense.
+            // See version_catalog.hpp.
+            auto const old_generation = current_versions_[Index];
             if (auto const rotated = rotate_for<Index>(rotation_cause::capacity_exception);
                     ! rotated) {
                 return std::unexpected(rotated.error());
             }
+            // The retry runs on the new generation, so its diagnostic must too.
+            free_before = free_bytes_best_effort(segments_[Index].get());
             log::info("insert: rotated after a failed allocation: container={} "
                       "old_generation={} new_generation={} height={} outpoint={}",
-                      Index, current_versions_[Index] - 1, current_versions_[Index],
+                      Index, old_generation, current_versions_[Index],
                       height, outpoint_to_string(key));
         }
     }
@@ -3798,8 +3816,9 @@ result<> database_impl::reference_rotate_for(rotation_cause cause) {
 
 result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint32_t height,
                                                  uint32_t file_number, uint32_t offset) {
-    // As in full mode: the figure comes from the guard, which already paid for it.
-    uint64_t free_before = 0;
+    // As in full mode: the figure comes from the guard, which already read it,
+    // and the sentinel distinguishes "not measured" from "nothing left".
+    uint64_t free_before = free_bytes_unavailable;
     if ( ! reference_can_insert_safely(&free_before)) {
         // The same hazard as full mode: rotating on a key that is already in the
         // active map would seal the generation holding it and insert a second
@@ -3820,6 +3839,8 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
         if (auto const rotated = reference_rotate_for(rotation_cause::preventive); ! rotated) {
             return std::unexpected(rotated.error());
         }
+        // See insert_in_index: the guard measured the generation just sealed.
+        free_before = free_bytes_best_effort(reference_segment_.get());
     }
 
     reference_value val{};
@@ -3880,7 +3901,7 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
             auto& after_map = reference_map();
             auto const after = snapshot_of(after_map);
             bool const key_present_after = after_map.find(key) != after_map.end();
-            auto const free_after = reference_segment_ ? reference_segment_->get_free_memory() : 0;
+            auto const free_after = free_bytes_best_effort(reference_segment_.get());
             auto const state = classify_post_exception(before, after, key_present_after);
 
             auto const shared = fmt::format(
@@ -3894,7 +3915,8 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
                 after.bucket_count, before.live_max_load, after.live_max_load,
                 max_entries_for(before.bucket_count),
                 max_size_without_rehash(before.bucket_count),
-                segment_size, free_before, free_after,
+                segment_size, free_bytes_display(free_before),
+                free_bytes_display(free_after),
                 key_present_after ? "true" : "false", e.what());
 
             if (state == post_exception_state::map_mutated) {
@@ -3917,13 +3939,16 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
 
             log::info("reference insert: allocation failed; map unchanged; rotating and "
                       "retrying. cause=allocator_refused_growth {}", shared);
+            // Captured, not reconstructed; see insert_in_index.
+            auto const old_generation = reference_current_version_;
             if (auto const rotated = reference_rotate_for(rotation_cause::capacity_exception);
                     ! rotated) {
                 return std::unexpected(rotated.error());
             }
+            free_before = free_bytes_best_effort(reference_segment_.get());
             log::info("reference insert: rotated after a failed allocation: "
                       "old_generation={} new_generation={} height={} outpoint={}",
-                      reference_current_version_ - 1, reference_current_version_,
+                      old_generation, reference_current_version_,
                       height, outpoint_to_string(key));
         }
     }

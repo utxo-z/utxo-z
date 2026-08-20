@@ -39,6 +39,7 @@
 #include <fmt/format.h>
 
 #include <utxoz/database.hpp>
+#include <utxoz/logging.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
@@ -54,6 +55,8 @@ using namespace utxoz;
 using utxoz::detail::failpoints;
 using utxoz::detail::classify_post_exception;
 using utxoz::detail::effective_insert_limit;
+using utxoz::detail::free_bytes_best_effort;
+using utxoz::detail::free_bytes_display;
 using utxoz::detail::map_snapshot;
 using utxoz::detail::max_entries_for;
 using utxoz::detail::max_size_without_rehash;
@@ -100,6 +103,20 @@ raw_outpoint key_of(uint64_t n) {
 
 std::vector<uint8_t> payload_for(size_t index, uint8_t fill = 0x5A) {
     return std::vector<uint8_t>(index == 0 ? 8 : container_capacities[index - 1] + 1, fill);
+}
+
+/// Asserts a refusal, in the order the two questions have to be asked.
+///
+/// `std::expected::error()` on a result that holds a value is undefined, so the
+/// absence has to be established before the code is read — otherwise a case that
+/// wrongly *succeeded* reads a dead union member and can pass by accident, which
+/// is the one outcome a refusal test must never have. As a helper because the
+/// latch case asks the same question of nine operations in a row.
+template <typename Result>
+void refused_with(char const* what, Result const& outcome, error_code expected) {
+    INFO(what);
+    REQUIRE_FALSE(outcome.has_value());
+    CHECK(outcome.error() == expected);
 }
 
 /// How many generations a class has been through, which is what the statistics
@@ -452,8 +469,8 @@ TEST_CASE("a second failure on the new generation is refused, not rotated again"
     failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
     auto const refused = db.insert(key_of(2), payload_for(index), 800001);
 
-    REQUIRE_FALSE(refused.has_value());
-    CHECK(refused.error() == error_code::insufficient_space);
+    refused_with("a second refusal on a fresh generation", refused,
+                 error_code::insufficient_space);
 
     auto const stats = db.get_statistics();
     CHECK(stats.rotations_by_cause[index].capacity_exception == 1);   // one, not two
@@ -464,7 +481,8 @@ TEST_CASE("a second failure on the new generation is refused, not rotated again"
     // Through resolve() rather than find(), because the rotation sealed the
     // generation holding it and find() answers about the active maps only —
     // `not_resolved` there is the ordinary answer, not a failure.
-    CHECK(db.find(key_of(1), 800002).error() == error_code::not_resolved);
+    refused_with("find over a sealed generation", db.find(key_of(1), 800002),
+                 error_code::not_resolved);
     std::vector<lookup_request> const batch{{key_of(1), 800002}};
     auto const swept = db.resolve(batch);
     REQUIRE(swept.has_value());
@@ -493,8 +511,8 @@ TEST_CASE("a map that moved under a failed allocation latches the instance",
     failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
     auto const contradicted = db.insert(key_of(2), payload_for(index), 800001);
 
-    REQUIRE_FALSE(contradicted.has_value());
-    CHECK(contradicted.error() == error_code::entry_corrupt);
+    refused_with("a map that moved under a failed allocation", contradicted,
+                 error_code::entry_corrupt);
 
     auto const stats = db.get_statistics();
     CHECK(stats.rotations_by_cause[index].unexpected_post_exception == 1);
@@ -506,15 +524,16 @@ TEST_CASE("a map that moved under a failed allocation latches the instance",
     // And the latch is the instance's, not the insert's. Every operation that
     // reads or writes the store answers the same way.
     failpoints::fail_insert_after_mutating.store(false, std::memory_order_relaxed);
-    CHECK(db.insert(key_of(3), payload_for(index), 800002).error() == error_code::entry_corrupt);
-    CHECK(db.find(key_of(1), 800002).error() == error_code::entry_corrupt);
+    auto const latched = error_code::entry_corrupt;
+    refused_with("insert", db.insert(key_of(3), payload_for(index), 800002), latched);
+    refused_with("find", db.find(key_of(1), 800002), latched);
     std::vector<lookup_request> const batch{{key_of(1), 800002}};
-    CHECK(db.resolve(batch).error() == error_code::entry_corrupt);
-    CHECK(db.compact_all().error() == error_code::entry_corrupt);
-    CHECK(db.sync().error() == error_code::entry_corrupt);
-    CHECK(db.census().error() == error_code::entry_corrupt);
-    CHECK(db.verify_unique_outpoints().error() == error_code::entry_corrupt);
-    CHECK(db.for_each_key([](raw_outpoint const&) {}).error() == error_code::entry_corrupt);
+    refused_with("resolve", db.resolve(batch), latched);
+    refused_with("compact_all", db.compact_all(), latched);
+    refused_with("sync", db.sync(), latched);
+    refused_with("census", db.census(), latched);
+    refused_with("verify_unique_outpoints", db.verify_unique_outpoints(), latched);
+    refused_with("for_each_key", db.for_each_key([](raw_outpoint const&) {}), latched);
     std::vector<deferred_deletion_entry> const deletes{{key_of(1), 800002}};
     auto const progress = db.apply_deletes(deletes);
     REQUIRE(progress.error.has_value());
@@ -544,8 +563,8 @@ TEST_CASE("a rotation that cannot make its file latches and leaves nothing behin
         auto const refused = db.insert(key_of(2), payload_for(index), 800001);
         failpoints::fail_after_segment_create.store(false, std::memory_order_relaxed);
 
-        REQUIRE_FALSE(refused.has_value());
-        CHECK(refused.error() == error_code::file_open_failed);
+        refused_with("a rotation that could not make its file", refused,
+                      error_code::file_open_failed);
 
         auto const stats = db.get_statistics();
         CHECK(stats.rotations_by_cause[index].failed == 1);
@@ -557,8 +576,9 @@ TEST_CASE("a rotation that cannot make its file latches and leaves nothing behin
         CHECK(files_for(t.dir, index) == files_before);
 
         // The instance stops rather than dereferencing a container it released.
-        CHECK(db.insert(key_of(3), payload_for(index), 800002).error()
-              == error_code::file_open_failed);
+        refused_with("a later insert on a class with nowhere to write",
+                      db.insert(key_of(3), payload_for(index), 800002),
+                      error_code::file_open_failed);
         db.close();
     }
 
@@ -607,8 +627,8 @@ TEST_CASE("reference: the same three outcomes", "[transition]") {
 
         failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
         auto const refused = db.insert(key_of(2), 2, 2, 800001);
-        REQUIRE_FALSE(refused.has_value());
-        CHECK(refused.error() == error_code::insufficient_space);
+        refused_with("reference: a second refusal on a fresh generation", refused,
+                      error_code::insufficient_space);
         CHECK(db.get_statistics().rotations_by_cause[0].capacity_exception == 1);
         db.close();
     }
@@ -626,13 +646,302 @@ TEST_CASE("reference: the same three outcomes", "[transition]") {
         auto const contradicted = db.insert(key_of(2), 2, 2, 800001);
         failpoints::fail_insert_after_mutating.store(false, std::memory_order_relaxed);
 
-        REQUIRE_FALSE(contradicted.has_value());
-        CHECK(contradicted.error() == error_code::entry_corrupt);
+        refused_with("reference: a map that moved under a failed allocation",
+                      contradicted, error_code::entry_corrupt);
         CHECK(db.get_statistics().rotations_by_cause[0].unexpected_post_exception == 1);
-        CHECK(db.find(key_of(1), 800002).error() == error_code::entry_corrupt);
-        CHECK(db.census().error() == error_code::entry_corrupt);
+        refused_with("reference: find", db.find(key_of(1), 800002),
+                      error_code::entry_corrupt);
+        refused_with("reference: census", db.census(), error_code::entry_corrupt);
         db.close();
     }
+}
+
+// =============================================================================
+// The diagnostic must never overrule the decision
+// =============================================================================
+
+TEST_CASE("the free-memory probe reports rather than throws", "[transition]") {
+    failpoints::scoped_reset const disarm;
+
+    // No segment is a legitimate state — a class whose rotation failed released
+    // its mapping — and it is not the same fact as a segment with nothing left.
+    CHECK(free_bytes_best_effort<detail::bip::managed_mapped_file>(nullptr)
+          == utxoz::detail::free_bytes_unavailable);
+
+    temp_db t;
+    {
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        db.close();
+    }
+    auto const file = t.dir / fmt::format(detail::data_file_format, 0, 0);
+    auto seg = detail::open_existing_segment(file);
+    REQUIRE(seg.has_value());
+
+    // A live segment gives a real figure, so the sentinel cannot be mistaken for
+    // the ordinary answer.
+    auto const live = free_bytes_best_effort(seg->get());
+    CHECK(live != utxoz::detail::free_bytes_unavailable);
+    CHECK(live > 0);
+    CHECK(free_bytes_display(live) == std::to_string(live));
+
+    // And a probe that fails is absorbed, not propagated.
+    failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
+    CHECK(free_bytes_best_effort(seg->get()) == utxoz::detail::free_bytes_unavailable);
+    CHECK(free_bytes_display(utxoz::detail::free_bytes_unavailable) == "unavailable");
+}
+
+TEST_CASE("a diagnostic that fails does not change what an insert decides",
+          "[transition]") {
+    // The probe is read inside the `catch` whose remaining work is to classify,
+    // latch and count. Before it was made best-effort, a throw from it would have
+    // unwound past all three — the instance would not have latched, no cause
+    // would have been counted, and the caller would have seen an unrelated
+    // exception instead of a code. Each of the three outcomes is driven here with
+    // the probe armed to fail throughout.
+    constexpr size_t index = 0;
+
+    SECTION("recovered") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+
+        failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+        auto const stored = db.insert(key_of(2), payload_for(index), 800001);
+
+        REQUIRE(stored.has_value());
+        CHECK(*stored);
+        auto const stats = db.get_statistics();
+        CHECK(stats.rotations_by_cause[index].capacity_exception == 1);
+        CHECK(stats.rotations_by_cause[index].unexpected_post_exception == 0);
+        CHECK(files_for(t.dir, index) == files_before + 1);
+
+        failpoints::fail_free_memory_probe.store(false, std::memory_order_relaxed);
+        auto const unique = db.verify_unique_outpoints();
+        REQUIRE(unique.has_value());
+        CHECK(unique->unique);
+        CHECK(unique->physical_entries == 2);
+        db.close();
+    }
+
+    SECTION("refused on the second failure") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+
+        failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
+        auto const refused = db.insert(key_of(2), payload_for(index), 800001);
+
+        refused_with("a blind second refusal is still insufficient_space", refused,
+                     error_code::insufficient_space);
+        CHECK(db.get_statistics().rotations_by_cause[index].capacity_exception == 1);
+        db.close();
+    }
+
+    SECTION("latched") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+        auto const files_before = files_for(t.dir, index);
+
+        failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_after_mutating.store(true, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+        auto const contradicted = db.insert(key_of(2), payload_for(index), 800001);
+        failpoints::fail_insert_after_mutating.store(false, std::memory_order_relaxed);
+
+        refused_with("a blind classification still latches", contradicted,
+                     error_code::entry_corrupt);
+        CHECK(db.get_statistics().rotations_by_cause[index].unexpected_post_exception == 1);
+        CHECK(files_for(t.dir, index) == files_before);
+        refused_with("and the latch is the instance's",
+                     db.insert(key_of(3), payload_for(index), 800002),
+                     error_code::entry_corrupt);
+        db.close();
+    }
+}
+
+TEST_CASE("reference: a diagnostic that fails does not change what an insert decides",
+          "[transition]") {
+    failpoints::scoped_reset const disarm;
+    temp_db t;
+    auto opened = reference_db::open_for_testing(t.dir, true);
+    REQUIRE(opened.has_value());
+    auto db = std::move(*opened);
+    REQUIRE(db.insert(key_of(1), 1, 1, 800000).has_value());
+
+    failpoints::fail_free_memory_probe.store(true, std::memory_order_relaxed);
+    failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+    auto const stored = db.insert(key_of(2), 2, 2, 800001);
+
+    REQUIRE(stored.has_value());
+    CHECK(*stored);
+    CHECK(db.get_statistics().rotations_by_cause[0].capacity_exception == 1);
+
+    failpoints::fail_free_memory_probe.store(false, std::memory_order_relaxed);
+    auto const unique = db.verify_unique_outpoints();
+    REQUIRE(unique.has_value());
+    CHECK(unique->unique);
+    CHECK(unique->physical_entries == 2);
+    db.close();
+}
+
+// =============================================================================
+// What the diagnostic actually says
+// =============================================================================
+
+#if defined(UTXOZ_LOG_CUSTOM)
+namespace {
+
+/// Collects the store's log lines through the public callback.
+///
+/// The two figures the fixes below correct — which generation was retired, and
+/// which segment the free-byte counts came from — reach nobody except through
+/// this line. Asserting on them is the only way to hold them to anything; the
+/// alternative is a field that can quietly start naming the wrong file, which is
+/// how a diagnostic stops being evidence.
+struct log_capture {
+    log_capture() { set_log_callback([this](log_level, std::string_view m) {
+        lines.emplace_back(m);
+    }); }
+    ~log_capture() { set_log_callback(nullptr); }
+    log_capture(log_capture const&) = delete;
+    log_capture& operator=(log_capture const&) = delete;
+
+    /// Every line carrying a marker, in order.
+    [[nodiscard]] std::vector<std::string> matching(std::string_view marker) const {
+        std::vector<std::string> out;
+        for (auto const& l : lines) {
+            if (l.find(marker) != std::string::npos) out.push_back(l);
+        }
+        return out;
+    }
+
+    std::vector<std::string> lines;
+};
+
+/// The value of `field=` in a log line, as text. Empty when the field is absent,
+/// which fails the comparison rather than passing it.
+std::string field_in(std::string const& line, std::string const& field) {
+    auto const at = line.find(field + "=");
+    if (at == std::string::npos) return {};
+    auto const from = at + field.size() + 1;
+    auto const to = line.find_first_of(" ", from);
+    return line.substr(from, to == std::string::npos ? std::string::npos : to - from);
+}
+
+} // namespace
+#endif
+
+TEST_CASE("the failure diagnostic names the generation it retired and the segment it "
+          "measured", "[transition]") {
+#if ! defined(UTXOZ_LOG_CUSTOM)
+    SKIP("the log is only readable through the callback backend");
+#else
+    constexpr size_t index = 0;
+
+    SECTION("a rotation reports the generation that was active, not one less than the new") {
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+
+        auto const before = generations_of(db, index);
+        log_capture capture;
+        failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+        REQUIRE(db.insert(key_of(2), payload_for(index), 800001).has_value());
+
+        auto const rotated = capture.matching("rotated after a failed allocation");
+        REQUIRE(rotated.size() == 1);
+        // Read before the call, so it names a generation rather than an offset
+        // from one. The two agree while the numbering is dense; the point is that
+        // the line no longer depends on it being dense.
+        CHECK(field_in(rotated[0], "old_generation") == std::to_string(before));
+        CHECK(field_in(rotated[0], "new_generation") == std::to_string(before + 1));
+        CHECK(generations_of(db, index) == before + 1);
+        db.close();
+    }
+
+    SECTION("a preventive rotation refreshes the figure the guard never took") {
+        // The guard answers "rotate" from the seam without reaching the segment,
+        // so it writes no free-byte count at all. Whatever the diagnostic prints
+        // afterwards has to come from the generation the retry actually ran on —
+        // before the refresh was added it printed the untouched initial value.
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+
+        log_capture capture;
+        failpoints::force_rotations.store(1, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(1, std::memory_order_relaxed);
+        REQUIRE(db.insert(key_of(2), payload_for(index), 800001).has_value());
+
+        auto const failed = capture.matching("cause=allocator_refused_growth");
+        REQUIRE(failed.size() == 1);
+        auto const reported = field_in(failed[0], "free_before");
+        CHECK(reported != "unavailable");
+        CHECK(reported != "0");
+        db.close();
+    }
+
+    SECTION("every attempt reports a figure, whichever generation it ran on") {
+        // A preventive rotation and then two refusals, so all three transitions
+        // run inside one insert and both attempts log.
+        //
+        // What this can assert is that neither line falls back to the sentinel:
+        // the guard writes no figure when it refuses from the seam, so without a
+        // read after each rotation the first line reads `free_before=unavailable`.
+        // What it cannot assert is that the second attempt re-read rather than
+        // reusing the first. The map is open-addressed and its bucket array is
+        // allocated when the generation is created, so entries consume no segment
+        // memory afterwards and two generations of the same geometry report
+        // byte-identical free space — measured, not assumed: an earlier version
+        // of this case expected the emptier one to have more room and found the
+        // same 32336 bytes on both. The two implementations are numerically
+        // indistinguishable here; only the code says which segment was asked.
+        failpoints::scoped_reset const disarm;
+        temp_db t;
+        auto opened = full_db::open_for_testing(t.dir, true);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+
+        log_capture capture;
+        failpoints::force_rotations.store(1, std::memory_order_relaxed);
+        failpoints::fail_insert_emplace.store(2, std::memory_order_relaxed);
+        refused_with("both attempts refused",
+                     db.insert(key_of(2), payload_for(index), 800001),
+                     error_code::insufficient_space);
+
+        auto const attempts = capture.matching("free_before=");
+        REQUIRE(attempts.size() == 2);
+        for (auto const& line : attempts) {
+            INFO(line);
+            auto const reported = field_in(line, "free_before");
+            CHECK(reported != "unavailable");
+            CHECK(reported != "0");
+        }
+        db.close();
+    }
+#endif
 }
 
 TEST_CASE("a drifted map rotates before the next insert can grow it", "[transition]") {

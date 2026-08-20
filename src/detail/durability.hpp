@@ -295,6 +295,15 @@ struct failpoints {
     /// branch.
     static inline std::atomic<uint64_t> fail_insert_emplace{0};
 
+    /// Makes the diagnostic free-memory probe throw.
+    ///
+    /// The probe is only ever read to fill in a log line, and the code that reads
+    /// it is the `catch` whose remaining job is to classify, latch and count. If a
+    /// throw from the probe could escape that block, a diagnostic would be
+    /// replacing a decision. Nothing in the real segment manager throws there, so
+    /// this is the only way to hold the store to that rule.
+    static inline std::atomic<bool> fail_free_memory_probe{false};
+
     /// With the above: perform the `emplace` and *then* throw, leaving the key in
     /// the map and the size moved.
     ///
@@ -361,6 +370,7 @@ struct failpoints {
         fail_sidecar_removal.store(false, std::memory_order_relaxed);
         fail_insert_emplace.store(0, std::memory_order_relaxed);
         fail_insert_after_mutating.store(false, std::memory_order_relaxed);
+        fail_free_memory_probe.store(false, std::memory_order_relaxed);
         before_target_publish.store(nullptr, std::memory_order_relaxed);
         forced_merge_id.store(0, std::memory_order_relaxed);
         force_rotations.store(0, std::memory_order_relaxed);
