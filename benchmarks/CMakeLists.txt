@@ -10,6 +10,7 @@ find_package(nanobench REQUIRED)
 
 add_executable(utxoz_benchmarks
     bench_main.cpp
+    bench_synthetic_control.cpp
     bench_insert.cpp
     bench_find.cpp
     bench_erase.cpp

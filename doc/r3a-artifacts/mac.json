@@ -1,0 +1,254 @@
+{
+  "host": "mac",
+  "sessions": [
+    {
+      "label": "calibration-aa",
+      "status": "calibration-aa",
+      "directory": "bench-runs/mac/20260822T225635Z-calibration-aa",
+      "duration_seconds": 2071.9,
+      "pinned_cpu": null,
+      "quiescence": {
+        "before": true,
+        "after": false
+      },
+      "raw_count": 248,
+      "raw_digest": "f61a796266e4d9b272702e14afe1c96d1d50c7b45cc7f4ed7e0876f2456e08c2",
+      "files": {
+        "manifest.json": {
+          "sha256": "f5b3fa2abaeb5fdc2d07ea1aea5820eb0a10ad2976581d51b1a33b82604cf465",
+          "bytes": 29696
+        },
+        "aa/samples.json": {
+          "sha256": "38680dddf5d826a11e7fc11398e071231c737c793c58f6e16715797676512fd6",
+          "bytes": 905876
+        },
+        "ab/samples.json": {
+          "sha256": "b1a3fffc8b1c6ed06237d343fe18129467116abeee70b1db5c37aba210ff67fd",
+          "bytes": 905445
+        },
+        "verdict.json": {
+          "sha256": "e68bb09e7d5c3b56760bb6b5d3a88a5a4e6a928185093385f6718265893e2646",
+          "bytes": 131437
+        },
+        "report.md": {
+          "sha256": "4a7fbbca037a6450c2e3221aa6f06c7c0cae922f6f6d16a9c5fae09442d46ee6",
+          "bytes": 9697
+        }
+      },
+      "provenance": {
+        "aa": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af",
+            "B": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260820,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        },
+        "ab": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af",
+            "B": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260820,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        }
+      }
+    },
+    {
+      "label": "calibration-ab-runtime",
+      "status": "calibration-ab-runtime",
+      "directory": "bench-runs/mac/20260822T233107Z-calibration-ab-runtime",
+      "duration_seconds": 1457.3,
+      "pinned_cpu": null,
+      "quiescence": {
+        "before": true,
+        "after": true
+      },
+      "raw_count": 248,
+      "raw_digest": "fcd77bd5f5aac0f918e79d9fbcc60ca622add154a2c1e5b75c0d423fea42a774",
+      "files": {
+        "manifest.json": {
+          "sha256": "c65b6278e55c9df4221d180127c3f902651aecabed73b4ccf9ff3d5b3016e3ef",
+          "bytes": 31968
+        },
+        "aa/samples.json": {
+          "sha256": "4fe151194dee4c75c0bdb2d94aad7900c33718386c3e5e5f88a830c2e2e74712",
+          "bytes": 906090
+        },
+        "ab/samples.json": {
+          "sha256": "33e44505a9f142aadb1a73b2875a8d88293b56bff3a8e97ce25a9d6db47fa775",
+          "bytes": 906266
+        },
+        "verdict.json": {
+          "sha256": "92516bfd58841315fae65d1288137aed6920addef01ea89cf3b5f047b1a7ba11",
+          "bytes": 131686
+        },
+        "report.md": {
+          "sha256": "bd1036a565cf75e23543b9ce5754c603f8f64881316028a21d13d0fddb83b4c8",
+          "bytes": 9834
+        }
+      },
+      "provenance": {
+        "aa": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af",
+            "B": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260821,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        },
+        "ab": {
+          "comparison_kind": "runtime_configured",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af",
+            "B": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "20"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260821,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        }
+      }
+    },
+    {
+      "label": "calibration-aa2",
+      "status": "calibration-aa2",
+      "directory": "bench-runs/mac/20260823T114604Z-calibration-aa2",
+      "duration_seconds": 2457.6,
+      "pinned_cpu": null,
+      "quiescence": {
+        "before": true,
+        "after": true
+      },
+      "raw_count": 248,
+      "raw_digest": "44b40007f77ad9fa2113ce98460f5b7fdc27e434a639bef8b26c8855841b0119",
+      "files": {
+        "manifest.json": {
+          "sha256": "7ccd4a784747e71d1688fb303ceb033c0d58bc042b8f334687ab0821c51a81f3",
+          "bytes": 31290
+        },
+        "aa/samples.json": {
+          "sha256": "c0535d4c7399e2a9689fce57465585899c6263800f1763c004d3ca08ce6f4f01",
+          "bytes": 906190
+        },
+        "ab/samples.json": {
+          "sha256": "bf361a5af5183a5471d2b106a3ccbbd0a247c02d06f16e2ea92cf4653c114349",
+          "bytes": 905954
+        },
+        "verdict.json": {
+          "sha256": "fa77c4d30117442b55cec92a6fbc2aa2860e0b9e27faa224e744cafa6d18c97c",
+          "bytes": 131518
+        },
+        "report.md": {
+          "sha256": "ed80ab3f5c420f2b9df9eb33e03251defc571ee31aed8628465192e94d817cff",
+          "bytes": 9699
+        }
+      },
+      "provenance": {
+        "aa": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af",
+            "B": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260823,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        },
+        "ab": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af",
+            "B": "57129d95c6b1ca4323a6816c589cb279cbb1dbfcf044db9a50ecd755a747c9af"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260823,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        }
+      }
+    }
+  ]
+}
