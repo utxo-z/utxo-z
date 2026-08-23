@@ -124,6 +124,14 @@ struct BenchFixture {
 };
 
 // Benchmark registration functions (defined in each bench_*.cpp)
+/// Reads and validates UTXOZ_BENCH_SYNTHETIC_LOOKUPS. Throws on a malformed
+/// value rather than falling back to the default. See bench_synthetic_control.cpp.
+uint32_t synthetic_lookups_from_environment();
+
+/// A deliberate, configurable difference the harness must find. Registered last,
+/// so the benchmarks that must *not* move have already run.
+void register_synthetic_control(ankerl::nanobench::Bench& bench, uint32_t lookups);
+
 void register_insert_benchmarks(ankerl::nanobench::Bench& bench);
 void register_find_benchmarks(ankerl::nanobench::Bench& bench);
 void register_erase_benchmarks(ankerl::nanobench::Bench& bench);

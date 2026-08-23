@@ -1,0 +1,171 @@
+{
+  "host": "fedora",
+  "sessions": [
+    {
+      "label": "calibration-aa",
+      "status": "calibration-aa",
+      "directory": "bench-runs/fedora/20260822T001035Z-calibration-aa",
+      "duration_seconds": 1060.5,
+      "pinned_cpu": null,
+      "quiescence": {
+        "before": true,
+        "after": true
+      },
+      "raw_count": 248,
+      "raw_digest": "150b5e441fe45e40128f21350246cbadc706ecda5b78284ee03a94197ede9aa0",
+      "files": {
+        "manifest.json": {
+          "sha256": "8327d096c8399bc39c7e55d0d599ef7f62e18c9a9b4123721c18ef89c3519d00",
+          "bytes": 29854
+        },
+        "aa/samples.json": {
+          "sha256": "58ab2400d2ccd783af4bdc65819e0d49c4fbb8480f5a8aed54863adadc427a96",
+          "bytes": 1086076
+        },
+        "ab/samples.json": {
+          "sha256": "57ed1199a3bc703d9813c31d82811bf3600f87988154544427064435ab6c98a1",
+          "bytes": 1086517
+        },
+        "verdict.json": {
+          "sha256": "1f716746c0bd7d4004b392ce2118918a25dc12f21f824f14130f4d7e8fd306a5",
+          "bytes": 333315
+        },
+        "report.md": {
+          "sha256": "5b1aa775039d2b9903f0548901104bef83fb61c930133b11327ec3a838e17844",
+          "bytes": 11380
+        }
+      },
+      "provenance": {
+        "aa": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d",
+            "B": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260820,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        },
+        "ab": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d",
+            "B": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260820,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        }
+      }
+    },
+    {
+      "label": "calibration-ab-runtime",
+      "status": "calibration-ab-runtime",
+      "directory": "bench-runs/fedora/20260822T002815Z-calibration-ab-runtime",
+      "duration_seconds": 1126.8,
+      "pinned_cpu": null,
+      "quiescence": {
+        "before": true,
+        "after": true
+      },
+      "raw_count": 248,
+      "raw_digest": "53d76603c996f6660b0c90fcff412ad5983c7e15e8fce92b9e23d982be2e9f4a",
+      "files": {
+        "manifest.json": {
+          "sha256": "2423839633ced0e7ec1b453b98ab6898a1ac13f9df8a23f7cb5b56300cf513ac",
+          "bytes": 31872
+        },
+        "aa/samples.json": {
+          "sha256": "c3837fe20f72cd0322cbbaa2e33fe9a8ccaef0052cfba9c8eb097bbcb544c139",
+          "bytes": 1085406
+        },
+        "ab/samples.json": {
+          "sha256": "7a1fe1772d794abc8acbc26dc04c190a51433a257bb0d30895197e558ad1f625",
+          "bytes": 1086042
+        },
+        "verdict.json": {
+          "sha256": "9a20fe50ec9d0d264d17911f6c2878ac02845b623f303fb713be920c1e959967",
+          "bytes": 333130
+        },
+        "report.md": {
+          "sha256": "af11e8475d9d108b35baa4ee7fab597985d41a566572c296a65d3d7e9dcf943e",
+          "bytes": 11875
+        }
+      },
+      "provenance": {
+        "aa": {
+          "comparison_kind": "identical",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d",
+            "B": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260821,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        },
+        "ab": {
+          "comparison_kind": "runtime_configured",
+          "harness_commit": "aff6fb1",
+          "binary_source_commit": {
+            "A": "ae99bad",
+            "B": "ae99bad"
+          },
+          "binary_sha256": {
+            "A": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d",
+            "B": "b4a3213a288e187fd31a2f483f5001dfce71b1304196b5f766d997dfb18a9e6d"
+          },
+          "runtime_config": {
+            "A": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "5"
+            },
+            "B": {
+              "UTXOZ_BENCH_SYNTHETIC_LOOKUPS": "20"
+            }
+          },
+          "rounds": 60,
+          "seed": 20260821,
+          "harness_commit_source": "not emitted by the harness at the time: the field was added afterwards. Established by reading the worktree HEAD on each host, which was aff6fb1 for every session in this index."
+        }
+      }
+    }
+  ]
+}

@@ -1553,9 +1553,11 @@ jobs:
     # and reporting nothing about which step it was in.
     timeout-minutes: 60
     name: 📊 Benchmarks
+    # Read and nothing else. `contents: write` and `pull-requests: write` were
+    # there to push a gh-pages series and to post a verdict comment; the lane no
+    # longer does either, so the token no longer needs to be able to.
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
 
     steps:
       - name: 📥 Checkout
@@ -1614,58 +1616,153 @@ jobs:
         run: |
           cmake --build --preset conan-release --parallel
 
-      - name: 🏃 Run benchmarks
+      # ---------------------------------------------------------------------
+      # This lane validates the harness. It does not measure performance.
+      #
+      # GitHub-hosted runners cannot answer whether a change made anything
+      # slower, and the previous version of this job proved it: PR #141 changed
+      # only test files, left the benchmark binary byte-identical to master, and
+      # this lane reported changes from -53% to +102% at the same time. A gate
+      # that fires on a byte-identical binary teaches reviewers to ignore it,
+      # which is worse than having no gate.
+      #
+      # Real measurement happens off GitHub, on hosts that can be shown to be
+      # quiet, with an A/A control measured in the same window. See doc/benchmarking.md.
+      # ---------------------------------------------------------------------
+
+      - name: 🧪 Harness unit tests
+        run: python3 scripts/test_bench_ab.py
+
+      - name: "🏃 Smoke: the benchmark binary runs"
         run: |
           ./build/build/Release/benchmarks/utxoz_benchmarks
+          test -s benchmark_results.json
 
-      - name: 🔄 Convert results
+      - name: "🔬 Smoke: an interleaved session end to end"
         run: |
-          python3 scripts/convert_nanobench_json.py benchmark_results.json benchmark_results_gh.json
+          # Four paired rounds against the same image, enough to exercise every
+          # step — ordering, pairing, the artifact, the integrity checks and the
+          # analysis — and far too few to say anything about speed. The verdicts
+          # this produces are not read.
+          B="$PWD/build/build/Release/benchmarks/utxoz_benchmarks"
+          python3 scripts/bench_ab.py --binary-a "$B" --binary-b "$B" \
+            --rounds 4 --warmup 1 --seed 20260823 --mode aa \
+            --commit-a "$GITHUB_SHA" --commit-b "$GITHUB_SHA" \
+            --toolchain-a ci --toolchain-b ci \
+            --dependencies-a ci --dependencies-b ci \
+            --build-type Release --options ci \
+            --runtime-config-a UTXOZ_BENCH_SYNTHETIC_LOOKUPS=5 \
+            --runtime-config-b UTXOZ_BENCH_SYNTHETIC_LOOKUPS=5 \
+            --output ci_samples.json
+          python3 scripts/bench_analyze.py ci_samples.json --control ci_samples.json \
+            --resamples 200 --output ci_verdict.json --report ci_report.md
 
-      - name: 📥 Fetch gh-pages history
+      - name: "🔬 Smoke: the session orchestrator runs end to end"
         run: |
-          if git ls-remote --exit-code origin gh-pages >/dev/null 2>&1; then
-            git fetch origin gh-pages:gh-pages
-          else
-            echo "gh-pages branch does not exist yet — skipping history fetch"
-          fi
+          # The runner and the analyser are exercised above; this covers the
+          # thing that drives them — quiescence, phases, the manifest and the
+          # artifact layout. Two rounds, the same image on all four sides, and
+          # quiescence limits wide enough that a shared runner passes them: what
+          # is under test is that the orchestration completes and records what it
+          # did, not whether this machine was quiet.
+          B="$PWD/build/build/Release/benchmarks/utxoz_benchmarks"
+          python3 scripts/bench_session.py --host ci --label ci-smoke \
+            --aa-a "$B" --aa-b "$B" --base "$B" --head "$B" \
+            --commit-base "$GITHUB_SHA" --commit-head "$GITHUB_SHA" \
+            --runtime-config-a UTXOZ_BENCH_SYNTHETIC_LOOKUPS=5 \
+            --runtime-config-b UTXOZ_BENCH_SYNTHETIC_LOOKUPS=20 \
+            --rounds 2 --warmup 0 --seed 20260823 \
+            --toolchain ci --dependencies ci \
+            --max-utilisation 1.0 --max-normalised-load 99 --max-run-queue 9999 \
+            --min-seconds-since-build 0 --consecutive 1 \
+            --quiesce-timeout 60 --poll 5 --out ci-bench-runs && rc=0 || rc=$?
+          # `|| true` swallowed everything, including the analyser refusing the
+          # artifact. Only two outcomes are acceptable here: 0, and 4 for a
+          # session the machine was too busy to call clean — which on a shared
+          # runner is an ordinary result, not a failure of the harness.
+          case "$rc" in
+            0|4) echo "session exited $rc" ;;
+            *) echo "the session exited $rc" >&2; exit 1 ;;
+          esac
+          python3 - <<'CHECK'
+          import json, pathlib
+          manifests = sorted(pathlib.Path("ci-bench-runs").rglob("manifest.json"))
+          assert manifests, "the session wrote no manifest"
+          m = json.loads(manifests[0].read_text())
+          for field in ("schema", "host", "status", "phases", "quiescence", "artifacts"):
+              assert field in m, f"the manifest has no {field}"
+          assert m["builds_between_runs"] is False
+          assert m["artifacts"]["raw"], "no raw nanobench output was preserved"
+          # Nothing measured on a shared runner is official, whatever the
+          # quiescence limits this step relaxes to let it finish. The label is
+          # what keeps the word out of the artifact, and this is what keeps the
+          # label from being dropped.
+          assert m["label"] == "ci-smoke", m["label"]
+          assert m["status"] != "official", (
+              f"a shared-runner session was labelled {m['status']!r}")
+          # The analyser's own verdict on the artifact, asked directly. `status`
+          # answers "was the machine quiet", which is a different question and
+          # cannot stand in for "could this be read at all".
+          assert m["analyzer_exit"] == 0, f"the analyser exited {m['analyzer_exit']}"
+          samples = json.loads(pathlib.Path(m["artifacts"]["ab_samples"]).read_text())
+          assert samples["comparison_kind"] == "runtime_configured", samples["comparison_kind"]
+          assert samples["harness"]["interleaved"] is True
+          print(f"session orchestration ok: status={m['status']}, "
+                f"{len(m['artifacts']['raw'])} raw files")
+          CHECK
 
-      - name: 📈 Compare against historical median
+      - name: "🚫 Smoke: a broken run is refused"
         run: |
-          python3 scripts/benchmark_compare.py benchmark_results_gh.json \
-            --window 10 --threshold 15 \
-            --output benchmark_report.md
-          cat benchmark_report.md >> $GITHUB_STEP_SUMMARY
+          # Fail-closed is a property worth testing in CI, because it is the one
+          # that stops a malformed session from being read as a result.
+          python3 scripts/bench_ab.py --binary-a /nonexistent --binary-b /nonexistent \
+            --rounds 4 --seed 1 --output /dev/null && exit 1
+          rc=$?
+          test "$rc" -eq 3 || { echo "expected exit 3, got $rc"; exit 1; }
+          python3 - <<'CHECK'
+          import json, subprocess, sys, tempfile, pathlib
+          bad = json.loads(pathlib.Path("ci_samples.json").read_text())
+          bad["harness"]["interleaved"] = False
+          out = pathlib.Path(tempfile.mkdtemp()) / "bad.json"
+          out.write_text(json.dumps(bad))
+          rc = subprocess.run([sys.executable, "scripts/bench_analyze.py", str(out)],
+                              capture_output=True).returncode
+          assert rc == 3, f"an uninterleaved run was accepted (exit {rc})"
+          print("a run that was not interleaved is refused")
+          CHECK
 
-      # Posting is not the measurement. This step has failed with GitHub's own
-      # "No server is currently available to service your request", which turned a
-      # job that benchmarked correctly into a red one and told nobody anything
-      # about the benchmarks.
-      #
-      # Nothing is lost when it fails: the same report was already written to the
-      # step summary above, and the step still shows as failed in the run, so a
-      # persistent problem — a bad token, a missing permission — is visible rather
-      # than swallowed. What is no longer true is that a transient API error fails
-      # the job.
-      - name: 💬 Comment on PR
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        continue-on-error: true
-        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2
+      - name: 📋 Step summary
+        if: always()
+        run: |
+          {
+            echo "## Benchmark harness"
+            echo
+            echo "This lane validates the harness; it does not measure performance."
+            echo "GitHub-hosted runners are too unstable to decide whether a change"
+            echo "is slower — see \`doc/benchmarking.md\`. Measurements are taken"
+            echo "off GitHub with an A/A control in the same window."
+            echo
+            if [ -f ci_verdict.json ]; then
+              python3 -c "import json;d=json.load(open('ci_verdict.json'));print(f\"Smoke session: {len(d['findings'])} findings computed from {d['method']['resamples']} resamples. Not a verdict.\")"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 📤 Upload harness artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          header: benchmark-report
-          path: benchmark_report.md
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: benchmark-harness-smoke
+          path: |
+            ci_samples.json
+            ci_verdict.json
+            ci_report.md
+            ci-bench-runs/**/manifest.json
+          if-no-files-found: warn
 
       - name: 🧹 Clean generated files
         run: |
           git checkout -- .
 
-      - name: 📊 Store benchmark results
-        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1
-        with:
-          tool: customBiggerIsBetter
-          output-file-path: benchmark_results_gh.json
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench
-          auto-push: ${{ github.event_name == 'push' }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+      # The historical series is no longer maintained: it fed a comparison that
+      # could not tell a regression from a runner, and keeping it would invite
+      # someone to read it as one.
