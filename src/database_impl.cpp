@@ -14,6 +14,10 @@
 #include <utxoz/utils.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <thread>
 #include <fstream>
 #include <numeric>
 #include <ranges>
@@ -965,6 +969,273 @@ result<bool> database_impl::insert(raw_outpoint const& key, output_data_span val
     }, make_index_variant(index));
 }
 
+// =============================================================================
+// database_impl - Batched insertion
+// =============================================================================
+//
+// One call, several workers, one writer per slot. See full_db::insert_batch for
+// the contract; what follows is how it is kept.
+//
+// Ownership is by slot, decided before anything is written: every request is
+// routed exactly as insert() routes it (size class, then the key's shard inside
+// the sharded class), and every slot with work is given to exactly one task.
+// A task applies its slots' requests in their original order through the same
+// insert_in_index() a plain insert uses, so per slot the sequence of mutations is
+// the sequential one. Nothing a slot does reads or writes another slot's state.
+//
+// What every slot would otherwise share is kept off the shared members while the
+// workers run: the entry count and the height-range statistics go to a per-task
+// accumulator folded in after every task has returned; the integrity latch and
+// the dirty-version set take a lock, and only on the failure and rotation paths.
+// The log takes its own (see log.cpp), so a callback is still never entered by
+// two threads at once.
+//
+// Memory. Everything the batch allocates for its own account is allocated in
+// the preparation, before the first request is attempted, and a failure there
+// throws having changed nothing: the outcomes, the routing, the per-task
+// accumulators (one row per height range the batch can touch), the gate, and
+// room in every shared map the bookkeeping of a stored entry inserts into - the
+// height ranges, each slot's value-size distribution, each slot's metadata
+// record. After that, counting a stored entry and folding the accumulators in
+// allocate nothing; no_allocation_region marks both, for the test that checks.
+// What a worker can still allocate is a rotation's, and a rotation that fails
+// latches.
+//
+// Termination. The executor gets a task that runs each index at most once,
+// through a gate every copy of the task owns a share of - not a reference into
+// this frame. Once the executor has returned or thrown, the calling thread runs
+// every task nobody claimed, waits until no claimed task is still running, and
+// closes the gate. A call after that, through a copy of the task the executor
+// kept, finds the gate closed and touches nothing else. The executor itself must
+// be synchronous (insert_batch_options::run_tasks); the gate keeps a late copy
+// harmless, it does not make an asynchronous executor supported.
+
+namespace {
+
+/// The part of a batch its tasks share, owned by every copy of the task.
+struct batch_gate {
+    std::mutex mutex;
+    std::condition_variable idle;
+    std::vector<bool> claimed;
+    size_t running = 0;
+    size_t on_caller = 0;
+    bool closed = false;
+    std::thread::id const caller = std::this_thread::get_id();
+    /// The batch's work for one task. Set before the executor sees the gate and
+    /// emptied when it closes; only a task that claimed its index while the gate
+    /// was open calls it, and the gate does not close while one is running.
+    std::function<void(size_t)> apply;
+
+    explicit batch_gate(size_t tasks) : claimed(tasks, false) {}
+
+    void run(size_t t) {
+        {
+            std::scoped_lock const lock(mutex);
+            if (closed || t >= claimed.size() || claimed[t]) return;
+            claimed[t] = true;
+            ++running;
+            if (std::this_thread::get_id() == caller) ++on_caller;
+        }
+        apply(t);
+        std::scoped_lock const lock(mutex);
+        if (--running == 0) idle.notify_all();
+    }
+
+    /// Waits until no claimed task is running, then admits none.
+    void close() {
+        std::unique_lock lock(mutex);
+        idle.wait(lock, [&] { return running == 0; });
+        closed = true;
+        apply = nullptr;
+    }
+};
+
+} // namespace
+
+insert_batch_result database_impl::insert_batch(std::span<insert_request const> requests,
+                                                insert_batch_options const& options) {
+    // ============================================================ preparation
+    // May throw; writes nothing to the store.
+
+    insert_batch_result out;
+    // Every outcome exists before anything is written, as `not_applied`. A
+    // request is only ever moved out of that state by the one worker that owns
+    // its slot, after it has been attempted.
+    out.outcomes.assign(requests.size(), insert_outcome{});
+
+    // Routing. A request's index is kept whole: size_t, never narrowed.
+    std::array<std::vector<size_t>, detail::slot_count> by_slot;
+    for (size_t i = 0; i != requests.size(); ++i) {
+        auto const& r = requests[i];
+        size_t const index = get_index_from_size(r.value.size());
+        if (index >= container_count) {
+            out.outcomes[i] = {insert_status::failed, error_code::value_too_large};
+            continue;
+        }
+        by_slot[detail::slot_for_key(index, r.key)].push_back(i);
+    }
+
+    // Slots with work, heaviest first, each to the task with the least work so
+    // far: deterministic, and no slot is ever split.
+    std::vector<size_t> slots;
+    for (size_t s = 0; s != detail::slot_count; ++s)
+        if ( ! by_slot[s].empty()) slots.push_back(s);
+    std::ranges::stable_sort(slots, [&](size_t a, size_t b) {
+        return by_slot[a].size() > by_slot[b].size();
+    });
+    size_t const task_count = slots.empty() ? 0
+        : std::min<size_t>(std::max(1u, options.workers), slots.size());
+    std::vector<std::vector<size_t>> task_slots(task_count);
+    std::vector<size_t> task_load(task_count, 0);
+    for (auto const s : slots) {
+        auto const t = size_t(std::ranges::min_element(task_load) - task_load.begin());
+        task_slots[t].push_back(s);
+        task_load[t] += by_slot[s].size();
+    }
+    std::vector<insert_accumulator> accumulators(task_count);
+    out.workers_used = unsigned(task_count);
+
+#if UTXOZ_STATISTICS_LEVEL >= 1
+    // Every height range a stored entry can count into, one accumulator row
+    // each, and room for the ranges the shared statistics do not have yet.
+    std::vector<uint32_t> ranges;
+    for (auto const& slot_requests : by_slot)
+        for (auto const i : slot_requests)
+            ranges.push_back(requests[i].height / height_range_stats::range_size);
+    std::ranges::sort(ranges);
+    ranges.erase(std::ranges::unique(ranges).begin(), ranges.end());
+    make_room(height_range_stats_.ranges, size_t(std::ranges::count_if(ranges, [&](uint32_t r) {
+        return ! height_range_stats_.ranges.contains(r);
+    })));
+    for (auto& acc : accumulators) {
+        acc.ranges = ranges;
+        acc.height_inserts.assign(ranges.size(), {});
+    }
+
+    // Each slot's value-size distribution: room for every size it lacks.
+    std::vector<size_t> sizes;
+    for (auto const s : slots) {
+        sizes.clear();
+        for (auto const i : by_slot[s]) sizes.push_back(requests[i].value.size());
+        std::ranges::sort(sizes);
+        sizes.erase(std::ranges::unique(sizes).begin(), sizes.end());
+        auto& distribution = container_stats_[s].value_size_distribution;
+        make_room(distribution, size_t(std::ranges::count_if(sizes, [&](size_t z) {
+            return ! distribution.contains(z);
+        })));
+    }
+#endif
+
+    // Each slot's metadata record for its active generation. A rotation inside
+    // the batch makes the next generation's record itself, before its first
+    // entry, and latches if it cannot.
+    for (auto const s : slots) catalogs_[s].make_room_for_metadata(current_versions_[s]);
+
+    // An integrity latch in any task stops every task before its next request.
+    std::atomic<bool> stop{false};
+
+    auto const apply = [&](size_t t) noexcept {
+        auto& acc = accumulators[t];
+        for (auto const slot : task_slots[t]) {
+            size_t const index = detail::class_of_slot(slot);
+            for (auto const i : by_slot[slot]) {
+                if (stop.load(std::memory_order_acquire)) return;
+                auto const& r = requests[i];
+                result<bool> done = std::unexpected(error_code::entry_corrupt);
+                try {
+                    done = std::visit([&](auto ic) -> result<bool> {
+                        return insert_in_index<ic>(slot, r.key, r.value, r.height, &acc);
+                    }, make_index_variant(index));
+                } catch (...) {
+                    // insert_in_index catches what it expects. Anything else leaves
+                    // this slot in a state nobody has classified, so the batch
+                    // latches and stops rather than carry on writing beside it.
+                    latch_integrity(error_code::entry_corrupt);
+                    done = std::unexpected(error_code::entry_corrupt);
+                }
+                if (done) {
+                    out.outcomes[i].status = *done ? insert_status::inserted : insert_status::duplicate;
+                    continue;
+                }
+                out.outcomes[i] = {insert_status::failed, done.error()};
+                if (integrity_latch_now()) {
+                    stop.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+        }
+    };
+
+    auto const gate = std::make_shared<batch_gate>(task_count);
+    gate->apply = apply;
+    std::function<void(size_t)> const task = [gate](size_t t) { gate->run(t); };
+    std::vector<std::thread> threads;
+    if (task_count > 1 && ! options.run_tasks) threads.reserve(task_count - 1);
+
+    if (failpoints::fail_batch_prepare.load(std::memory_order_relaxed)) throw std::bad_alloc();
+
+    // ============================================================== execution
+    // From the first request on, nothing here throws: what fails is reported.
+    [&]() noexcept {
+        if (task_count == 1) {
+            task(0);
+        } else if (task_count > 1) {
+            if (options.run_tasks) {
+                try {
+                    options.run_tasks(task_count, task);
+                } catch (...) {
+                    // An executor that fails cannot cut a batch short: whatever it
+                    // did not run is run here, below.
+                }
+            } else {
+                for (size_t t = 1; t != task_count; ++t) {
+                    try {
+                        threads.emplace_back(task, t);
+                    } catch (...) {
+                        break;   // the tasks without a thread run here, below
+                    }
+                }
+                task(0);
+                for (auto& th : threads) th.join();
+            }
+            for (size_t t = 0; t != task_count; ++t) task(t);   // the unclaimed ones
+        }
+        gate->close();
+        out.tasks_run_inline = gate->on_caller;
+
+        // ======================================================= fold and report
+        // No task is running and none can start: this thread is the only one
+        // left. Every map below already has its room.
+        failpoints::no_allocation_region const region;
+        for (auto const& acc : accumulators) {
+            entries_count_ += acc.entries;
+#if UTXOZ_STATISTICS_LEVEL >= 1
+            for (size_t r = 0; r != ranges.size(); ++r) {
+                auto const& counts = acc.height_inserts[r];
+                if (std::ranges::all_of(counts, [](size_t n) { return n == 0; })) continue;
+                auto& into = height_range_stats_.ranges[ranges[r]].inserts;
+                for (size_t c = 0; c != container_count; ++c) into[c] += counts[c];
+            }
+#endif
+        }
+        std::optional<error_code> first_failure;
+        for (auto const& o : out.outcomes) {
+            switch (o.status) {
+                case insert_status::inserted:    ++out.inserted; break;
+                case insert_status::duplicate:   ++out.duplicates; break;
+                case insert_status::not_applied: ++out.not_applied; break;
+                case insert_status::failed:
+                    ++out.failed;
+                    if ( ! first_failure) first_failure = o.error;
+                    break;
+            }
+        }
+        if (auto const latched = integrity_latch_now()) out.error = *latched;
+        else if (first_failure) out.error = *first_failure;
+    }();
+    return out;
+}
+
 template<size_t Index>
 result<> database_impl::rotate_for(size_t slot, rotation_cause cause) {
     try {
@@ -977,7 +1248,7 @@ result<> database_impl::rotate_for(size_t slot, rotation_cause cause) {
         // the next entry of this class, and finding that out by dereferencing
         // nothing is not an option.
         ++rotation_causes_[slot].failed;
-        integrity_latched_ = error_code::file_open_failed;
+        latch_integrity(error_code::file_open_failed);
         diagnose([&] {
             log::error("container {} could not rotate ({}): {}. No generation was made "
                        "and this instance will not serve this class again; the stored "
@@ -992,7 +1263,8 @@ result<> database_impl::rotate_for(size_t slot, rotation_cause cause) {
 }
 
 template<size_t Index>
-result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key, output_data_span value, uint32_t height) {
+result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key, output_data_span value,
+                                            uint32_t height, insert_accumulator* acc) {
     // The guard already reads the segment's free bytes, and that is the figure
     // the diagnostic below wants. Taking it from there rather than asking again
     // keeps the common path to one read of the segment header — a different
@@ -1083,7 +1355,10 @@ result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key
                 });
             }
             if (inserted) {
-                ++entries_count_;
+                // A batch worker counts into its own accumulator; see
+                // insert_accumulator.
+                if (acc) ++acc->entries;
+                else     ++entries_count_;
 
                 // The invariant, checked against the count the generation was
                 // opened with rather than against the previous insert: a growth
@@ -1096,16 +1371,26 @@ result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key
                 bool const rehashed = note_rehash_if_grown(
                     Index, rehash_watch_[slot], map.bucket_count());
 
+                // For a batch, everything from here to the metadata was given its
+                // room before the batch wrote anything, so the entry just stored
+                // cannot lose its count to an allocation that fails. The region
+                // lets a test check that. (The rehash report above is a broken
+                // invariant being logged, not bookkeeping.)
+                std::optional<failpoints::no_allocation_region> region;
+                if (acc) region.emplace();
+
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 // Update statistics
                 ++container_stats_[slot].total_inserts;
                 ++container_stats_[slot].current_size;
                 ++container_stats_[slot].value_size_distribution[value.size()];
-                ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[Index];
+                if (acc) acc->count_height(height, Index);
+                else     ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[Index];
                 if (rehashed) ++container_stats_[slot].rehash_count;
 #endif
 
                 update_metadata_on_insert(slot, current_versions_[slot], key, height);
+                region.reset();
 
                 if (attempt > 1) {
                     // The entry is in and the bookkeeping is done; what is left is
@@ -1170,7 +1455,7 @@ result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key
                 //
                 // Counted and latched before a word is written about it.
                 ++rotation_causes_[slot].unexpected_post_exception;
-                integrity_latched_ = error_code::entry_corrupt;
+                latch_integrity(error_code::entry_corrupt);
                 diagnose([&] {
                     log::critical("insert: the active map changed after a failed "
                                   "allocation, which contradicts the container's "
@@ -4586,15 +4871,15 @@ template result<> database_impl::compact_container<2>(size_t);
 template result<> database_impl::compact_container<3>(size_t);
 template result<> database_impl::compact_container<4>(size_t);
 
-template result<bool> database_impl::insert_in_index<0>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<bool> database_impl::insert_in_index<0>(size_t, raw_outpoint const&, output_data_span, uint32_t, insert_accumulator*);
 template result<> database_impl::rotate_for<0>(size_t, rotation_cause);
-template result<bool> database_impl::insert_in_index<1>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<bool> database_impl::insert_in_index<1>(size_t, raw_outpoint const&, output_data_span, uint32_t, insert_accumulator*);
 template result<> database_impl::rotate_for<1>(size_t, rotation_cause);
-template result<bool> database_impl::insert_in_index<2>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<bool> database_impl::insert_in_index<2>(size_t, raw_outpoint const&, output_data_span, uint32_t, insert_accumulator*);
 template result<> database_impl::rotate_for<2>(size_t, rotation_cause);
-template result<bool> database_impl::insert_in_index<3>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<bool> database_impl::insert_in_index<3>(size_t, raw_outpoint const&, output_data_span, uint32_t, insert_accumulator*);
 template result<> database_impl::rotate_for<3>(size_t, rotation_cause);
-template result<bool> database_impl::insert_in_index<4>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<bool> database_impl::insert_in_index<4>(size_t, raw_outpoint const&, output_data_span, uint32_t, insert_accumulator*);
 template result<> database_impl::rotate_for<4>(size_t, rotation_cause);
 
 } // namespace utxoz::detail

@@ -10,16 +10,21 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cassert>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 
 #include "shard.hpp"
 #include <set>
+#include <span>
 #include <utility>
 #include <variant>
+#include <vector>
 
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 
 #include <utxoz/aliases.hpp>
@@ -92,6 +97,8 @@ struct database_impl {
     size_t size() const;
 
     result<bool> insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+    insert_batch_result insert_batch(std::span<insert_request const> requests,
+                                     insert_batch_options const& options);
     std::optional<find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     deletion_progress apply_deletes(std::span<deferred_deletion_entry const> requests);
@@ -167,9 +174,39 @@ private:
     template<size_t Index> requires (Index < container_count)
     utxo_map<container_sizes[Index]> const& container(size_t slot) const;
 
+    /// What a batch worker would otherwise write into state every worker shares.
+    ///
+    /// insert_in_index() touches two members that are not per slot: the entry
+    /// count and the height-range statistics, the latter a hash map that two
+    /// threads cannot both insert into. A worker passes one of these instead and
+    /// the batch folds them in on the calling thread after every worker has
+    /// joined. No lock on the insert path; the sums come out the same.
+    ///
+    /// Sized before the batch writes anything: one row per height range the
+    /// batch can touch, found by binary search in `ranges` (sorted, shared by
+    /// every worker, read only). Counting into it never allocates, so no entry
+    /// can be stored and then lose its count to an allocation that failed.
+    struct insert_accumulator {
+        size_t entries = 0;
+#if UTXOZ_STATISTICS_LEVEL >= 1
+        std::span<uint32_t const> ranges;
+        std::vector<std::array<size_t, container_count>> height_inserts;   // one per range
+
+        void count_height(uint32_t height, size_t index) noexcept {
+            auto const it = std::ranges::lower_bound(ranges, height / height_range_stats::range_size);
+            assert(it != ranges.end() && *it == height / height_range_stats::range_size);
+            ++height_inserts[size_t(it - ranges.begin())][index];
+        }
+#endif
+    };
+
     // Core operations implementation
+    //
+    // `acc` is null for a plain insert(), which writes the shared counters
+    // directly as it always has; a batch worker passes its own.
     template<size_t Index>
-    result<bool> insert_in_index(size_t slot, raw_outpoint const& key, output_data_span value, uint32_t height);
+    result<bool> insert_in_index(size_t slot, raw_outpoint const& key, output_data_span value,
+                                 uint32_t height, insert_accumulator* acc = nullptr);
 
     /// Replaces the active generation and records why. Returns rather than
     /// throwing: a rotation that cannot make its file leaves the class with no
@@ -301,6 +338,23 @@ private:
      */
     std::optional<error_code> integrity_latched_;
 
+    /// Guards the latch's writes on the insert path, which a batch can reach from
+    /// several workers at once: two rotations failing together must not both
+    /// write an optional. The first latch wins, as it effectively always did -
+    /// a latched instance refuses the next insert. Off the hot path: it is only
+    /// taken when something has already failed.
+    std::mutex latch_mutex_;
+
+    void latch_integrity(error_code why) {
+        std::scoped_lock const lock(latch_mutex_);
+        if ( ! integrity_latched_) integrity_latched_ = why;
+    }
+
+    [[nodiscard]] std::optional<error_code> integrity_latch_now() {
+        std::scoped_lock const lock(latch_mutex_);
+        return integrity_latched_;
+    }
+
     /// Why generations were replaced. Present in every build; see rotation_causes.
     std::array<rotation_causes, detail::slot_count> rotation_causes_{};
     rotation_causes reference_rotation_causes_{};
@@ -330,7 +384,20 @@ private:
     std::set<std::pair<size_t, size_t>> dirty_versions_;
 
     /// Records that a historical version file was written to.
+    ///
+    /// Locked because a batch rotates several slots at once and each rotation
+    /// records the version it retires. Once per rotation, never per insert. The
+    /// readers - sync() and compaction - run with nothing else in flight, as the
+    /// threading contract requires, so they do not need it.
+    ///
+    /// It allocates a node, and it is called before the retiring generation is
+    /// closed (see new_version). An allocation that fails throws there, with the
+    /// generation still open and nothing recorded yet; the rotation is refused
+    /// and rotate_for latches, so no generation is ever retired without its
+    /// obligation on record.
+    std::mutex dirty_mutex_;
     void note_dirty(size_t container_index, size_t version) {
+        std::scoped_lock const lock(dirty_mutex_);
         dirty_versions_.emplace(container_index, version);
     }
 

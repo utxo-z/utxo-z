@@ -10,10 +10,12 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <utxoz/aliases.hpp>
 #include <utxoz/census.hpp>
@@ -156,6 +158,91 @@ struct deletion_progress {
     std::vector<deferred_deletion_entry> absent;      ///< Proven not stored
     std::vector<deferred_deletion_entry> unresolved;  ///< Not completed; resend these
     std::optional<error_code> error;                  ///< Why, when something stopped it
+};
+
+// =============================================================================
+// Batched insertion, applied by several workers at once
+// =============================================================================
+
+/// One insertion in a batch: the same three arguments `full_db::insert` takes.
+/// The value is borrowed and must stay valid until `insert_batch` returns.
+struct insert_request {
+    raw_outpoint key;           ///< UTXO key
+    output_data_span value;     ///< payload; selects the size class
+    uint32_t height;            ///< the height this entry is stored with
+};
+
+/// What happened to one request. Every request gets exactly one, by index.
+enum class insert_status : uint8_t {
+    /// Never attempted: nothing was written for it. The batch was refused before
+    /// it started, or it stopped (an integrity latch) before reaching this
+    /// request. Safe to send again once the store is usable.
+    not_applied,
+    /// Stored, as `insert` returning `true` would have.
+    inserted,
+    /// The key was already in its active container, as `insert` returning
+    /// `false` would have. Nothing changed.
+    duplicate,
+    /// Attempted and refused with `insert_outcome::error`, as an `insert` error
+    /// would have been. For every error but `entry_corrupt` nothing was stored;
+    /// for `entry_corrupt` the container's state is unknown and the instance has
+    /// latched — reopen and verify before trusting this entry either way.
+    failed,
+};
+
+struct insert_outcome {
+    insert_status status = insert_status::not_applied;
+    error_code error{};         ///< meaningful only when status is `failed`
+};
+
+/// How a batch is executed. Neither choice changes what the batch stores.
+struct insert_batch_options {
+    /// How many workers apply the batch. Work is divided by **slot** — one
+    /// container: a shard of the sharded class, or one other class — and a slot
+    /// is only ever handled by one worker. 0 and 1 both mean "on the calling
+    /// thread, one slot after another". The count actually used is at most the
+    /// number of slots the batch touches.
+    unsigned workers = 1;
+
+    /// Optional: the caller's executor. Called at most once per batch with the
+    /// number of tasks and the task body; it should run `task(0) .. task(n-1)`,
+    /// in any order, on any threads. Each task runs at most once whoever calls
+    /// it, so a second call with the same index does nothing.
+    ///
+    /// **It must be synchronous.** It may not return, normally or by throwing,
+    /// until every call it made to `task` has returned. `task` is valid until
+    /// `run_tasks` returns and not after; an executor that hands it to threads
+    /// must join them, on the throwing path too.
+    ///
+    /// What the batch does on its side:
+    /// - a task the executor did not run, it runs on the calling thread once
+    ///   `run_tasks` has returned or thrown, so an executor that starts nothing
+    ///   or gives up still gets a complete batch;
+    /// - it reads no result until no task is running, and then closes. A call
+    ///   that arrives after that, through a *copy* of `task`, runs nothing and
+    ///   touches nothing of the batch, so a copy is safe to call late. That is a
+    ///   safety net, not support for asynchronous executors: the task such a
+    ///   call meant to run was run by the calling thread instead.
+    ///
+    /// Left empty with `workers > 1`, the batch uses short-lived threads of its
+    /// own, all joined before it returns.
+    std::function<void(size_t count, std::function<void(size_t)> const& task)> run_tasks;
+};
+
+/// What a batch did. Never "all or nothing": a batch is many inserts, and each
+/// one is reported for what it is.
+struct insert_batch_result {
+    std::vector<insert_outcome> outcomes;   ///< one per request, by index
+    size_t inserted = 0;
+    size_t duplicates = 0;
+    size_t failed = 0;
+    size_t not_applied = 0;
+    /// Set whenever anything failed or was not applied: the integrity latch's
+    /// code if the instance latched, the refusal's if the batch never started,
+    /// otherwise the first failure by request index.
+    std::optional<error_code> error;
+    unsigned workers_used = 0;              ///< tasks the batch was divided into
+    size_t tasks_run_inline = 0;            ///< of those, run on the calling thread
 };
 
 /**
@@ -529,6 +616,63 @@ struct full_db : db_base {
      */
     [[nodiscard]]
     result<bool> insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+
+    /**
+     * @brief Insert a batch, with up to `options.workers` workers at once
+     *
+     * One call, one mutation, as far as every other caller is concerned: the
+     * threading contract of db_base is unchanged, and nothing else may be in
+     * flight. Inside it, the requests are divided by **slot** - one container: a
+     * shard of the sharded class, or one other class - and each slot is applied
+     * by exactly one worker, so no container ever has two writers. Returns only
+     * when every worker has finished.
+     *
+     * **What it stores is what `insert` would have stored** called once per
+     * request in order: the same final contents, rotations, statistics and
+     * metadata. Within a slot the requests are applied in their original order,
+     * duplicates included. A slot is decided by the value's size class and, in
+     * the sharded class, by the key: the same (key, class) always reaches the
+     * same slot. A key sent twice with values of different classes reaches two
+     * slots and is stored twice, as two `insert` calls would store it; the batch
+     * checks no uniqueness across classes, and nothing of BIP30. Across slots
+     * there is no order, and none is needed - nothing one slot does is visible
+     * to another.
+     *
+     * That equivalence holds for a batch that does not latch, failures included:
+     * a failure that does not latch stays in its own request, as it would in a
+     * loop of `insert` calls that went on past it. Once a latch stops the batch,
+     * which requests in *other* slots were reached depends on timing, and the
+     * stored state is what the outcomes say - not what a sequential loop that
+     * stopped at the same request would have stored.
+     *
+     * **It is one phase, not a block.** It inserts, and only inserts. Heights are
+     * per request, so a batch may carry several blocks' outputs, but it neither
+     * reorders nor merges anything across them. BIP30 replacements, spends,
+     * undo data, deletions and durability are the caller's, in the caller's
+     * order: if a later block depends on an earlier one in a way an insert-only
+     * pass cannot respect, split the batch there.
+     *
+     * **Not atomic.** A failure leaves every request reported for what happened
+     * to it (see insert_status): inserted entries stay inserted, and only
+     * `not_applied` requests are safe to resend as they are. An integrity latch
+     * in any worker stops the others before their *next* request: a request
+     * another worker is already applying when the latch is set runs to its end
+     * and is reported for how it ended, never as `not_applied`. Durability is as
+     * for `insert`: nothing here syncs, and a later sync() covers every slot the
+     * batch rotated.
+     *
+     * **Memory.** Everything the batch needs for its own bookkeeping - the
+     * outcomes, the routing, the per-worker counters, and room in the shared
+     * statistics for every height range and value size it can add - is
+     * allocated before the first request is attempted. If that fails the call
+     * throws (`std::bad_alloc`) having changed nothing. After the first request
+     * it does not throw, and folding the counters in allocates nothing.
+     *
+     * Full mode only.
+     */
+    [[nodiscard]]
+    insert_batch_result insert_batch(std::span<insert_request const> requests,
+                                     insert_batch_options const& options = {});
 
     /**
      * @brief Find a UTXO by key, in the active versions only
