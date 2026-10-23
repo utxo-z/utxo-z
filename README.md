@@ -12,11 +12,73 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 
 - **Two storage modes**: Full mode (variable-size values) and Reference mode (fixed-size file references)
 - **Type-safe API**: `full_db` and `reference_db` with compile-time mode safety — no runtime dispatch
-- **Multi-container architecture**: 5 size-optimized containers (48B, 94B, 128B, 256B, 10KB) in full mode
+- **Multi-container architecture**: 5 size classes (48B, 96B, 128B, 256B, 10KB) in full mode; the 48-byte class is split into **8 shards**, fixed, each a container of its own
+- **Batched inserts**: `insert_batch()` applies one prepared phase of inserts with several workers, one writer per container — see [Batched inserts](#batched-inserts)
 - **Memory-mapped files**: Automatic file rotation and OS-managed I/O
 - **Caller-owned batches**: Reads and deletes that miss the active versions are collected by you and handed back explicitly — see [Batched reads and deletes](#batched-reads-and-deletes)
 - **Generational storage**: Recent outputs are faster to access
 - **Cache-optimized**: Open addressing hash tables for CPU cache efficiency
+
+See [Changes in 1.0](#changes-in-10) for what is new, and what it breaks.
+
+## Changes in 1.0
+
+1.0 is not released yet. This section describes what it contains.
+
+### Added in this change
+
+- **The 48-byte class is split into 8 shards, fixed.**
+  - A key's shard is a fixed function of its outpoint (`shard_of`, pinned by golden
+    vectors). Each shard is a container of its own, with its own files, map and
+    history, and it rotates on its own.
+  - The other four classes are unchanged, one container each.
+  - The shard count is a constant, `utxoz::shard_count == 8`, not a build or package
+    option. The former `UTXOZ_SHARD_COUNT` option is refused at configure and compile
+    time.
+  - Other counts exist only for tests and experiments, through
+    `UTXOZ_EXPERIMENTAL_SHARD_COUNT`, in builds that write a geometry no production
+    build accepts and that install nothing.
+- **`full_db::insert_batch()`.** One prepared phase of inserts, each request with its
+  own height, applied by a configurable number of workers. See
+  [Batched inserts](#batched-inserts).
+  - To every other caller it is one exclusive mutation, like `insert()`.
+  - Each container (each shard, each other class) has a single writer, and its
+    requests are applied in their original order.
+  - It is not atomic. Every request reports `inserted`, `duplicate`, `failed` or
+    `not_applied`, and only `not_applied` may be resent as is.
+  - It does not sync; a later `sync()` covers everything it rotated.
+  - Workers are limited to the containers the batch touches.
+- **On-disk format: geometry 4.** Every earlier database is refused, none is migrated,
+  and each has to be rebuilt from the chain. See
+  [Databases from before 1.0](#databases-from-before-10).
+- **Historical lookups and deletions** search a key only in its own shard's
+  generations.
+- **Per-shard reporting.**
+  - `utxoz_census` reports the 48-byte class shard by shard.
+  - `utxoz_verify_unique` also verifies that every entry is stored in the shard its key
+    belongs to.
+
+### Already merged since 0.10.0, and part of 1.0
+
+- **Format:**
+  - Every database records the format it was written under, in its config and in
+    every version file, and is refused if a build does not match.
+  - A version file whose map cannot be reached is refused.
+  - Compatibility fixtures certify that a build reads what an earlier one wrote.
+- **Container sizing:**
+  - The second class is 96 bytes.
+  - A container's capacity and its file size are one decision, made once.
+  - A tool answers how large a segment has to be.
+- **Rotation and failed inserts:** a container rotates before the map would grow, also
+  after the growth threshold has drifted under deletions, and what a failed insert left
+  behind is verified.
+- **Inspection:**
+  - The census counts what is stored, not what the process did.
+  - Lookups report how they were resolved, by class and by generation.
+  - `utxoz_verify_unique` checks that no outpoint is stored more than once.
+
+These already break the format of 0.10.0: a 0.10.0 database is refused with
+`migration_required`.
 
 ## Requirements
 
@@ -186,7 +248,7 @@ Rules to follow:
 
 #### Threading
 
-A database instance supports **one mutating operation at a time**, with no other operation of any kind in flight. Mutating means `insert()`, `apply_deletes()`, `compact_all()` and `close()`. Serialising those is the caller's job.
+A database instance supports **one mutating operation at a time**, with no other operation of any kind in flight. Mutating means `insert()`, `insert_batch()`, `apply_deletes()`, `compact_all()` and `close()`. Serialising those is the caller's job. `insert_batch()` uses several threads *inside* one call, but to every other caller it is one mutation like `insert()`.
 
 The read path is different, and only the read path:
 
@@ -211,14 +273,29 @@ The restriction on everything else is structural rather than incidental:
 
 What the first rotation changes is the *meaning* of a `not_resolved`. While a container still has a single version, everything stored is in the mapped version, so an unresolved lookup can only ever resolve to "does not exist" — which is exactly why treating it as authoritative appears to work. Once a container rotates, it also covers "still stored, in a previous version", and code making that assumption starts failing abruptly, for many keys at once.
 
-Container 0 (48-byte entries in a 2 GiB file, ~7.86M buckets) rotates when the hash table reaches `max_load_factor * 0.95`. Measured on production sizing:
+In 1.0 the 48-byte class is eight containers, one per shard, each with 1,966,079 buckets in a 167.5 MiB file, and each rotates on its own when its table reaches the store's insert limit. Keys spread evenly over the shards, so the class's first rotations come at roughly eight times one shard's limit in live entries. The figures measured for earlier geometries (a single 48-byte container) do not apply and have not been re-measured for this one. The other classes rotate on their own schedules, depending on their sizes.
 
-| Workload | Live entries at first rotation of container 0 |
-|----------|-----------------------------------------------|
-| Inserts only | 6,550,001 |
-| Inserts + spends | 6,700,001 |
+### Batched inserts
 
-For Bitcoin Cash mainnet that is around block 245,000. The other containers rotate much earlier, since their files are smaller.
+`full_db::insert_batch()` inserts one prepared phase of entries - possibly several blocks' outputs, each request carrying its own height - with `workers` threads, one writer per container (each shard of the 48-byte class, and each other class). The full contract is in `include/utxoz/database.hpp`.
+
+```cpp
+std::vector<utxoz::insert_request> requests = /* key, value, height */;
+auto const r = db.insert_batch(requests, {.workers = 8});
+if (r.error) {
+    // Not atomic: r.outcomes[i] says what happened to request i -
+    // inserted, duplicate, failed or not_applied. Only not_applied may be resent as is.
+}
+```
+
+- **One mutation to everyone else**, and synchronous: it returns when no task is running.
+- **What it stores is what `insert()` called once per request in order would store**, for a batch that does not latch. Within a container the requests are applied in their original order.
+- **A phase, not a block.** BIP30, spends, undo data, deletions and `sync()` stay the caller's, in the caller's order: split the batch wherever something that is not an insert depends on what came before.
+- **The same (key, class) always reaches the same container.** A key sent with values of two different classes is stored twice, as two `insert()` calls would store it; there is no global uniqueness check.
+- **Workers** are limited to the containers the batch touches; eight workers at eight shards is valid. Optionally pass `run_tasks`, your own executor - it must be synchronous: join every thread it handed the task to before returning, also when it throws.
+- **Memory** for the batch's own bookkeeping is allocated before the first request; if that fails it throws `std::bad_alloc` having changed nothing.
+
+What it was measured to do, and what it was not, is in `doc/roadmap-1.0.md`.
 
 ### Iterating over entries
 
@@ -346,7 +423,7 @@ again in every version file, and both are checked before anything reads a map:
 
 | Field | What a mismatch means |
 |---|---|
-| `geometry_id` | the container sizing this build writes |
+| `geometry_id` | the container sizing this build writes - in 1.0, geometry 4: the 48-byte class in eight shards |
 | `map_layout_epoch` | the map implementation this build is certified against |
 | `hash_epoch` | the effective hash, `mulx_mix(hash_outpoint(key))` |
 | `platform_abi_id` | endianness, and the width of `size_t`, pointers and `offset_ptr` |
@@ -356,12 +433,27 @@ A mismatch is refused with a specific error rather than served. The Boost versio
 is recorded too, for diagnosis, and is never compared: several Boost releases can
 share one `map_layout_epoch`.
 
-### Databases created before v0.11.0
+### Databases from before 1.0
+
+1.0 writes **geometry 4**: the classes of geometry 3, with the 48-byte class split
+into eight shards, fixed. Everything else is refused, and none of it is migrated:
+
+| Written by | `open()` returns |
+|---|---|
+| 1.0 (geometry 4) | the database |
+| master builds between 0.10.0 and 1.0 (geometries 1, 2 and 3, never released) | `geometry_mismatch` |
+| an experimental build (`UTXOZ_EXPERIMENTAL_SHARD_COUNT`, ids `0x8000_00xx`) | `geometry_mismatch` |
+| v0.10.0 or earlier | `migration_required` |
+
+The shard count is not an option: `UTXOZ_SHARD_COUNT` was removed and is refused
+at configure and compile time. Other counts exist only for tests and experiments,
+through `UTXOZ_EXPERIMENTAL_SHARD_COUNT`, in builds that install nothing.
 
 Anything written by v0.10.0 or earlier carries a config that records only the
 storage mode. What its files mean cannot be established after the fact, so it is
-**refused rather than assumed**: `open()` returns `migration_required` and nothing
-in the directory is read, repaired or upgraded.
+**refused rather than assumed**: `open()` takes the database's lock and reads the
+config, as every open does, then returns `migration_required` without mapping a
+segment. No data, segment or config is modified, repaired or upgraded.
 
 Such a database has to be rebuilt from the chain. There is deliberately no
 in-place migration: writing a new config over data whose layout was never
