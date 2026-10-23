@@ -75,7 +75,7 @@ result<> database_impl::visit_stored_entries(EntryFn&& fn, uint64_t& files_visit
             ++files_visited;
             if (active && reference_container_ != nullptr && reference_segment_) {
                 for (auto const& entry : reference_map()) {
-                    fn(entry.first, reference_walk_class, version, active);
+                    fn(entry.first, reference_walk_class, 0, version, active);
                 }
                 continue;
             }
@@ -88,7 +88,7 @@ result<> database_impl::visit_stored_entries(EntryFn&& fn, uint64_t& files_visit
             auto found = find_single_named<reference_map_t>(**opened, map_object_name, path);
             if ( ! found) return std::unexpected(found.error());
             for (auto const& entry : **found) {
-                fn(entry.first, reference_walk_class, version, active);
+                fn(entry.first, reference_walk_class, 0, version, active);
             }
         }
         return {};
@@ -98,26 +98,31 @@ result<> database_impl::visit_stored_entries(EntryFn&& fn, uint64_t& files_visit
     auto const walk_class = [&]<size_t Index>(std::integral_constant<size_t, Index>) {
         if (failure) return;
         constexpr size_t Size = container_sizes[Index];
-        for (auto const version : catalogs_[Index].versions()) {
-            bool const active = (version == current_versions_[Index]);
-            auto const path = data_path(Index, version);
-            ++files_visited;
-            if (active && segments_[Index]) {
-                for (auto const& entry : container<Index>()) {
-                    fn(entry.first, uint32_t(Index), version, active);
+        // Per slot, not per class: each shard has its own catalogue and its own
+        // active generation, and an entry's shard is part of where it lives.
+        for (uint32_t shard = 0; shard < detail::shards_in_class(Index); ++shard) {
+            size_t const slot = detail::slot_of(Index, shard);
+            for (auto const version : catalogs_[slot].versions()) {
+                bool const active = (version == current_versions_[slot]);
+                auto const path = data_path(slot, version);
+                ++files_visited;
+                if (active && segments_[slot]) {
+                    for (auto const& entry : container<Index>(slot)) {
+                        fn(entry.first, uint32_t(Index), shard, version, active);
+                    }
+                    continue;
                 }
-                continue;
-            }
-            auto opened = open_existing_segment(path);
-            if ( ! opened) { failure = opened.error(); return; }
-            if (auto stamped = validate_stamp(**opened, path,
-                    expected_identity(uint32_t(Index), version)); ! stamped) {
-                failure = stamped.error(); return;
-            }
-            auto found = find_single_named<utxo_map<Size>>(**opened, map_object_name, path);
-            if ( ! found) { failure = found.error(); return; }
-            for (auto const& entry : **found) {
-                fn(entry.first, uint32_t(Index), version, active);
+                auto opened = open_existing_segment(path);
+                if ( ! opened) { failure = opened.error(); return; }
+                if (auto stamped = validate_stamp(**opened, path,
+                        expected_identity(uint32_t(slot), version)); ! stamped) {
+                    failure = stamped.error(); return;
+                }
+                auto found = find_single_named<utxo_map<Size>>(**opened, map_object_name, path);
+                if ( ! found) { failure = found.error(); return; }
+                for (auto const& entry : **found) {
+                    fn(entry.first, uint32_t(Index), shard, version, active);
+                }
             }
         }
     };
@@ -195,9 +200,29 @@ result<budget_report> database_impl::walk_distinct_keys(
         auto const pass_started = std::chrono::steady_clock::now();
         uint64_t files = 0;
         auto const counted = visit_stored_entries(
-            [&](raw_outpoint const& key, uint32_t, uint64_t, bool) {
+            [&](raw_outpoint const& key, uint32_t klass, uint32_t shard, uint64_t generation, bool) {
                 ++counts[prefix_of(partition_hash(key), planning_prefix_bits)];
                 ++physical_entries;
+
+                // Where the key is, against where a lookup would go looking for
+                // it. The planning pass sees every copy exactly once, which is
+                // what this check wants and what the data passes cannot promise.
+                // Classes that are not sharded have a single shard and answer 0
+                // for every key, so this is trivially satisfied for them rather
+                // than skipped.
+                if (klass < container_count) {
+                    auto const belongs = detail::shard_of(key, detail::shards_in_class(klass));
+                    if (belongs != shard) {
+                        if (report.misplaced_entries == 0) {
+                            report.misplaced_first_class = klass;
+                            report.misplaced_first_generation = generation;
+                            report.misplaced_first_stored_shard = shard;
+                            report.misplaced_first_expected_shard = belongs;
+                        }
+                        ++report.misplaced_entries;
+                        report.placement_correct = false;
+                    }
+                }
             }, files);
         if ( ! counted) return std::unexpected(counted.error());
         report.planning_passes = 1;
@@ -326,7 +351,7 @@ result<budget_report> database_impl::walk_distinct_keys(
             uint64_t files = 0;
             uint64_t seen = 0;
             auto const collected_ok = visit_stored_entries(
-                [&](raw_outpoint const& key, uint32_t klass, uint64_t generation, bool active) {
+                [&](raw_outpoint const& key, uint32_t klass, uint32_t, uint64_t generation, bool active) {
                     ++seen;
                     uint64_t const prefix = prefix_of(partition_hash(key), planning_prefix_bits);
                     if (prefix < group.first || prefix > group.last) return;
@@ -613,6 +638,14 @@ result<uniqueness_report> database_impl::verify_unique_outpoints(
     out.partitions = walk_result.partitions;
     out.entries_examined_total = walk_result.entries_examined_total;
     out.generations_visited = walk_result.generations_visited;
+
+    // Copied, not recomputed: the walk is where every copy was seen once.
+    out.placement_correct              = walk_result.placement_correct;
+    out.misplaced_entries              = walk_result.misplaced_entries;
+    out.misplaced_first_class          = walk_result.misplaced_first_class;
+    out.misplaced_first_generation     = walk_result.misplaced_first_generation;
+    out.misplaced_first_stored_shard   = walk_result.misplaced_first_stored_shard;
+    out.misplaced_first_expected_shard = walk_result.misplaced_first_expected_shard;
     out.duration_ms = walk_result.duration_ms;
     out.duration_per_pass_ms = walk_result.duration_per_pass_ms;
     // The per-pass durations travel in this report and are allocated with the
@@ -670,6 +703,16 @@ std::string to_json(uniqueness_report const& r) {
     // The verdict first, and spelled as a boolean rather than left to be derived
     // from two counts further down.
     out += fmt::format("  \"unique\": {},\n", r.unique ? "true" : "false");
+    out += fmt::format("  \"placement_correct\": {},\n",
+                       r.placement_correct ? "true" : "false");
+    out += fmt::format("  \"misplaced_entries\": {},\n", r.misplaced_entries);
+    if ( ! r.placement_correct) {
+        out += fmt::format(
+            "  \"first_misplaced\": {{\"container_class\": {}, \"generation\": {}, "
+            "\"stored_shard\": {}, \"expected_shard\": {}}},\n",
+            r.misplaced_first_class, r.misplaced_first_generation,
+            r.misplaced_first_stored_shard, r.misplaced_first_expected_shard);
+    }
     out += fmt::format("  \"storage_mode\": \"{}\",\n", r.storage_mode);
     out += fmt::format("  \"counts\": {{\"physical_entries\": {}, \"distinct_outpoints\": {}, "
                        "\"duplicate_copies\": {}, \"keys_with_multiple_copies\": {}, "
@@ -724,6 +767,21 @@ std::string to_text(uniqueness_report const& r) {
     out += fmt::format("  distinct outpoints    {}\n", r.distinct_outpoints);
     out += fmt::format("  extra copies          {}\n", r.duplicate_copies);
     out += fmt::format("  keys with more than one copy  {}\n", r.keys_with_multiple_copies);
+
+    // Placement is a separate verdict from uniqueness and is printed as one. A
+    // store can hold no duplicate at all and still be misfiled, and a misfiled
+    // entry is unreachable: a lookup computes the shard and searches there, so
+    // the entry is invisible without being absent.
+    out += fmt::format("  placement             {}\n",
+                       r.placement_correct ? "every entry is in the shard its key names"
+                                           : "SOME ENTRIES ARE IN THE WRONG SHARD");
+    if ( ! r.placement_correct) {
+        out += fmt::format("  misplaced entries     {}\n", r.misplaced_entries);
+        out += fmt::format("  first one             class {} generation {}, "
+                           "stored in shard {}, belongs in shard {}\n",
+                           r.misplaced_first_class, r.misplaced_first_generation,
+                           r.misplaced_first_stored_shard, r.misplaced_first_expected_shard);
+    }
     if (r.keys_with_multiple_copies != 0) {
         out += fmt::format("  most copies of one key        {}\n", r.max_copies_for_one_key);
         out += fmt::format("\nfindings ({} shown, {} not shown; outpoints {})\n",

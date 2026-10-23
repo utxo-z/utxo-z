@@ -36,6 +36,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -53,8 +54,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 
+#include "detail/database_lock.hpp"
 #include "detail/durability.hpp"
 #include "detail/file_cache.hpp"
 #include "detail/format_identity.hpp"
@@ -382,8 +386,8 @@ struct fixture_copy {
     fs::path dir;
     fs::path source;
 
-    explicit fixture_copy(std::string const& name)
-        : dir(make_unique_path(name)), source(fixtures_root() / name) {
+    explicit fixture_copy(std::string const& name, fs::path const& root = fixtures_root())
+        : dir(make_unique_path(name)), source(root / name) {
         REQUIRE(fs::exists(source));
         std::error_code ec;
         fs::create_directories(dir, ec);
@@ -456,7 +460,70 @@ bool this_abi_wrote_the_fixtures() {
 // An ABI the fixtures were not written on
 // =============================================================================
 
+// =============================================================================
+// Another geometry is refused, and nothing is touched
+// =============================================================================
+
+namespace {
+
+std::map<std::string, std::vector<uint8_t>> files_of(fs::path const& dir) {
+    std::map<std::string, std::vector<uint8_t>> out;
+    for (auto const& e : fs::directory_iterator(dir)) {
+        if (e.is_regular_file()) out[e.path().filename().string()] = utxoz::testing::read_file_bytes(e.path());
+    }
+    return out;
+}
+
+/// The ABI a fixture set was written on, read from its own manifest.
+uint64_t abi_of_set(fs::path const& root) {
+    auto const text = utxoz::testing::read_file_text(root / "manifest.json");
+    auto const v = boost::json::parse(text);
+    return v.at("written_by").at("platform_abi_id").to_number<uint64_t>();
+}
+
+} // namespace
+
+TEST_CASE("a database of another geometry is refused with geometry_mismatch, untouched",
+          "[compat][format]") {
+    // A production build is handed the geometry-3 set, written by master builds
+    // before 1.0. An experimental build is handed the production geometry-4 set.
+    // Either way the database is from another geometry: it must be refused by
+    // name, and not one byte of it may change.
+    fs::path const root = utxoz::experimental_build ? fs::path(UTXOZ_FIXTURES_DIR)
+                                                    : fs::path(UTXOZ_LEGACY_FIXTURES_DIR);
+    if (abi_of_set(root) != utxoz::detail::platform_abi_id) {
+        SUCCEED("that set was written on another ABI; the ABI refusal covers this platform");
+        return;
+    }
+    for (std::string const name : {"full-two-generations", "reference-two-generations"}) {
+        INFO(name);
+        auto const pristine = files_of(root / name);
+        fixture_copy f(name, root);
+        auto const before = files_of(f.dir);
+        REQUIRE(before == pristine);
+
+        if (name.starts_with("full")) {
+            auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+            REQUIRE_FALSE(db.has_value());
+            CHECK(db.error() == utxoz::error_code::geometry_mismatch);
+        } else {
+            auto const db = utxoz::reference_db::open_for_testing(f.dir, false);
+            REQUIRE_FALSE(db.has_value());
+            CHECK(db.error() == utxoz::error_code::geometry_mismatch);
+        }
+
+        // The copy is byte for byte what it was (apart from the claim an open
+        // takes, which is not part of a database), and the set in the tree
+        // was never opened at all.
+        auto after = files_of(f.dir);
+        after.erase(std::string(utxoz::detail::database_lock::file_name));
+        CHECK(after == before);
+        CHECK(files_of(root / name) == pristine);
+    }
+}
+
 TEST_CASE("a fixture from another ABI is refused, not misread", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     // Not a missing fixture: the fixture declares the ABI it was written under,
     // and a build that does not share it must say so rather than read the bytes
     // as if they meant the same thing. This is the whole test on such a
@@ -478,6 +545,7 @@ TEST_CASE("a fixture from another ABI is refused, not misread", "[compat]") {
 // =============================================================================
 
 TEST_CASE("the full-mode fixture still reads, entry for entry", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     if ( ! this_abi_wrote_the_fixtures()) {
         SUCCEED("fixtures were written on another ABI; the refusal case covers this platform");
         return;
@@ -510,7 +578,20 @@ TEST_CASE("the full-mode fixture still reads, entry for entry", "[compat]") {
     CHECK(db.find(key_of(5), 900000).has_value());     // container 4
 
     // In the historical generation: not found by find(), found by resolve().
-    auto const historical = key_of(6);   // container 0, below the rotation
+    // The forced rotation at key 210 rotated only the container key 210 is in -
+    // with shards, one shard of class 0 - so the historical key has to be one
+    // below the rotation in that same container: a class-0 payload (n % 6 is 0
+    // or 1, sizes 8 and 43) in key 210's shard.
+    auto const rotated_shard = utxoz::detail::shard_of(key_of(210), utxoz::shard_count);
+    uint64_t below = 210;
+    for (uint64_t n = 0; n != 210; ++n) {
+        if (n % 6 <= 1 && utxoz::detail::shard_of(key_of(n), utxoz::shard_count) == rotated_shard) {
+            below = n;
+            break;
+        }
+    }
+    REQUIRE(below < 210);
+    auto const historical = key_of(below);   // container 0 (its shard), below the rotation
     auto const missed = db.find(historical, 900000);
     REQUIRE_FALSE(missed.has_value());
     CHECK(missed.error() == utxoz::error_code::not_resolved);
@@ -532,6 +613,7 @@ TEST_CASE("the full-mode fixture still reads, entry for entry", "[compat]") {
 }
 
 TEST_CASE("the reference-mode fixture still reads, entry for entry", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     if ( ! this_abi_wrote_the_fixtures()) {
         SUCCEED("fixtures were written on another ABI");
         return;
@@ -577,6 +659,7 @@ TEST_CASE("the reference-mode fixture still reads, entry for entry", "[compat]")
 // =============================================================================
 
 TEST_CASE("every generation the manifest names is there and holds what it held", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     if ( ! this_abi_wrote_the_fixtures()) {
         SUCCEED("fixtures were written on another ABI");
         return;
@@ -594,8 +677,11 @@ TEST_CASE("every generation the manifest names is there and holds what it held",
 
     size_t checked = 0;
     for (auto const& s : expected.segments) {
+        // `container_kind` is the slot: what the stamp names and the file is
+        // called by. The class, which decides the map's type, follows from it.
         INFO("container " << s.kind << " generation " << s.generation);
-        auto const file = f.dir / fmt::format(utxoz::detail::data_file_format, s.kind, s.generation);
+        REQUIRE(s.kind < utxoz::detail::slot_count);
+        auto const file = f.dir / utxoz::detail::container_file_name(s.kind, s.generation);
         REQUIRE(fs::exists(file));
 
         trace("opening segment " + file.string());
@@ -624,7 +710,7 @@ TEST_CASE("every generation the manifest names is there and holds what it held",
                 entries.push_back(std::move(e));
             }
         };
-        switch (s.kind) {
+        switch (utxoz::detail::class_of_slot(s.kind)) {
             case 0: collect(std::integral_constant<size_t, 0>{}); break;
             case 1: collect(std::integral_constant<size_t, 1>{}); break;
             case 2: collect(std::integral_constant<size_t, 2>{}); break;
@@ -642,6 +728,7 @@ TEST_CASE("every generation the manifest names is there and holds what it held",
 }
 
 TEST_CASE("every reference generation the manifest names holds what it held", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     if ( ! this_abi_wrote_the_fixtures()) {
         SUCCEED("fixtures were written on another ABI");
         return;
@@ -701,6 +788,7 @@ TEST_CASE("every reference generation the manifest names holds what it held", "[
 // =============================================================================
 
 TEST_CASE("an old database is still writable, and reopens with what was added", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     if ( ! this_abi_wrote_the_fixtures()) {
         SUCCEED("fixtures were written on another ABI");
         return;
@@ -741,6 +829,7 @@ TEST_CASE("an old database is still writable, and reopens with what was added", 
 
 TEST_CASE("an old reference database is still writable, and reopens with what was added",
           "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     if ( ! this_abi_wrote_the_fixtures()) {
         SUCCEED("fixtures were written on another ABI");
         return;
@@ -781,6 +870,7 @@ TEST_CASE("an old reference database is still writable, and reopens with what wa
 }
 
 TEST_CASE("nothing in the fixture tree was touched", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     // Every case above works on a copy. This is what makes that a property
     // rather than an intention: the committed artefacts are compared against the
     // sizes and digests the manifest recorded for them.
@@ -822,6 +912,7 @@ TEST_CASE("nothing in the fixture tree was touched", "[compat]") {
 // =============================================================================
 
 TEST_CASE("a manifest is held to its schema, not merely parsed", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     auto const original = read_text(fixtures_root() / "manifest.json");
     REQUIRE_FALSE(schema_error(original).has_value());
 
@@ -880,6 +971,7 @@ TEST_CASE("a manifest is held to its schema, not merely parsed", "[compat]") {
 }
 
 TEST_CASE("the manifest agrees with the bytes it certifies", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     // Until this existed the header was prose: `map_layout_epoch` could read 27
     // and every case stayed green, because nothing compared it to anything. What
     // makes it a certificate is that each field is held against the binary
@@ -972,7 +1064,7 @@ TEST_CASE("the manifest agrees with the bytes it certifies", "[compat]") {
             auto const file = kind == utxoz::detail::reference_container_kind
                 ? fixtures_root() / name / fmt::format(utxoz::detail::reference_data_file_format,
                                                        generation)
-                : fixtures_root() / name / fmt::format(utxoz::detail::data_file_format, kind,
+                : fixtures_root() / name / utxoz::detail::container_file_name(kind,
                                                        generation);
             INFO("segment " << kind << "/" << generation);
             REQUIRE(fs::exists(file));
@@ -993,6 +1085,7 @@ TEST_CASE("the manifest agrees with the bytes it certifies", "[compat]") {
 }
 
 TEST_CASE("the Boost a fixture was written with is recorded, not enforced", "[compat]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     // Several Boost releases can share one map_layout_epoch, so the version is
     // there to tell an operator which bytes they are looking at. A build that
     // consulted it would invalidate every database on an upgrade — this is what
@@ -1029,18 +1122,26 @@ TEST_CASE("the Boost a fixture was written with is recorded, not enforced", "[co
 // =============================================================================
 
 TEST_CASE("the rotation seam rotates, and only when asked", "[compat][seam]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     // The multi-generation fixtures exist because of this seam, so a seam that
     // quietly did nothing would leave them single-generation and every case
     // above would certify less than it says. Both halves are needed: that it
     // rotates when set, and that nothing rotates when it is not.
     using utxoz::detail::failpoints;
 
+    // Generations of class 0 beyond the first of each of its containers: with
+    // shards the class is several containers, each starting with one file, so
+    // what a rotation adds is a file over the count of containers that exist.
     auto count_versions = [](fs::path const& dir) {
-        size_t n = 0;
+        size_t files = 0;
+        std::set<std::string> containers;
         for (auto const& e : fs::directory_iterator(dir)) {
-            if (e.path().filename().string().starts_with("cont_0_v")) ++n;
+            auto const name = e.path().filename().string();
+            if ( ! name.starts_with("cont_0_v") && ! name.starts_with("cont_0s")) continue;
+            ++files;
+            containers.insert(name.substr(0, name.find("_v")));
         }
-        return n;
+        return 1 + files - containers.size();   // 1 = only the original generation
     };
 
     std::vector<uint8_t> const value(8, 0x11);

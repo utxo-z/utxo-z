@@ -39,6 +39,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
+#include "detail/shard.hpp"
+
 #include <utxoz/database.hpp>
 
 #include "detail/durability.hpp"
@@ -61,9 +65,10 @@ std::string unique_path(std::string_view tag) {
 }
 
 utxoz::raw_outpoint make_key(uint64_t n) {
-    utxoz::raw_outpoint key{};
-    std::memcpy(key.data(), &n, sizeof(n));
-    return key;
+    // Every byte varies, as a txid's do. Writing only the low eight and leaving
+    // the rest zero makes distinct keys that all share bytes 24..35 — the only
+    // ones shard_of() reads — so every one of them lands in shard zero.
+    return utxoz::testing::spread_key(n);
 }
 
 std::vector<uint8_t> make_value(size_t size, uint8_t seed) {
@@ -72,13 +77,10 @@ std::vector<uint8_t> make_value(size_t size, uint8_t seed) {
     return v;
 }
 
+/// Generations of the 48-byte class, as the tests below mean it: the depth every
+/// one of its shards has reached. See generations_reached().
 size_t count_data_files(std::string const& path) {
-    size_t n = 0;
-    for (auto const& entry : fs::directory_iterator(path)) {
-        auto const name = entry.path().filename().string();
-        if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) ++n;
-    }
-    return n;
+    return utxoz::testing::generations_reached(path, 0);
 }
 
 } // anonymous namespace
@@ -196,13 +198,17 @@ TEST_CASE("sync() covers every generation written to, not the ones still mapped"
     // sweep wrote to. "More than the cache could have done" would be satisfied
     // by covering one extra generation and missing the rest.
     //
-    // The historical ones are every version of container 0 below the active:
-    // the erases span all the keys, which span all the generations.
-    auto const historical = files_before - 1;
+    // The historical ones are every version of the 48-byte class below each of
+    // its actives: the erases span all the keys, which span all the generations
+    // of all its containers.
+    auto const historical = utxoz::testing::count_class_files(path, 0)
+                            - utxoz::testing::shards_of(0);
     INFO("file barriers: " << barriers << ", active containers: " << utxoz::container_count
          << ", historical generations: " << historical
          << ", resident mappings: " << still_mapped.size());
-    CHECK(barriers == utxoz::container_count + historical);
+    // One barrier per open container plus the historical ones. A sharded class
+    // is several containers, so this counts slots.
+    CHECK(barriers == utxoz::detail::slot_count + historical);
 
     // And a second sync has nothing left to do: the obligation was discharged.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
@@ -408,16 +414,23 @@ TEST_CASE("a version that rotated out still gets a barrier", "[database][sync][f
     REQUIRE(db.sync());
     auto const barriers = failpoints::sync_file_calls.load(std::memory_order_relaxed);
 
-    auto const rotated_out = count_data_files(path) - 1;
-    REQUIRE(rotated_out == 3);
-    INFO("file barriers: " << barriers << ", active containers: " << utxoz::container_count
-         << ", rotated out: " << rotated_out);
-    CHECK(barriers == utxoz::container_count + rotated_out);
+    // One barrier per active container, plus one per generation that rotated out
+    // of any of them. Counted from the directory rather than from constants: a
+    // sharded class has several containers, each with a history of its own, and
+    // "four generations" means four in every one of them.
+    auto const rotated_out = utxoz::testing::count_class_files(path, 0)
+                             - utxoz::testing::shards_of(0);
+    REQUIRE(count_data_files(path) == 4);
+    INFO("file barriers: " << barriers << ", containers: " << utxoz::detail::slot_count
+         << ", rotated out of class 0: " << rotated_out);
+    CHECK(barriers == utxoz::detail::slot_count + rotated_out);
 
     // Discharged: a second sync covers the actives and nothing else.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
     REQUIRE(db.sync());
-    CHECK(failpoints::sync_file_calls.load(std::memory_order_relaxed) == utxoz::container_count);
+    // One barrier per open container, and a sharded class is several.
+    CHECK(failpoints::sync_file_calls.load(std::memory_order_relaxed)
+          == utxoz::detail::slot_count);
 
     db.close();
 }
@@ -448,14 +461,18 @@ TEST_CASE("a barrier failing partway through keeps every obligation",
         REQUIRE(db.insert(make_key(next++), make_value(8, 1), 100).value());
         REQUIRE(next < 2'000'000);
     }
-    auto const rotated_out = count_data_files(path) - 1;
-    REQUIRE(rotated_out == 3);
-
-    auto const expected = utxoz::container_count + rotated_out;
+    // As above: one barrier per container, plus one per generation that rotated
+    // out of any of them, both counted from the directory.
+    REQUIRE(count_data_files(path) == 4);
+    auto const rotated_out = utxoz::testing::count_class_files(path, 0)
+                             - utxoz::testing::shards_of(0);
+    auto const expected = utxoz::detail::slot_count + rotated_out;
 
     // The barrier after the last active container: the first historical one.
+    // There is one active container per slot, so that is where the actives end.
+    auto const first_historical = utxoz::detail::slot_count + 1;
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    failpoints::fail_sync_file_at.store(utxoz::container_count + 1, std::memory_order_relaxed);
+    failpoints::fail_sync_file_at.store(first_historical, std::memory_order_relaxed);
 
     auto const failed_sync = db.sync();
     auto const attempted = failpoints::sync_file_calls.load(std::memory_order_relaxed);
@@ -466,7 +483,8 @@ TEST_CASE("a barrier failing partway through keeps every obligation",
 
     // It got as far as the failing one and stopped there.
     INFO("barriers attempted before the failure: " << attempted);
-    CHECK(attempted == utxoz::container_count + 1);
+    // It got as far as the failing one and stopped there.
+    CHECK(attempted == first_historical);
 
     // And nothing was discharged — not the actives that succeeded, not the
     // historical ones that were never reached. The next sync owes all of them.

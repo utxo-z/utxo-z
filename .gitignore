@@ -94,3 +94,19 @@ test_compat_*
 test_ci_*
 scripts/__pycache__/
 ci/__pycache__/
+build-n1/
+build-n8/
+build-n2/
+build-n4/
+build-n16/
+build-n32/
+build-asan/
+build-asan1/
+build-div1/
+build-div8/
+
+# Directories the test suite creates in the repository root. They are evidence
+# while a failure is being read and rubbish afterwards, and one `git add -A`
+# after an interrupted run put five hundred of them, with their .dat files and
+# their locks, into a commit.
+test_*/

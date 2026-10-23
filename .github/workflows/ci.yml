@@ -1122,6 +1122,38 @@ jobs:
           fi
           grep -qi "statistics_level" conan-refusal.log
 
+      # Eight shards is the production format, not an option. The option that
+      # used to choose it must be refused, not ignored; eight must not be
+      # accepted as an "experimental" count; and an experimental build must not
+      # be able to become a package.
+      - name: 🧪 The shard count is fixed, and an experimental build installs nothing
+        run: |
+          set -euo pipefail
+          toolchain="$PWD/build/build/Release/generators/conan_toolchain.cmake"
+          if cmake -B build-shard-old -S . -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUTXOZ_SHARD_COUNT=8 > shard-old.log 2>&1; then
+            echo "UTXOZ_SHARD_COUNT was accepted" >&2
+            exit 1
+          fi
+          grep -q "UTXOZ_SHARD_COUNT was removed" shard-old.log
+          if cmake -B build-shard-exp8 -S . -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUTXOZ_EXPERIMENTAL_SHARD_COUNT=8 > shard-exp8.log 2>&1; then
+            echo "8 was accepted as an experimental shard count" >&2
+            exit 1
+          fi
+          cmake -B build-shard-exp1 -S . -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUTXOZ_EXPERIMENTAL_SHARD_COUNT=1 \
+              -DUTXOZ_BUILD_TESTS=OFF -DUTXOZ_BUILD_TOOLS=OFF -DUTXOZ_BUILD_BENCHMARKS=OFF \
+              -DUTXOZ_BUILD_LARGE_BENCHMARKS=OFF -DUTXOZ_BUILD_EXAMPLES=OFF > shard-exp1.log 2>&1
+          grep -q "Not installable" shard-exp1.log
+          cmake --build build-shard-exp1 --parallel
+          cmake --install build-shard-exp1 --prefix "$PWD/exp1-prefix"
+          if [ -n "$(find exp1-prefix -type f 2>/dev/null)" ]; then
+            echo "an experimental build installed files" >&2
+            find exp1-prefix -type f >&2
+            exit 1
+          fi
+
   statistics-disabled:
     needs: [setup]
     runs-on: ubuntu-24.04

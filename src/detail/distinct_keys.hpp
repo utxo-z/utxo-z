@@ -114,6 +114,16 @@ struct budget_report {
     uint64_t generations_visited = 0;
     uint64_t duration_ms = 0;
     std::vector<uint64_t> duration_per_pass_ms;
+
+    // Where each entry was found, against where its key says it belongs. Counted
+    // here because the planning pass is the one place that sees every copy
+    // exactly once; the caller copies these into the public report unchanged.
+    bool placement_correct = true;
+    uint64_t misplaced_entries = 0;
+    uint64_t misplaced_first_class = 0;
+    uint64_t misplaced_first_generation = 0;
+    uint32_t misplaced_first_stored_shard = 0;
+    uint32_t misplaced_first_expected_shard = 0;
 };
 
 /// How many prefixes the planning pass counts. Twelve bits: 32 KB of counters,
