@@ -110,3 +110,7 @@ build-div8/
 # after an interrupted run put five hundred of them, with their .dat files and
 # their locks, into a commit.
 test_*/
+build-bench1/
+build-bench8/
+bench_large_ibd_*/
+bench_large_ops_*/
