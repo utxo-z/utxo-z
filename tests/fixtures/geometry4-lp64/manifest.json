@@ -1,0 +1,89 @@
+{
+  "manifest_format": 1,
+  "written_by": {
+    "boost_version": 109100,
+    "config_format": 2,
+    "geometry_id": 4,
+    "map_layout_epoch": 1,
+    "hash_epoch": 1,
+    "platform_abi_id": 3060504794,
+    "platform_abi_encoding": 1,
+    "data_abi_id": 17303560,
+    "sync_abi_family": 1,
+    "sizeof_interprocess_mutex": 40,
+    "alignof_interprocess_mutex": 8,
+    "sizeof_segment_manager": 200,
+    "alignof_segment_manager": 8,
+    "platform_tag": 4,
+    "endian": "little",
+    "sizeof_size_t": 8,
+    "sizeof_pointer": 8,
+    "sizeof_offset_ptr": 8
+  },
+  "fixtures": [
+    {
+      "name": "full-two-generations",
+      "storage_mode": "full",
+      "entries": 420,
+      "global_logical_digest": "0baaa92a606566a87de387cceb9c1fc90965754150f4617408446b74e55b7cd0",
+      "segments": [
+        {"container_kind": 0, "generation": 0, "entries": 10, "logical_digest": "17bd60d247417f236d149677e0bb9fc7829e7bcc841c3f7d7efec5a371aa62d7"},
+        {"container_kind": 0, "generation": 1, "entries": 10, "logical_digest": "47b8bd5f511d0388894f3db8c31aea31344b9387aa9dba6785fd922694b8b58b"},
+        {"container_kind": 1, "generation": 0, "entries": 0, "logical_digest": "bb99889d91565537837e9d2cb69ca500a015f2fbddde48d17f9e83cbfadde3a2"},
+        {"container_kind": 2, "generation": 0, "entries": 20, "logical_digest": "9d6629e1a97d7f94066ba318c120baebd6454a3c1b30c40efa79e1fb25d1e6fa"},
+        {"container_kind": 3, "generation": 0, "entries": 20, "logical_digest": "e4999913c5f633b83a496bba4ed4b2a36a050a80cb7b2a5f9c872ec1f372a65d"},
+        {"container_kind": 4, "generation": 0, "entries": 40, "logical_digest": "8a71fe7a6efe783fcc7758ccd02792df8fe9fd140654faa6b514bd7543d7de76"},
+        {"container_kind": 5, "generation": 0, "entries": 0, "logical_digest": "d1ab4e791bb7a5f956b5bf5b9f9bf73bd0d377941939a2b76d7cbecf067ea3d5"},
+        {"container_kind": 6, "generation": 0, "entries": 0, "logical_digest": "4fae5bae303c2dd95ee42bf58120bef43e0c1585cf78d74c8d9c0e9c36b30cd0"},
+        {"container_kind": 7, "generation": 0, "entries": 40, "logical_digest": "9ad5a3282756630b9e128a16a7a582297dcf31123286e3600ff7a7a11c341061"},
+        {"container_kind": 8, "generation": 0, "entries": 70, "logical_digest": "00d9c62d5047b5148b3af1be74338e6e00ad2211aa21fc88197a1661b3499d8c"},
+        {"container_kind": 9, "generation": 0, "entries": 70, "logical_digest": "847e80b10ab0d2f943cc4441403d3f4eddfd9c3fcf82e1a874bd9e9f54c7eec4"},
+        {"container_kind": 10, "generation": 0, "entries": 70, "logical_digest": "dde30aef2ea44ac85d422938bdafd586db1c01f5f7e3e9c1eab3d13414009655"},
+        {"container_kind": 11, "generation": 0, "entries": 70, "logical_digest": "9a7de73f21dad651d5f9279168ab31c33e2135e6b9269dbc1b3118f7cdc7ac4b"}
+      ],
+      "files": [
+        {"name": "cont_0s0_v00000.dat", "bytes": 10485760, "sha256": "c35b08d6746126a588e0fa1b65596b235380ec23d8b8d4866ca95cda995cd08b"},
+        {"name": "cont_0s0_v00001.dat", "bytes": 10485760, "sha256": "b98cd9b308ac7da4e0726a78ef1c38f5f51b1ee23c9baa7320208eb97d50264d"},
+        {"name": "cont_0s1_v00000.dat", "bytes": 10485760, "sha256": "2103ceec5051b48c74050102a10e733fe0317b6d129b01fe5deb083e0d6aa0d6"},
+        {"name": "cont_0s2_v00000.dat", "bytes": 10485760, "sha256": "f07552cbe4a0a7752a541890ac0c290a16e66bd898efcc38500efd5357422b9e"},
+        {"name": "cont_0s3_v00000.dat", "bytes": 10485760, "sha256": "2d1dbd06906478ba2bade8ed951539a72b02041ab0d83c88b4b3d64177152805"},
+        {"name": "cont_0s4_v00000.dat", "bytes": 10485760, "sha256": "97e31111272d27300ccfcbba42ac47710d7d4b71f17a3081cfe2f6597767c7ab"},
+        {"name": "cont_0s5_v00000.dat", "bytes": 10485760, "sha256": "262fad1c82bbad6632604502c24b530531cc0a8cf852bb44c161d73e851b45c4"},
+        {"name": "cont_0s6_v00000.dat", "bytes": 10485760, "sha256": "72482d14984113f6ef1c90353840cf6227527bdd132cc9562403f9f3eca3b3ce"},
+        {"name": "cont_0s7_v00000.dat", "bytes": 10485760, "sha256": "6bc982517699808cff396882593f2009f9e9c389db75def85e4a0fca3785f23c"},
+        {"name": "cont_1_v00000.dat", "bytes": 10485760, "sha256": "683650876c21b7331d7cc02d563a2e2b712cc00229cc00c31768d1b4746694b9"},
+        {"name": "cont_2_v00000.dat", "bytes": 10485760, "sha256": "78974b8959a8d3dea6a9e99445c042ad5144325d67d3467c8f656b9bba436c95"},
+        {"name": "cont_3_v00000.dat", "bytes": 10485760, "sha256": "8eb4c7ac062df1ef31b26ef625e176baf4be43f9cd6deb3cb09e5f606364d5f8"},
+        {"name": "cont_4_v00000.dat", "bytes": 10485760, "sha256": "e141fc8a1ba715d6242fd1f34f119ca640373b9c431fb40c59fe097926516371"},
+        {"name": "meta_0s0_v00000.dat", "bytes": 100, "sha256": "c696b046ac4888cc0fbbad834272b39b1012b79c4927a9cbeb9b54cd55dde345"},
+        {"name": "meta_0s0_v00001.dat", "bytes": 100, "sha256": "1649a975c33b84ee8f05d5329ebb7f23c122bb7284d14717e4d14595ccf58e58"},
+        {"name": "meta_0s2_v00000.dat", "bytes": 100, "sha256": "3485a9976d3a8846ec3a4a81bbd474149d5452f75dd4fc27c67e0a3913cdb17c"},
+        {"name": "meta_0s3_v00000.dat", "bytes": 100, "sha256": "26a781e6c6696153223a84a53cf29518f46d1e49e1f176f9582d38d29c9b6a17"},
+        {"name": "meta_0s4_v00000.dat", "bytes": 100, "sha256": "282162ed26f84b99007f8c7789e7cd7c5d396c66c18fea57fd13dcfae898deca"},
+        {"name": "meta_0s7_v00000.dat", "bytes": 100, "sha256": "421fa6944f51a505e1491a3b2448e9152f565f96aa7806082e158d7d8304c179"},
+        {"name": "meta_1_v00000.dat", "bytes": 100, "sha256": "df3c5d551820f96e6815a5429ce42c834e771c86aede7760caaf10cd84469fbb"},
+        {"name": "meta_2_v00000.dat", "bytes": 100, "sha256": "54af8245ddc7893681b135ef5ba5dd71b58b0f092da23d012403b01b2ff69fe2"},
+        {"name": "meta_3_v00000.dat", "bytes": 100, "sha256": "77508ef6dcf7b5f1e179f0752e512e3e6ab6a59348a47964c8acdef5dd602209"},
+        {"name": "meta_4_v00000.dat", "bytes": 100, "sha256": "f8fdf7949d0d06ff2888cb002cab9634c964742100ead859a244e09979eec32a"},
+        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "84de41edadcc41a6a8054a379a4cb0c16504bdea3e2fa06b0b8cc337d28912ec"}
+      ]
+    },
+    {
+      "name": "reference-two-generations",
+      "storage_mode": "reference",
+      "entries": 420,
+      "global_logical_digest": "8e5f2f43fb7aec819019097ffc93afbdbf06818001603ec53dee24b195f40c44",
+      "segments": [
+        {"container_kind": 4294967295, "generation": 0, "entries": 210, "logical_digest": "ca6fe03451d1c45f6eaa199897eaaa9ada350aff0ab6ed633baf1db1c731fdfc"},
+        {"container_kind": 4294967295, "generation": 1, "entries": 210, "logical_digest": "9395732be72bc7b116119d2040fdc5cc0384124d0bd57f24c62f26c8fa7b8061"}
+      ],
+      "files": [
+        {"name": "compact_v00000.dat", "bytes": 10485760, "sha256": "322d0b72ae44353132587cd08be84da86c85b028a82aaa63939e9c12185903d0"},
+        {"name": "compact_v00001.dat", "bytes": 10485760, "sha256": "59e828aac86025a55ecda02e5dedbe5a127dded3bbd5e885669fea22896e5ae3"},
+        {"name": "meta_compact_v00000.dat", "bytes": 100, "sha256": "20d6ccdcc2f11565cfda0c13f69fd564daabf9f3d48b63095fea30f177aacc7c"},
+        {"name": "meta_compact_v00001.dat", "bytes": 100, "sha256": "002933537b864199f09fe5265828c3a663b82d10501199cd7b37488920233199"},
+        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "fb9efdf3c9015b12e1b27a2d0481c7b9279e36730cd2c20b108e698988027b74"}
+      ]
+    }
+  ]
+}

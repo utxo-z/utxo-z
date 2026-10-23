@@ -42,11 +42,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 
 #include "detail/durability.hpp"
 #include "detail/merge_sidecar.hpp"
 #include "detail/segment_open.hpp"
+#include "detail/utxo_value.hpp"
 #include "detail/scope_exit.hpp"
 
 namespace fs = std::filesystem;
@@ -64,9 +67,10 @@ std::string unique_path(std::string_view tag) {
 }
 
 utxoz::raw_outpoint make_key(uint64_t n) {
-    utxoz::raw_outpoint key{};
-    std::memcpy(key.data(), &n, sizeof(n));
-    return key;
+    // Every byte varies, as a txid's do. Writing only the low eight and leaving
+    // the rest zero makes distinct keys that all share bytes 24..35 — the only
+    // ones shard_of() reads — so every one of them lands in shard zero.
+    return utxoz::testing::spread_key(n);
 }
 
 std::vector<uint8_t> make_value(size_t size, uint8_t seed) {
@@ -126,15 +130,13 @@ size_t next_identity(std::string const& path, std::string_view prefix) {
     return any ? highest + 1 : 0;
 }
 
-/// Canonical data files of container 0 — the name exactly, not a substring of
-/// it, so a `.dat.building` sitting beside them is not miscounted as one.
+/// Canonical data files of the first container — the name exactly, not a
+/// substring of it, so a `.dat.building` sitting beside them is not miscounted.
+///
+/// Shard zero's, specifically: everything below plants and inspects files of one
+/// container, and shard zero is the one it plants them in.
 size_t count_data_files(std::string const& path) {
-    size_t n = 0;
-    for (auto const& entry : fs::directory_iterator(path)) {
-        auto const name = entry.path().filename().string();
-        if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) ++n;
-    }
-    return n;
+    return utxoz::testing::generations_in_shard(path, 0, 0);
 }
 
 /// Files named exactly `<prefix><NNNNN>.dat`, not merely containing the prefix.
@@ -147,13 +149,10 @@ size_t count_matching_exact(std::string const& path, std::string const& prefix) 
     return n;
 }
 
+/// Metadata records of the same container count_data_files() counts: shard
+/// zero's, named the way the library names them.
 size_t count_meta_files(std::string const& path) {
-    size_t n = 0;
-    for (auto const& entry : fs::directory_iterator(path)) {
-        auto const name = entry.path().filename().string();
-        if (name.rfind("meta_0_v", 0) == 0 && name.ends_with(".dat")) ++n;
-    }
-    return n;
+    return count_matching_exact(path, utxoz::testing::class_meta_prefix(0));
 }
 
 /// Every name the store reserves for work in progress. After a successful
@@ -334,6 +333,11 @@ TEST_CASE("a crash at any barrier of a merge leaves a state reopening can settle
         REQUIRE_FALSE(expected.empty());
         auto const files_before = count_data_files(path);
         REQUIRE(files_before == 3);
+        // The generations the merge will read carry their metadata, and the count
+        // below has to see it: a helper that looked under the wrong name would
+        // count nothing and make the check after recovery hold for any state.
+        auto const meta_before = count_meta_files(path);
+        REQUIRE(meta_before > 0);
 
         die_in_full_mode(path, s.point);
 
@@ -456,7 +460,7 @@ TEST_CASE("a merge refuses to publish over a file that is already there",
     auto const expected = build_mergeable(path, 3);
     REQUIRE_FALSE(expected.empty());
 
-    auto const taken = next_identity(path, "cont_0_v");
+    auto const taken = next_identity(path, utxoz::testing::class_prefix(0));
 
     auto opened = utxoz::full_db::open_for_testing(path);
     REQUIRE(opened);
@@ -466,7 +470,7 @@ TEST_CASE("a merge refuses to publish over a file that is already there",
     // built so the instance does not know about it. Only one instance touches a
     // database at a time, which is why checking the name is free is meaningful —
     // this is what happens when that precondition does not hold.
-    auto const squatter = fmt::format("{}/cont_0_v{:05}.dat", path, taken);
+    auto const squatter = fmt::format("{}/{}", path, utxoz::testing::class_file(0, taken));
     {
         std::ofstream ofs(squatter, std::ios::binary);
         ofs << "not a version file";
@@ -506,7 +510,7 @@ TEST_CASE("a traversal that cannot read a version reports failure, not a short a
     std::vector<std::string> older;
     for (auto const& entry : fs::directory_iterator(path)) {
         auto const name = entry.path().filename().string();
-        if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+        if (name.rfind(utxoz::testing::class_prefix(0), 0) == 0 && name.ends_with(".dat")) older.push_back(name);
     }
     std::ranges::sort(older);
     REQUIRE(older.size() >= 3);
@@ -757,7 +761,7 @@ TEST_CASE("an uncertain merge record stops before the target and does not undo i
         fs::remove_all(path);
         INFO(std::string(reference_mode ? "reference mode" : "full mode"));
 
-        std::string const prefix = reference_mode ? "compact_v" : "cont_0_v";
+        std::string const prefix = reference_mode ? std::string{"compact_v"} : utxoz::testing::class_prefix(0);
 
         if (reference_mode) {
             auto opened = utxoz::reference_db::open_for_testing(path, true);
@@ -853,7 +857,7 @@ TEST_CASE("reopening settles both outcomes of an uncertain merge record",
         REQUIRE_FALSE(expected.empty());
         auto const files_before = count_data_files(path);
 
-        auto const target = next_identity(path, "cont_0_v");
+        auto const target = next_identity(path, utxoz::testing::class_prefix(0));
 
         // A sidecar naming a target that was never published, plus the build it
         // was for — exactly what a crash after the record was named leaves.
@@ -863,10 +867,10 @@ TEST_CASE("reopening settles both outcomes of an uncertain merge record",
         plan.id = utxoz::detail::generate_merge_id().value();
         plan.sources = {0, 1};
         REQUIRE(utxoz::detail::write_merge_sidecar(
-            fmt::format("{}/cont_0_v{:05}.merge", path, target), plan));
+            fmt::format("{}/{}{:05}.merge", path, utxoz::testing::class_prefix(0), target), plan));
 
         {
-            std::ofstream ofs(fmt::format("{}/cont_0_v{:05}.dat.building", path, target),
+            std::ofstream ofs(fmt::format("{}/{}.building", path, utxoz::testing::class_file(0, target)),
                               std::ios::binary);
             ofs << "half a merge";
         }
@@ -893,9 +897,9 @@ TEST_CASE("reopening settles both outcomes of an uncertain merge record",
         REQUIRE_FALSE(expected.empty());
         auto const files_before = count_data_files(path);
 
-        auto const target = next_identity(path, "cont_0_v");
+        auto const target = next_identity(path, utxoz::testing::class_prefix(0));
         {
-            std::ofstream ofs(fmt::format("{}/cont_0_v{:05}.dat.building", path, target),
+            std::ofstream ofs(fmt::format("{}/{}.building", path, utxoz::testing::class_file(0, target)),
                               std::ios::binary);
             ofs << "half a merge";
         }
@@ -958,8 +962,10 @@ std::string sole_sidecar(std::string const& path) {
 std::string target_of(std::string const& sidecar) {
     auto const plan = utxoz::detail::read_merge_sidecar(sidecar);
     REQUIRE(plan);
-    return fmt::format("{}/cont_{}_v{:05}.dat",
-                       fs::path(sidecar).parent_path().string(), plan->container, plan->target);
+    // The record names a slot, not a class, so the file name comes from the same
+    // function the library writes it with.
+    return fmt::format("{}/{}", fs::path(sidecar).parent_path().string(),
+                       utxoz::detail::container_file_name(plan->container, plan->target));
 }
 
 } // anonymous namespace
@@ -1115,8 +1121,8 @@ TEST_CASE("an identity taken between the record and the publication is refused",
     REQUIRE_FALSE(expected.empty());
     auto const files_before = count_data_files(path);
 
-    auto const target = next_identity(path, "cont_0_v");
-    squatter_path = fmt::format("{}/cont_0_v{:05}.dat", path, target);
+    auto const target = next_identity(path, utxoz::testing::class_prefix(0));
+    squatter_path = fmt::format("{}/{}", path, utxoz::testing::class_file(0, target));
 
     scope_exit const disarm([] {
         failpoints::clear();
@@ -1185,8 +1191,8 @@ TEST_CASE("a publication that fails withdraws its record, or stops",
         REQUIRE_FALSE(expected.empty());
         auto const files_before = count_data_files(path);
 
-        auto const target = next_identity(path, "cont_0_v");
-        squatter_path = fmt::format("{}/cont_0_v{:05}.dat", path, target);
+        auto const target = next_identity(path, utxoz::testing::class_prefix(0));
+        squatter_path = fmt::format("{}/{}", path, utxoz::testing::class_file(0, target));
 
         scope_exit const disarm([] {
             failpoints::clear();
@@ -1263,7 +1269,7 @@ TEST_CASE("a target whose name is not durable retires nothing",
         fs::remove_all(path);
         INFO(std::string(reference_mode ? "reference mode" : "full mode"));
 
-        std::string const prefix = reference_mode ? "compact_v" : "cont_0_v";
+        std::string const prefix = reference_mode ? std::string{"compact_v"} : utxoz::testing::class_prefix(0);
 
         if (reference_mode) {
             auto opened = utxoz::reference_db::open_for_testing(path, true);
@@ -1438,7 +1444,7 @@ TEST_CASE("a compaction that cannot reopen its active container says so",
         fs::remove_all(path);
         INFO(std::string(reference_mode ? "reference mode" : "full mode"));
 
-        std::string const prefix = reference_mode ? "compact_v" : "cont_0_v";
+        std::string const prefix = reference_mode ? std::string{"compact_v"} : utxoz::testing::class_prefix(0);
 
         if (reference_mode) {
             auto opened = utxoz::reference_db::open_for_testing(path, true);
@@ -1560,7 +1566,7 @@ TEST_CASE("a truncated version file is refused promptly, not after a long wait",
     std::vector<std::string> older;
     for (auto const& entry : fs::directory_iterator(path)) {
         auto const name = entry.path().filename().string();
-        if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+        if (name.rfind(utxoz::testing::class_prefix(0), 0) == 0 && name.ends_with(".dat")) older.push_back(name);
     }
     std::ranges::sort(older);
     REQUIRE(older.size() >= 3);
@@ -1621,14 +1627,49 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
 
         // A key that lives in an older generation, so resolving it has to walk
         // back through the version the cache will open.
-        auto const witness = expected.front();
-
+        // The witness is read out of the file that will be truncated, rather
+        // than taken from the front of the list and hoped to be in it.
+        //
+        // Two things have to coincide for this case to assert what it says: the
+        // key must be in no active map, so that find() defers, and the resolve
+        // must open the truncated file while looking for it. With one container
+        // both followed from "take an early key, truncate the oldest
+        // generation". With several, an early key is in some shard's some
+        // generation, and truncating a different shard's oldest file leaves the
+        // resolve succeeding — the case then passes while testing nothing.
+        uint32_t witness_shard = 0;
+        std::string oldest;
         std::vector<std::string> older;
-        for (auto const& entry : fs::directory_iterator(path)) {
-            auto const name = entry.path().filename().string();
-            if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+        utxoz::raw_outpoint witness{};
+        bool found_witness = false;
+        for (uint32_t sh = 0; sh != utxoz::testing::shards_of(0) && ! found_witness; ++sh) {
+            std::vector<std::string> gens;
+            for (auto const& entry : fs::directory_iterator(path)) {
+                auto const name = entry.path().filename().string();
+                if (name.rfind(utxoz::testing::class_prefix(0, sh), 0) == 0
+                    && name.ends_with(".dat")) gens.push_back(name);
+            }
+            if (gens.size() < 3) continue;
+            std::ranges::sort(gens);
+
+            auto const file = fs::path(path) / gens.front();
+            auto seg = utxoz::detail::open_existing_segment(file);
+            REQUIRE(seg.has_value());
+            auto map = utxoz::detail::find_single_named<
+                utxoz::detail::utxo_map<utxoz::container_sizes[0]>>(
+                    **seg, utxoz::detail::map_object_name, file);
+            REQUIRE(map.has_value());
+            if ((**map).empty()) continue;
+
+            witness = (**map).begin()->first;
+            witness_shard = sh;
+            oldest = gens.front();
+            older = gens;
+            found_witness = true;
         }
-        std::ranges::sort(older);
+        INFO("witness shard " << witness_shard << " oldest " << oldest
+             << " generations " << older.size());
+        REQUIRE(found_witness);
         REQUIRE(older.size() >= 3);
 
         auto opened = utxoz::full_db::open_for_testing(path);
@@ -1639,7 +1680,7 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
         // it cannot read, and this case is about the cache refusing promptly,
         // which needs an instance to go through the cache with.
         {
-            std::ofstream ofs(fs::path(path) / older.front(), std::ios::binary | std::ios::trunc);
+            std::ofstream ofs(fs::path(path) / oldest, std::ios::binary | std::ios::trunc);
             ofs << "far too small to be a segment";
         }
 
@@ -1769,7 +1810,7 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
     std::vector<std::string> older;
     for (auto const& entry : fs::directory_iterator(path)) {
         auto const name = entry.path().filename().string();
-        if (name.rfind("cont_0_v", 0) == 0 && name.ends_with(".dat")) older.push_back(name);
+        if (name.rfind(utxoz::testing::class_prefix(0), 0) == 0 && name.ends_with(".dat")) older.push_back(name);
     }
     std::ranges::sort(older);
     REQUIRE(older.size() >= 3);

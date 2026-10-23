@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "detail/shard.hpp"
+
 #include "bench_common.hpp"
 
 #include <filesystem>
@@ -13,14 +15,21 @@ namespace bench {
 
 namespace {
 
-// File naming follows: cont_{index}_v{version:05}.dat
+// The files of one class, across every container it has. The names come from
+// the same function the library writes them with, so a class that is split is
+// counted whole rather than reported as empty.
 size_t count_container_files(std::string const& path, size_t container_index) {
-    auto prefix = fmt::format("cont_{}_v", container_index);
+    std::vector<std::string> prefixes;
+    for (uint32_t sh = 0; sh != utxoz::detail::shards_in_class(container_index); ++sh) {
+        prefixes.push_back(
+            utxoz::detail::container_prefix(utxoz::detail::slot_of(container_index, sh)));
+    }
     size_t count = 0;
     for (auto const& entry : fs::directory_iterator(path)) {
         auto name = entry.path().filename().string();
-        if (name.starts_with(prefix) && name.ends_with(".dat")) {
-            ++count;
+        if ( ! name.ends_with(".dat")) continue;
+        for (auto const& prefix : prefixes) {
+            if (name.starts_with(prefix)) { ++count; break; }
         }
     }
     return count;

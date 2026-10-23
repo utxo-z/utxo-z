@@ -345,6 +345,20 @@ struct lookup_stats {
     void reset() noexcept;
     [[nodiscard]] class_lookup_summary get_summary() const noexcept;
 
+    /// Add these counters into a running summary, for a class assembled from
+    /// several shards. Kept separate from get_summary() because the averages
+    /// cannot be averaged: they are quotients, and the caller has to finish the
+    /// division once, over the summed totals. `probe_total` and `distance_total`
+    /// carry those numerators across the calls; pass the same pair each time and
+    /// hand them to finish_summary() at the end.
+    void accumulate_into(class_lookup_summary& out, uint64_t& probe_total,
+                         uint64_t& distance_total) const noexcept;
+
+    /// Turn the summed totals into the two averages. Call once, after the last
+    /// accumulate_into().
+    static void finish_summary(class_lookup_summary& out, uint64_t probe_total,
+                               uint64_t distance_total) noexcept;
+
 private:
     enum field : size_t {
         f_answered_from_active,
@@ -370,6 +384,8 @@ private:
     void record_file_opened(uint64_t, uint64_t) noexcept {}
     void reset() noexcept {}
     [[nodiscard]] class_lookup_summary get_summary() const noexcept { return {}; }
+    void accumulate_into(class_lookup_summary&, uint64_t&, uint64_t&) const noexcept {}
+    static void finish_summary(class_lookup_summary&, uint64_t, uint64_t) noexcept {}
 #endif
 };
 

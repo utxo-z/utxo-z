@@ -213,7 +213,10 @@ trap 'rm -rf "${work}"' EXIT
 # them the compatibility cases fail on the missing files, which would be reported
 # as the format having changed — the one thing this job must never say when it
 # has not looked.
-readonly fixtures="tests/fixtures/epoch1-lp64"
+# The production set: geometry 4, what a 1.0 build writes. The legacy set
+# (geometry 3) is only there to be refused, and the suite needs its path too.
+readonly fixtures="tests/fixtures/geometry4-lp64"
+readonly legacy_fixtures="tests/fixtures/epoch1-lp64"
 if [[ ! -f "${fixtures}/manifest.json" ]]; then
     verdict "NO_EVIDENCE" "not tested" \
         "There are no fixtures at ${fixtures}, so nothing was built and nothing is claimed. This is not a compatibility result."
@@ -322,7 +325,8 @@ fi
 if ! g++ -std=c++23 -O2 -I include -I build/build/Release/include -I src -I tests \
     -DFMT_HEADER_ONLY \
     -DBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u \
-    -DUTXOZ_FIXTURES_DIR="\"$(pwd)/tests/fixtures/epoch1-lp64\"" \
+    -DUTXOZ_FIXTURES_DIR="\"$(pwd)/${fixtures}\"" \
+    -DUTXOZ_LEGACY_FIXTURES_DIR="\"$(pwd)/${legacy_fixtures}\"" \
     -isystem "${headers}" -isystem "${fmt_include}" -isystem "${catch_root}/include" \
     -o "${work}/suite" tests/test_format_compatibility.cpp "${work}"/obj/*.o \
     "${catch_root}/lib/libCatch2Main.a" "${catch_root}/lib/libCatch2.a" -pthread \
@@ -335,7 +339,8 @@ fi
 if ! g++ -std=c++23 -O2 -I include -I build/build/Release/include -I src -I tests \
     -DFMT_HEADER_ONLY \
     -DBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u \
-    -DUTXOZ_FIXTURES_DIR="\"$(pwd)/tests/fixtures/epoch1-lp64\"" \
+    -DUTXOZ_FIXTURES_DIR="\"$(pwd)/${fixtures}\"" \
+    -DUTXOZ_LEGACY_FIXTURES_DIR="\"$(pwd)/${legacy_fixtures}\"" \
     -isystem "${headers}" -isystem "${fmt_include}" \
     -o "${work}/probe" ci/boost_latest_probe.cpp "${work}"/obj/*.o -pthread 2>> "${work}/link.log"; then
     tail -40 "${work}/link.log" >&2

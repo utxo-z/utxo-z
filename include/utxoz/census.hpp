@@ -112,6 +112,10 @@ enum class allocation_method : uint8_t {
  */
 struct generation_census {
     uint64_t generation = 0;
+    /// Which shard of the class this generation belongs to. Generation numbers
+    /// run independently per shard, so a generation is only named unambiguously
+    /// by the pair (class, shard). Always 0 in a class that is not sharded.
+    uint32_t shard = 0;
     bool active = false;         ///< the generation inserts currently go to
 
     // --- exact -------------------------------------------------------------
@@ -164,6 +168,21 @@ struct payload_bucket {
  * the same sense: reference entries are a fixed 12-byte record, so the payload
  * histogram is `not_applicable` rather than empty.
  */
+/**
+ * @brief One shard of one class.
+ *
+ * A shard is a container in its own right: it rotates on its own schedule and
+ * keeps its own generations, so these figures do not divide evenly out of the
+ * class totals. They sum to them.
+ */
+struct shard_census {
+    uint32_t shard = 0;
+    uint64_t entries = 0;
+    uint64_t generations = 0;
+    uint64_t active_generation = 0;
+    uint64_t logical_file_bytes = 0;
+};
+
 struct class_census {
     uint64_t container_class = 0;
     uint64_t container_size = 0;        ///< the size class in bytes; 0 in reference mode
@@ -173,7 +192,19 @@ struct class_census {
 
     uint64_t entries = 0;
     uint64_t generations = 0;
+    /// The newest generation among this class's shards. With one shard that is
+    /// simply its active generation. With several it is a high-water mark and
+    /// not a complete answer: each shard has an active generation of its own,
+    /// and `shards_detail` is the authority.
     uint64_t active_generation = 0;
+
+    /// How many shards this class is split into; 1 for every class but the
+    /// sharded one, which has 8 (fewer or more only in an experimental build).
+    uint32_t shards = 1;
+    /// One entry per shard, left empty when the class has a single shard, so
+    /// that an unsharded build reports exactly what it reported before shards
+    /// existed.
+    std::vector<shard_census> shards_detail;
 
     // Sums over the generations below, in the same three kinds.
     uint64_t entry_payload_bytes = 0;

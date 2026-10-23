@@ -37,8 +37,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include <utxoz/types.hpp>
+
+#include "utxo_value.hpp"
 
 namespace utxoz::detail {
 
@@ -162,6 +165,257 @@ inline constexpr std::array<capacity_entry, container_count> geometry_3_capacity
     {  10_mib,      959,      959, false},
 }};
 inline constexpr capacity_entry geometry_3_reference = {4_gib, 7864319, 7864319, false};
+
+// =============================================================================
+// From a per-class table to a per-slot one
+// =============================================================================
+//
+// A sharded class splits its buckets and its file among its shards. The
+// arithmetic is exact and it is not a coincidence: Boost's ladder is
+// `15·2^k − 1`, and
+//
+//     floor((15·2^k − 1) / 2^m) = 15·2^(k−m) − 1
+//
+// because the subtrahend is a fraction below one. So dividing a certified bucket
+// count by a power-of-two shard count lands on another rung of the same ladder,
+// never between two.
+//
+// What it does NOT divide evenly is the total: N shards of `15·2^(k−m) − 1`
+// buckets come to `15·2^k − N`, which is **N−1 buckets short** of the unsharded
+// count. With shard_count == 8 that is seven buckets, 595 bytes. It is recorded
+// here rather than rounded away, because a figure that looks exact and is not is
+// how a geometry assertion ends up asserting the wrong thing.
+
+/// What happens to a class's file size when the class is split.
+///
+/// The two profiles answer different questions, and sharding does not change
+/// which question each is asking. Production fixes the capacity and takes the
+/// file size that was measured for it, so a shard holding a fraction of the
+/// entries takes that fraction of the file.
+///
+/// Testing fixes the file size at ten megabytes and takes the capacity that
+/// fits. Under `keep` a shard is still ten megabytes and simply holds fewer
+/// entries; under `divide` the class is still ten megabytes and its shards
+/// split it. `keep` is the default because it is the reading that keeps the
+/// profile's sentence true per file, but it has a cost worth naming: the
+/// class's aggregate capacity then *grows* with the shard count, so a suite run
+/// under it never meets the constraint a sharded production class meets.
+/// `divide` is the configuration that does, and
+/// UTXOZ_TESTING_DIVIDE_FILE selects it.
+enum class shard_file_rule {
+    divide,   ///< the shard takes its share of the file (production)
+    keep,     ///< the shard takes the whole file size (testing)
+};
+
+/// The per-shard entry of a class that is split `n` ways.
+[[nodiscard]]
+inline constexpr capacity_entry shard_entry(capacity_entry const& whole, uint32_t n,
+                                            shard_file_rule rule) {
+    return capacity_entry{
+        rule == shard_file_rule::divide ? whole.file_size / n : whole.file_size,
+        whole.capacity / n,
+        whole.bucket_count / n,
+        whole.certified,
+    };
+}
+
+/// Expand a per-class table into the per-slot table the containers are built
+/// from. With shard_count == 1 it is the identity, entry for entry.
+template <size_t N>
+[[nodiscard]]
+inline constexpr auto to_slot_capacity(std::array<capacity_entry, N> const& by_class,
+                                       shard_file_rule rule) {
+    std::array<capacity_entry, shard_count + N - 1> by_slot{};
+    for (uint32_t sh = 0; sh != shard_count; ++sh) {
+        by_slot[sh] = shard_entry(by_class[0], shard_count, rule);
+    }
+    for (size_t cls = 1; cls != N; ++cls) {
+        by_slot[shard_count + cls - 1] = by_class[cls];
+    }
+    return by_slot;
+}
+
+/// Boost's unordered_flat_map lays its elements out in groups of fifteen slots
+/// with one sixteen-byte metadata word per group. So the slots of a map cost
+/// `slots × sizeof(value_type)` plus `16` per group, and nothing here needs to
+/// be measured to know it.
+///
+/// Deliberately **derived rather than measured**. An earlier version of this
+/// file carried `85067·buckets/1000 + 4096`, fitted to `utxoz_sizing` runs on
+/// this machine. The fit was good — it agrees with the expression below to six
+/// digits, because `sizeof(value_type)` here is 84 and `84 + 16/15 = 85.0667` —
+/// but a number obtained by fitting one platform's measurements is not a bound,
+/// and asserting a format invariant against one is asserting that every other
+/// platform's allocator behaves like this one's.
+inline constexpr uint64_t segment_group_slots = 15;
+inline constexpr uint64_t segment_group_metadata_bytes = 16;
+
+/// Room for everything in a segment that is not the map's slots: the segment
+/// manager's own bookkeeping, its named-object index, the stamp, and the
+/// allocator's rounding.
+///
+/// This part is an **allowance, not a derivation**, and the distinction matters
+/// for how much the assertions below are worth. The slot cost above follows from
+/// `sizeof(value_type)` and a documented group layout, so it holds wherever those
+/// hold. The fixed part depends on an allocator's internals, and no expression
+/// here can bound it for every platform. Eight kilobytes is roughly four times
+/// what this machine's segments use, which makes the assertions a cheap sanity
+/// check and not a guarantee.
+///
+/// The guarantee is elsewhere, and deliberately: a file too small for the map it
+/// is asked to hold must fail in a defined way at run time. That is what
+/// `can_insert_safely` and the capacity-exception path are for, and what the
+/// insufficient-space cases test.
+inline constexpr uint64_t segment_fixed_allowance = 8u * 1024u;
+
+/// A **diagnostic** estimate, not a portable bound. See the allowance above for
+/// which half of it is derived and which half is a decision.
+///
+/// Saturating rather than wrapping. The widest rung this ladder reaches is
+/// `15·2^39`, which multiplied by the largest class's 10 240 bytes is about
+/// 8.4·10^16 — comfortable in a 64-bit `size_t` and not in a 32-bit one. Since
+/// this runs in constant expressions, an overflow would be a compile error on
+/// some platforms and a silently small answer on others, and a silently small
+/// answer here says "it fits" about a file that does not. Saturation makes the
+/// wrong answer the conservative one.
+[[nodiscard]] inline constexpr uint64_t segment_bytes_needed(uint64_t slots,
+                                                             uint64_t value_type_bytes) {
+    constexpr auto limit = std::numeric_limits<uint64_t>::max();
+    if (value_type_bytes != 0 && slots > limit / value_type_bytes) return limit;
+    auto const slot_bytes = slots * value_type_bytes;
+
+    auto const groups = slots / segment_group_slots + 1;
+    if (groups > limit / segment_group_metadata_bytes) return limit;
+    auto const group_bytes = groups * segment_group_metadata_bytes;
+
+    if (slot_bytes > limit - group_bytes) return limit;
+    auto const total = slot_bytes + group_bytes;
+    if (total > limit - segment_fixed_allowance) return limit;
+    return total + segment_fixed_allowance;
+}
+
+/// The widest rung of Boost's ladder (`15·2^k − 1`) whose slots fit in `bytes`.
+///
+/// This is how the testing profile picks a capacity under `divide`: the file
+/// size is the fixed quantity and the rung follows from it, which is the same
+/// sentence the unsharded testing profile has always been. Dividing the
+/// certified rung instead would be the production rule wearing the testing
+/// profile's numbers, and at thirty-two shards it does not fit.
+/// The widest rung considered. **A limit of the model, not of the arithmetic**:
+/// `15·2^39` slots of the smallest class is already some seven hundred terabytes,
+/// far past anything this format describes, so searching further would be
+/// answering a question nobody asks. `15 << 40` is perfectly representable in a
+/// 64-bit unsigned — the stop is a choice about scope.
+inline constexpr unsigned widest_rung_exponent = 39;
+
+/// The widest rung of Boost's ladder (`15·2^k − 1`) whose slots fit in `bytes`.
+///
+/// Returns `size_t`, and the conversion is guarded rather than assumed: on a
+/// platform where `size_t` is narrower than 64 bits a rung can exceed it, and a
+/// silent truncation here would answer with a small number that reads as "this
+/// fits" about a file it does not fit in.
+[[nodiscard]] inline constexpr size_t widest_rung_within(uint64_t bytes,
+                                                         uint64_t value_type_bytes) {
+    uint64_t best = 0;
+    for (unsigned k = 1; k <= widest_rung_exponent; ++k) {
+        auto const rung = (uint64_t{15} << k) - 1;
+        if (rung > std::numeric_limits<size_t>::max()) break;
+        if (segment_bytes_needed(rung, value_type_bytes) > bytes) break;
+        best = rung;
+    }
+    return static_cast<size_t>(best);
+}
+
+// The two edges worth pinning: nothing fits in nothing, and the search is
+// bounded by the model rather than by where the shift would misbehave.
+static_assert(widest_rung_within(0, 84) == 0,
+              "no rung fits in no bytes");
+static_assert((uint64_t{15} << widest_rung_exponent) - 1
+                  < std::numeric_limits<uint64_t>::max() / 84,
+              "the widest rung considered must still be multipliable by a class's "
+              "value_type without saturating, or the estimate stops being an estimate");
+
+/// The bytes one slot of the sharded class occupies in the map.
+inline constexpr size_t sharded_value_type_bytes =
+    sizeof(typename utxo_map<container_sizes[0]>::value_type);
+
+/// The two profiles as the containers actually see them: one entry per slot.
+/// Computed once, at compile time, so that nothing rebuilds a table on the way
+/// into a member. With shard_count == 1 each is its per-class table unchanged.
+inline constexpr auto production_slot_capacity =
+    to_slot_capacity(production_capacity, shard_file_rule::divide);
+
+#if defined(UTXOZ_TESTING_DIVIDE_FILE) && UTXOZ_TESTING_DIVIDE_FILE
+inline constexpr bool testing_divides_file = true;
+#else
+inline constexpr bool testing_divides_file = false;
+#endif
+
+/// The testing profile's per-slot table.
+///
+/// Under `keep` the shards each take the whole ten megabytes and the class's
+/// aggregate capacity grows with the shard count. Under `divide` they split one
+/// file, and the rung is re-derived from the share rather than divided out of
+/// the certified one — the testing profile's sentence is "this file size, and
+/// the capacity that fits", and that sentence has to be answered again once the
+/// file is smaller.
+[[nodiscard]] inline constexpr auto make_testing_slot_capacity() {
+    auto by_slot = to_slot_capacity(
+        testing_capacity,
+        testing_divides_file ? shard_file_rule::divide : shard_file_rule::keep);
+    if (testing_divides_file && shard_count > 1) {
+        auto const share = testing_capacity[0].file_size / shard_count;
+        auto const rung = widest_rung_within(share, sharded_value_type_bytes);
+        for (uint32_t sh = 0; sh != shard_count; ++sh) {
+            by_slot[sh] = capacity_entry{share, rung, rung, false};
+        }
+    }
+    return by_slot;
+}
+
+inline constexpr auto testing_slot_capacity = make_testing_slot_capacity();
+
+// Every shard of the sharded class must have room for the slots it will be
+// built with, at every shard count this build admits. Checked against the
+// derived bound above, so this is a statement about the layout rather than
+// about one machine's measurements.
+static_assert(production_slot_capacity[0].file_size
+                  >= segment_bytes_needed(production_slot_capacity[0].bucket_count,
+                                          sharded_value_type_bytes),
+              "a production shard's file is smaller than the slots it is built with");
+static_assert(testing_slot_capacity[0].bucket_count == 0
+                  || testing_slot_capacity[0].file_size
+                         >= segment_bytes_needed(testing_slot_capacity[0].bucket_count,
+                                                 sharded_value_type_bytes),
+              "a testing shard's file is smaller than the slots it is built with");
+static_assert(testing_slot_capacity[0].bucket_count != 0,
+              "the testing profile found no bucket count that fits one shard's share of "
+              "its file; UTXOZ_TESTING_DIVIDE_FILE cannot be used at this shard count");
+
+static_assert(production_slot_capacity.size() == shard_count + container_count - 1,
+              "the per-slot table must have exactly one entry per slot");
+static_assert(shard_count != 1 || production_slot_capacity[0].capacity
+                                  == production_capacity[0].capacity,
+              "with one shard the per-slot table must be the per-class table, entry for entry");
+
+// The ladder property, checked rather than asserted in prose: every shard count
+// this format admits must divide the sharded class onto a real rung.
+static_assert([] {
+    for (uint32_t n : {1u, 2u, 4u, 8u, 16u, 32u}) {
+        auto const per_shard = geometry_3_capacity[0].bucket_count / n;
+        bool on_ladder = false;
+        for (size_t k = 1; k != 40; ++k) {
+            if (per_shard == (size_t{15} << k) - 1) { on_ladder = true; break; }
+        }
+        if ( ! on_ladder) return false;
+    }
+    return true;
+}(), "dividing the sharded class by a shard count must land on Boost's bucket ladder");
+
+// And the shortfall is exactly N-1, which is what the design says it is.
+static_assert(geometry_3_capacity[0].bucket_count
+              - 8 * (geometry_3_capacity[0].bucket_count / 8) == 7,
+              "eight shards lose seven buckets; if this changes the design note is stale");
 
 // =============================================================================
 // When a container rotates

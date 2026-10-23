@@ -52,6 +52,7 @@
 #include "detail/segment_stamp.hpp"
 #include "detail/store_config_io.hpp"
 #include "detail/utxo_value.hpp"
+#include "detail/shard.hpp"
 #include "detail/version_catalog.hpp"
 
 #include "logical_digest.hpp"
@@ -96,17 +97,19 @@ struct segment_record {
 };
 
 /// Walks one version file the way a reader would, and says what it holds.
-template <size_t Index>
+template <size_t Slot>
 std::vector<logical_entry> read_full_segment(fs::path const& file, database_id_t const& id,
                                              uint64_t version) {
     auto opened = open_existing_segment(file);
     if ( ! opened) throw std::runtime_error("cannot open " + file.string());
+    // `Slot` is what the stamp names: a shard of the sharded class has a kind
+    // of its own. The map inside is its class's.
     if (auto const ok = validate_stamp(**opened, file,
-                                       local_identity(id, uint32_t(Index), version));
+                                       local_identity(id, uint32_t(Slot), version));
         ! ok) {
         throw std::runtime_error("stamp refused for " + file.string());
     }
-    auto const found = find_single_named<utxo_map<container_sizes[Index]>>(
+    auto const found = find_single_named<utxo_map<container_sizes[class_of_slot(Slot)]>>(
         **opened, map_object_name, file);
     if ( ! found) throw std::runtime_error("no map in " + file.string());
 
@@ -264,24 +267,35 @@ int main(int argc, char** argv) try {
         f.id = config->database_id;
 
         std::vector<logical_entry> all;
-        for_each_container([&](auto I) {
-            auto const listed = enumerate_versions(dir, fmt::format("cont_{}_v", I.value));
+        // By slot, which is what a segment's stamp and file name say: with
+        // shards, the sharded class is several containers. `container_kind` in
+        // the manifest is the slot, which is the class wherever a class has one
+        // container.
+        for_each_container([&](auto S) {
+            auto const listed = enumerate_versions(dir, container_prefix(S.value));
             if ( ! listed) throw std::runtime_error("cannot list versions");
             for (auto const v : *listed) {
-                auto const file = dir / fmt::format(data_file_format, I.value, v);
-                auto entries = read_full_segment<I.value>(file, f.id, v);
-                f.segments.push_back({uint32_t(I.value), v, entries.size(),
-                                      utxoz::testing::segment_digest(uint32_t(I.value), v, entries)});
+                auto const file = dir / container_file_name(S.value, v);
+                auto entries = read_full_segment<S.value>(file, f.id, v);
+                f.segments.push_back({uint32_t(S.value), v, entries.size(),
+                                      utxoz::testing::segment_digest(uint32_t(S.value), v, entries)});
                 all.insert(all.end(), entries.begin(), entries.end());
             }
-        }, std::make_index_sequence<container_count>{});
+        }, std::make_index_sequence<slot_count>{});
         f.global_digest = utxoz::testing::global_digest(f.mode, all);
 
         // The generator checks its own seam: a fixture that quietly came out
         // with one generation would certify nothing about multi-version reads.
-        auto const c0 = std::ranges::count_if(f.segments, [](auto const& s) { return s.kind == 0; });
-        if (c0 < 2) throw std::runtime_error("container 0 did not rotate; the fixture would be "
-                                             "single-generation and prove less than it claims");
+        // Some container of class 0 - one of its shards, where it has them -
+        // must hold two generations.
+        bool rotated = false;
+        for (size_t slot = 0; slot != slot_count; ++slot) {
+            if (class_of_slot(slot) != 0) continue;
+            rotated = rotated || std::ranges::count_if(f.segments, [&](auto const& s) {
+                return s.kind == slot; }) >= 2;
+        }
+        if ( ! rotated) throw std::runtime_error("container 0 did not rotate; the fixture would be "
+                                                 "single-generation and prove less than it claims");
 
         for (auto const& e : fs::directory_iterator(dir)) {
             if ( ! e.is_regular_file()) continue;

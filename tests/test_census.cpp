@@ -41,6 +41,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/census.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/types.hpp>
@@ -131,12 +133,19 @@ TEST_CASE("the census counts every class and every generation", "[census]") {
     CHECK(report->scope == "physical_stored");
     CHECK(report->storage_mode == "full");
 
-    // Class 0 rotated, so it has two generations and one of them is active.
+    // Class 0 rotated. A class's generations are the sum over its containers, so
+    // the figure to check it against is the directory rather than a constant: it
+    // is two when the class is one container and more when it is several, and
+    // either way it is what is on disk.
     auto const& first = report->classes[0];
-    CHECK(first.generations == 2);
-    CHECK(first.generations_detail.size() == 2);
+    CHECK(first.generations == utxoz::testing::count_class_files(t.dir, 0));
+    CHECK(first.generations_detail.size() == first.generations);
+    // One active generation per container, and the rotation put the class past
+    // its first: exactly one of the shards has two.
     CHECK(std::ranges::count_if(first.generations_detail,
-                                [](auto const& g) { return g.active; }) == 1);
+                                [](auto const& g) { return g.active; })
+          == int64_t(utxoz::testing::shards_of(0)));
+    CHECK(utxoz::testing::generations_reached(t.dir, 0) >= 1);
 
     // Every generation the report describes is one it examined, and the
     // generations of every class come to the files it walked.
@@ -388,7 +397,7 @@ TEST_CASE("a generation that has gone missing fails the census", "[census]") {
     auto db = std::move(*full_db::open_for_testing(t.dir, false));
     REQUIRE(db.census().has_value());   // the control: it works before the damage
 
-    auto const historical = t.dir / fmt::format(detail::data_file_format, 0, 0);
+    auto const historical = t.dir / utxoz::testing::class_file(0, 0);
     REQUIRE(fs::exists(historical));
     fs::remove(historical);
 
@@ -407,7 +416,7 @@ TEST_CASE("a generation that will not open as a segment fails the census", "[cen
 
     // Truncated to nothing the file is still there, and still catalogued, and no
     // longer a segment. The census has to say so rather than skip it.
-    auto const historical = t.dir / fmt::format(detail::data_file_format, 0, 0);
+    auto const historical = t.dir / utxoz::testing::class_file(0, 0);
     REQUIRE(fs::exists(historical));
     {
         std::ofstream out(historical, std::ios::binary | std::ios::trunc);
@@ -449,7 +458,10 @@ TEST_CASE("the JSON parses, is versioned, and separates zero from unavailable",
     CHECK(root.at("report_schema_version").as_int64() == 1);
     CHECK(root.at("scope").as_string() == "physical_stored");
     CHECK(root.at("storage_mode").as_string() == "full");
-    CHECK(root.at("format_identity").as_object().at("geometry_id").as_int64() == 3);
+    // The geometry this build writes, not a constant: a sharded build has an
+    // id of its own and the report must carry that one.
+    CHECK(root.at("format_identity").as_object().at("geometry_id").as_int64()
+          == int64_t(utxoz::detail::geometry_id));
 
     // What was not measured is null and says why. A zero here would be a
     // measurement, and the difference matters most exactly when somebody is
@@ -489,6 +501,44 @@ TEST_CASE("the same state produces the same JSON", "[census]") {
     first->duration_ms = 0;
     second->duration_ms = 0;
     CHECK(to_json(*first) == to_json(*second));
+    db.close();
+}
+
+TEST_CASE("the text census labels each shard's bytes as bytes", "[census][shard]") {
+    // A shard's line reports logical_file_bytes. Labelled "files", the number
+    // reads as a count of files and is off by about seven orders of magnitude.
+    failpoints::scoped_reset const disarm;
+    temp_db t;
+    populate(t.dir);
+
+    auto db = std::move(*full_db::open_for_testing(t.dir, false));
+    auto const report = db.census();
+    REQUIRE(report.has_value());
+    auto const text = to_text(*report);
+    INFO(text);
+
+    auto const& sharded = report->classes[0];
+    if (utxoz::shard_count == 1) {
+        // One shard: the census reports exactly what it reported before shards
+        // existed - no per-shard detail and no per-shard line - and the class's
+        // own block still states its bytes under the label they have.
+        CHECK(sharded.shards == 1);
+        CHECK(sharded.shards_detail.empty());
+        CHECK(text.find("  shard ") == std::string::npos);
+        CHECK(text.find(fmt::format("    logical file size         {}\n", sharded.logical_file_bytes))
+              != std::string::npos);
+        db.close();
+        return;
+    }
+    REQUIRE(sharded.shards_detail.size() == utxoz::testing::shards_of(0));
+    for (auto const& sh : sharded.shards_detail) {
+        REQUIRE(sh.logical_file_bytes > 0);
+        CHECK(text.find(fmt::format("  shard {}: entries {}  generations {}  active v{}  "
+                                    "logical file size {}\n",
+                                    sh.shard, sh.entries, sh.generations, sh.active_generation,
+                                    sh.logical_file_bytes)) != std::string::npos);
+        CHECK(text.find(fmt::format("  files {}\n", sh.logical_file_bytes)) == std::string::npos);
+    }
     db.close();
 }
 
@@ -742,7 +792,7 @@ TEST_CASE("an entry longer than its class fails the census, in both width classe
         if (c.index == 0) one_generation_of<0>(t.dir, c.payload, 6);
         else              one_generation_of<4>(t.dir, c.payload, 6);
 
-        auto const file = t.dir / fmt::format(detail::data_file_format, c.index, 0);
+        auto const file = t.dir / utxoz::testing::class_file(c.index, 0);
         REQUIRE(fs::exists(file));
 
         // The control first: the census passes on the file as written. Without

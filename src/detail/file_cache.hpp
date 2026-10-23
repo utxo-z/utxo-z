@@ -25,6 +25,7 @@
 
 #include "durability.hpp"
 #include "path_display.hpp"
+#include "shard.hpp"
 #include "segment_open.hpp"
 #include "segment_stamp.hpp"
 #include "utxo_value.hpp"
@@ -278,7 +279,10 @@ private:
         if (container_index == reference_sentinel_index) {
             return base_path_ / fmt::format(reference_data_file_format, version);
         }
-        return base_path_ / fmt::format(data_file_format, container_index, version);
+        // By SLOT, not by class: a sharded class has one file per shard and the
+        // cache is keyed the same way. With shard_count == 1 this is the name it
+        // always was.
+        return base_path_ / container_file_name(container_index, version);
     }
 
     void evict_lru() {

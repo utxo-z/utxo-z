@@ -28,6 +28,7 @@ add_executable(utxoz_tests
     test_path_encoding.cpp
     test_named_object_guard.cpp
     test_format_barrier.cpp
+    test_shard_of.cpp
     test_container_selection.cpp
     test_capacity_policy.cpp
     test_sizing_tool.cpp
@@ -39,6 +40,7 @@ add_executable(utxoz_tests
     test_insert_transition.cpp
     test_uniqueness.cpp
     test_lookup_telemetry.cpp
+    test_shard_routing.cpp
     test_open_for_inspection.cpp
 )
 
@@ -73,13 +75,20 @@ target_compile_definitions(utxoz_tests
 # removing the fixtures leaves an already-configured build deciding on what was
 # true when it was first configured — the compatibility cases quietly absent, or
 # quietly still listed, with nothing to say so.
+#
+# Two sets. geometry4-lp64 is what a production build writes and must read back
+# (geometry 4: eight shards). epoch1-lp64 is geometry 3, written by master builds
+# before 1.0, and kept unchanged as the legacy set a production build must refuse.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/geometry4-lp64/manifest.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/epoch1-lp64/manifest.json")
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/epoch1-lp64/manifest.json")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/geometry4-lp64/manifest.json"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/epoch1-lp64/manifest.json")
     target_sources(utxoz_tests PRIVATE test_format_compatibility.cpp)
     target_compile_definitions(utxoz_tests
-        PRIVATE UTXOZ_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/epoch1-lp64")
+        PRIVATE UTXOZ_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/geometry4-lp64"
+                UTXOZ_LEGACY_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/epoch1-lp64")
 else()
     message(STATUS "Format compatibility fixtures absent: those cases are not built")
 endif()

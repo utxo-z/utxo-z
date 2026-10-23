@@ -24,6 +24,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
 #include "support/read_file.hpp"
 
 #ifdef _WIN32
@@ -91,6 +92,7 @@ struct scoped_out {
 } // namespace
 
 TEST_CASE("a manifest that cannot be written is not reported as written", "[generator]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     scoped_out const o("blocked");
     auto const& out = o.dir;
     std::error_code ec;
@@ -115,6 +117,7 @@ TEST_CASE("a manifest that cannot be written is not reported as written", "[gene
 }
 
 TEST_CASE("a manifest is published whole or not at all", "[generator]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     scoped_out const o("clean");
     auto const& out = o.dir;
 
@@ -136,6 +139,7 @@ TEST_CASE("a manifest is published whole or not at all", "[generator]") {
 }
 
 TEST_CASE("the generator refuses a directory that already holds a manifest", "[generator]") {
+    UTXOZ_SKIP_UNLESS_SHIPPED_GEOMETRY();
     scoped_out const o("occupied");
     auto const& out = o.dir;
     std::error_code ec;
