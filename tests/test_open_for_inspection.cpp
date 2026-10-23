@@ -43,6 +43,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/census.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/types.hpp>
@@ -356,7 +358,7 @@ TEST_CASE("a config with no generations is not a database to open", "[open]") {
     // count of zero is also what a walk that looked in the wrong place returns.
     for (size_t i = 0; i < container_sizes.size(); ++i) {
         INFO("container " << i);
-        CHECK_FALSE(fs::exists(t.dir / fmt::format("cont_{}_v{:05}.dat", i, 0)));
+        CHECK_FALSE(fs::exists(t.dir / utxoz::testing::class_file(i, 0)));
     }
     CHECK(contents_besides_the_lock(t.dir) == std::vector<std::string>{"utxoz_config.dat"});
 
@@ -367,7 +369,7 @@ TEST_CASE("a config with no generations is not a database to open", "[open]") {
         REQUIRE(created.has_value());
         created->close();
     }
-    CHECK(fs::exists(t.dir / fmt::format("cont_{}_v{:05}.dat", 0, 0)));
+    CHECK(fs::exists(t.dir / utxoz::testing::class_file(0, 0)));
 }
 
 TEST_CASE("reference: a config with no generations is refused too", "[open]") {
@@ -420,12 +422,12 @@ TEST_CASE("a class with no generations is inspected as zero, and not created",
     std::error_code ec;
     for (auto const& entry : fs::directory_iterator(t.dir)) {
         auto const name = entry.path().filename().string();
-        if (name.rfind(fmt::format("cont_{}_v", emptied), 0) == 0
+        if (name.rfind(utxoz::testing::class_prefix(emptied), 0) == 0
                 || name.rfind(fmt::format("meta_{}_v", emptied), 0) == 0) {
             fs::remove(entry.path(), ec);
         }
     }
-    REQUIRE_FALSE(fs::exists(t.dir / fmt::format("cont_{}_v{:05}.dat", emptied, 0)));
+    REQUIRE_FALSE(fs::exists(t.dir / utxoz::testing::class_file(emptied, 0)));
 
     // Every file, by name and by content, so that "nothing changed" is not the
     // same statement as "nothing was added".
@@ -450,7 +452,9 @@ TEST_CASE("a class with no generations is inspected as zero, and not created",
         CHECK(empty_class.segment_size_bytes == 0);
 
         // And the class that has data is unaffected by its neighbour's absence.
-        CHECK(report->classes[0].generations == 1);
+        // One generation in each of its containers: a class's count is the sum
+        // over its shards, and no rotation has happened here.
+        CHECK(report->classes[0].generations == utxoz::testing::shards_of(0));
         CHECK(report->classes[0].entries == 6);
         CHECK(report->entries == 6);
         db.close();
@@ -458,7 +462,7 @@ TEST_CASE("a class with no generations is inspected as zero, and not created",
 
     // Not one byte moved, and no file appeared.
     auto const after = contents_of(t.dir);
-    CHECK_FALSE(fs::exists(t.dir / fmt::format("cont_{}_v{:05}.dat", emptied, 0)));
+    CHECK_FALSE(fs::exists(t.dir / utxoz::testing::class_file(emptied, 0)));
     for (auto const& [name, digest] : after) {
         INFO("after: " << name);
         auto const was = before.find(name);
@@ -474,5 +478,5 @@ TEST_CASE("a class with no generations is inspected as zero, and not created",
         REQUIRE(created.has_value());
         created->close();
     }
-    CHECK(fs::exists(t.dir / fmt::format("cont_{}_v{:05}.dat", emptied, 0)));
+    CHECK(fs::exists(t.dir / utxoz::testing::class_file(emptied, 0)));
 }

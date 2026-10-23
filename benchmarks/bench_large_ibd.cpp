@@ -4,6 +4,10 @@
 
 #include "bench_common.hpp"
 
+#include "bench_large_limits.hpp"
+
+#include "detail/shard.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -51,7 +55,7 @@ struct timer {
 
 } // anonymous namespace
 
-void run_ibd_simulation() {
+void run_ibd_simulation(large_limits const& limits) {
     fmt::println("{:=^80}", " IBD Simulation (Production Scale) ");
 
     auto ts = std::chrono::high_resolution_clock::now().time_since_epoch().count();
@@ -72,10 +76,10 @@ void run_ibd_simulation() {
     // =========================================================================
     // Parameters
     // =========================================================================
-    constexpr size_t total_inserts      = 50'000'000;
-    constexpr double erase_ratio        = 0.60;
-    constexpr size_t deferred_interval  = 500'000;
-    constexpr size_t progress_interval  = 5'000'000;
+    auto const total_inserts      = limits.ibd_inserts;
+    constexpr double erase_ratio  = 0.60;
+    auto const deferred_interval  = limits.deferred_interval();
+    auto const progress_interval  = limits.progress_interval();
 
     // Pre-create value buffers (avoid per-insert allocation)
     // Distribution from real BCH chain sync at block 930K:
@@ -177,19 +181,19 @@ void run_ibd_simulation() {
     // =========================================================================
     // Phase 4: Find throughput on the resulting database
     // =========================================================================
-    fmt::println("\n--- Phase 4: Find throughput ({:L} lookups) ---", 1'000'000UL);
+    fmt::println("\n--- Phase 4: Find throughput ({:L} lookups) ---", limits.find_lookups);
 
     std::uniform_int_distribution<uint32_t> dist(0, total_inserts - 1);
     t.reset();
     size_t found = 0;
-    for (size_t i = 0; i < 1'000'000; ++i) {
+    for (size_t i = 0; i < limits.find_lookups; ++i) {
         auto key = bench::make_test_key(dist(rng), 0);
         auto result = db.find(key, static_cast<uint32_t>(total_inserts / 1000));
         if (result) ++found;
     }
     double find_s = t.elapsed_s();
     fmt::println("  Find complete: {:.1f}s  ({:.0f} finds/sec, {:.1f}% hits)",
-        find_s, 1'000'000 / find_s, found / 10'000.0);
+        find_s, double(limits.find_lookups) / find_s, found / 10'000.0);
 
     // =========================================================================
     // Summary
@@ -200,16 +204,28 @@ void run_ibd_simulation() {
     fmt::println("  Total time:        {:>10.1f}s", total_s);
     fmt::println("  Insert:            {:>12L}  ({:>10.0f} ops/sec)", total_inserts, total_inserts / insert_s);
     fmt::println("  Erase:             {:>12L}  ({:>10.0f} ops/sec)", keys_to_erase.size(), keys_to_erase.size() / erase_s);
-    fmt::println("  Find (1M random):  {:>12.0f} ops/sec", 1'000'000 / find_s);
+    fmt::println("  Find (1M random):  {:>12.0f} ops/sec", double(limits.find_lookups) / find_s);
     fmt::println("  Live UTXOs:        {:>12L}", db.size());
     fmt::println("  Disk usage:        {:>10.2f} GiB", dir_size_bytes(path) / (1024.0 * 1024.0 * 1024.0));
 
+    // Per class, summed over its containers, and the shard count is printed when
+    // there is more than one: a sharded class has a file per generation per
+    // shard, and the criterion this figure feeds is expressed as 2N + 2.
     for (size_t i = 0; i < utxoz::container_count; ++i) {
-        auto prefix = fmt::format("cont_{}_v", i);
-        size_t file_count = count_files_with_prefix(path, prefix);
+        size_t file_count = 0;
+        auto const shards = utxoz::detail::shards_in_class(i);
+        for (uint32_t sh = 0; sh != shards; ++sh) {
+            file_count += count_files_with_prefix(
+                path, utxoz::detail::container_prefix(utxoz::detail::slot_of(i, sh)));
+        }
         if (file_count > 0) {
-            fmt::println("  Container {} ({:>5}B):  {} file(s)",
-                i, utxoz::container_sizes[i], file_count);
+            if (shards > 1) {
+                fmt::println("  Container {} ({:>5}B):  {} file(s) over {} shards",
+                    i, utxoz::container_sizes[i], file_count, shards);
+            } else {
+                fmt::println("  Container {} ({:>5}B):  {} file(s)",
+                    i, utxoz::container_sizes[i], file_count);
+            }
         }
     }
     fmt::println("{:=^80}\n", "");

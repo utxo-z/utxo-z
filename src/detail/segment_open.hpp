@@ -32,6 +32,7 @@
 #pragma once
 
 #include <algorithm>
+#include <ranges>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -41,6 +42,7 @@
 
 #include <utxoz/types.hpp>
 
+#include "capacity_policy.hpp"
 #include "durability.hpp"
 #include "log.hpp"
 #include "path_display.hpp"
@@ -69,9 +71,19 @@ static_assert(BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC =
 
 /// The smallest version file any configuration in this build creates. Derived
 /// rather than picked, so it follows the sizing constants if they change.
+///
+/// Taken from the **per-slot** tables, not the per-class ones. A sharded class's
+/// container holds a share of its class's file, so the smallest file this build
+/// writes is no longer the smallest class entry — and reading it from the class
+/// table makes this guard reject files the same build had just created. That is
+/// not hypothetical: it is what the divided testing profile hit at eight shards,
+/// where a container is 1 310 720 bytes and the smallest class entry is ten
+/// megabytes. Production happened to be safe only because its shares stay large.
 inline constexpr size_t smallest_configured_file = std::min({
-    std::ranges::min(file_sizes),
-    std::ranges::min(test_file_sizes),
+    std::ranges::min(production_slot_capacity | std::views::transform(
+        [](capacity_entry const& e) { return e.file_size; })),
+    std::ranges::min(testing_slot_capacity | std::views::transform(
+        [](capacity_entry const& e) { return e.file_size; })),
     reference_file_size,
     reference_test_file_size,
 });

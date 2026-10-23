@@ -10,14 +10,21 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cassert>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+
+#include "shard.hpp"
 #include <set>
+#include <span>
 #include <utility>
 #include <variant>
+#include <vector>
 
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/unordered/unordered_flat_set.hpp>
 
 #include <utxoz/aliases.hpp>
@@ -90,6 +97,8 @@ struct database_impl {
     size_t size() const;
 
     result<bool> insert(raw_outpoint const& key, output_data_span value, uint32_t height);
+    insert_batch_result insert_batch(std::span<insert_request const> requests,
+                                     insert_batch_options const& options);
     std::optional<find_result> find(raw_outpoint const& key, uint32_t height) const;
 
     deletion_progress apply_deletes(std::span<deferred_deletion_entry const> requests);
@@ -160,20 +169,50 @@ private:
 
     // Container access
     template<size_t Index> requires (Index < container_count)
-    utxo_map<container_sizes[Index]>& container();
+    utxo_map<container_sizes[Index]>& container(size_t slot);
 
     template<size_t Index> requires (Index < container_count)
-    utxo_map<container_sizes[Index]> const& container() const;
+    utxo_map<container_sizes[Index]> const& container(size_t slot) const;
+
+    /// What a batch worker would otherwise write into state every worker shares.
+    ///
+    /// insert_in_index() touches two members that are not per slot: the entry
+    /// count and the height-range statistics, the latter a hash map that two
+    /// threads cannot both insert into. A worker passes one of these instead and
+    /// the batch folds them in on the calling thread after every worker has
+    /// joined. No lock on the insert path; the sums come out the same.
+    ///
+    /// Sized before the batch writes anything: one row per height range the
+    /// batch can touch, found by binary search in `ranges` (sorted, shared by
+    /// every worker, read only). Counting into it never allocates, so no entry
+    /// can be stored and then lose its count to an allocation that failed.
+    struct insert_accumulator {
+        size_t entries = 0;
+#if UTXOZ_STATISTICS_LEVEL >= 1
+        std::span<uint32_t const> ranges;
+        std::vector<std::array<size_t, container_count>> height_inserts;   // one per range
+
+        void count_height(uint32_t height, size_t index) noexcept {
+            auto const it = std::ranges::lower_bound(ranges, height / height_range_stats::range_size);
+            assert(it != ranges.end() && *it == height / height_range_stats::range_size);
+            ++height_inserts[size_t(it - ranges.begin())][index];
+        }
+#endif
+    };
 
     // Core operations implementation
+    //
+    // `acc` is null for a plain insert(), which writes the shared counters
+    // directly as it always has; a batch worker passes its own.
     template<size_t Index>
-    result<bool> insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height);
+    result<bool> insert_in_index(size_t slot, raw_outpoint const& key, output_data_span value,
+                                 uint32_t height, insert_accumulator* acc = nullptr);
 
     /// Replaces the active generation and records why. Returns rather than
     /// throwing: a rotation that cannot make its file leaves the class with no
     /// active container, which every caller has to be able to hear about.
     template<size_t Index>
-    [[nodiscard]] result<> rotate_for(rotation_cause cause);
+    [[nodiscard]] result<> rotate_for(size_t slot, rotation_cause cause);
 
     [[nodiscard]] result<> reference_rotate_for(rotation_cause cause);
 
@@ -191,16 +230,16 @@ private:
     // as a new empty container, which is the reinterpretation this whole barrier
     // exists to stop.
     template<size_t Index>
-    [[nodiscard]] result<> open_existing_container(size_t version);
+    [[nodiscard]] result<> open_existing_container(size_t slot, size_t version);
 
     template<size_t Index>
-    [[nodiscard]] result<> create_container(size_t version);
+    [[nodiscard]] result<> create_container(size_t slot, size_t version);
 
     template<size_t Index>
-    void close_container();
+    void close_container(size_t slot);
 
     template<size_t Index>
-    void new_version();
+    void new_version(size_t slot);
 
 
     // Safety checks
@@ -215,21 +254,21 @@ private:
     /// seam both refuse before reaching the segment — so the caller must seed it
     /// with `free_bytes_unavailable` and not with zero.
     template<size_t Index>
-    bool can_insert_safely(uint64_t* free_bytes = nullptr) const;
+    bool can_insert_safely(size_t slot, uint64_t* free_bytes = nullptr) const;
 
     template<size_t Index>
     bool can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map,
                                    bip::managed_mapped_file const& segment) const;
 
     template<size_t Index>
-    bool should_rotate() const;
+    bool should_rotate(size_t slot) const;
 
     template<size_t Index>
-    float next_load_factor() const;
+    float next_load_factor(size_t slot) const;
 
     // Compaction
     template<size_t Index>
-    result<> compact_container();
+    result<> compact_container(size_t slot);
 
     // -- Crash-atomic compaction (see merge_sidecar.hpp) ----------------------
 
@@ -271,7 +310,7 @@ private:
     result<> merge_groups(Policy policy);
 
     template<size_t Index>
-    result<> reopen_active_container();
+    result<> reopen_active_container(size_t slot);
     result<> reopen_active_reference_container();
 
     /// True once a merge published its target and could not retire everything
@@ -299,8 +338,25 @@ private:
      */
     std::optional<error_code> integrity_latched_;
 
+    /// Guards the latch's writes on the insert path, which a batch can reach from
+    /// several workers at once: two rotations failing together must not both
+    /// write an optional. The first latch wins, as it effectively always did -
+    /// a latched instance refuses the next insert. Off the hot path: it is only
+    /// taken when something has already failed.
+    std::mutex latch_mutex_;
+
+    void latch_integrity(error_code why) {
+        std::scoped_lock const lock(latch_mutex_);
+        if ( ! integrity_latched_) integrity_latched_ = why;
+    }
+
+    [[nodiscard]] std::optional<error_code> integrity_latch_now() {
+        std::scoped_lock const lock(latch_mutex_);
+        return integrity_latched_;
+    }
+
     /// Why generations were replaced. Present in every build; see rotation_causes.
-    std::array<rotation_causes, container_count> rotation_causes_{};
+    std::array<rotation_causes, detail::slot_count> rotation_causes_{};
     rotation_causes reference_rotation_causes_{};
 
     /// The exclusive claim on the database directory, held for the life of this
@@ -328,7 +384,20 @@ private:
     std::set<std::pair<size_t, size_t>> dirty_versions_;
 
     /// Records that a historical version file was written to.
+    ///
+    /// Locked because a batch rotates several slots at once and each rotation
+    /// records the version it retires. Once per rotation, never per insert. The
+    /// readers - sync() and compaction - run with nothing else in flight, as the
+    /// threading contract requires, so they do not need it.
+    ///
+    /// It allocates a node, and it is called before the retiring generation is
+    /// closed (see new_version). An allocation that fails throws there, with the
+    /// generation still open and nothing recorded yet; the rotation is refused
+    /// and rotate_for latches, so no generation is ever retired without its
+    /// obligation on record.
+    std::mutex dirty_mutex_;
     void note_dirty(size_t container_index, size_t version) {
+        std::scoped_lock const lock(dirty_mutex_);
         dirty_versions_.emplace(container_index, version);
     }
 
@@ -401,7 +470,7 @@ public:
 private:
 
     // Utilities
-    size_t capacity_for(size_t index) const;
+    size_t capacity_for(size_t slot) const;
     size_t capacity_for_reference() const;
 
     size_t get_index_from_size(size_t size) const;
@@ -458,9 +527,10 @@ private:
     /// What a new segment gets: its size and the capacity its map is built with,
     /// together, because they are one decision. Set by which configure() was
     /// called and never derived from anything at run time.
-    std::array<capacity_entry, container_count> capacity_ = production_capacity;
-    std::array<std::unique_ptr<bip::managed_mapped_file>, container_count> segments_;
-    std::array<void*, container_count> containers_{};
+    std::array<capacity_entry, detail::slot_count> capacity_ =
+        detail::production_slot_capacity;
+    std::array<std::unique_ptr<bip::managed_mapped_file>, detail::slot_count> segments_;
+    std::array<void*, detail::slot_count> containers_{};
 
     /// The bucket count each open generation was created or opened with.
     ///
@@ -468,8 +538,8 @@ private:
     /// that fills up gets a new generation, and compaction deals with the cost
     /// later. Comparing against this rather than against the previous insert
     /// catches a growth from any path, not only from the insert that saw it.
-    std::array<rehash_watch, container_count> rehash_watch_{};
-    std::array<size_t, container_count> current_versions_{};
+    std::array<rehash_watch, detail::slot_count> rehash_watch_{};
+    std::array<size_t, detail::slot_count> current_versions_{};
 
     // Reference mode storage
     std::unique_ptr<bip::managed_mapped_file> reference_segment_;
@@ -496,7 +566,7 @@ private:
 
     // The versions each container has, and the metadata describing them.
     // Sparse: version numbers are identities, never positions.
-    std::array<version_catalog, container_count> catalogs_;
+    std::array<version_catalog, detail::slot_count> catalogs_;
     std::unique_ptr<file_cache> file_cache_;
 
     // Serialises resolutions against each other.
@@ -529,9 +599,9 @@ private:
     /// which is 96 KiB for these three sharded counter sets. A subtotal: the
     /// members below hold maps that grow with the data. Figures in
     /// doc/statistics-levels.md.
-    mutable std::array<lookup_stats, container_count> lookup_stats_;
+    mutable std::array<lookup_stats, detail::slot_count> lookup_stats_;
     mutable resolution_stats resolution_stats_;
-    std::array<container_stats, container_count> container_stats_;
+    std::array<container_stats, detail::slot_count> container_stats_;
     height_range_stats height_range_stats_;
     deferred_stats deferred_stats_;
     not_found_stats not_found_stats_;

@@ -50,6 +50,17 @@ struct full_merge_policy {
     using map_type = utxo_map<container_sizes[Index]>;
 
     database_impl& db;
+    /// Which slot this merge operates on. For a class that is not sharded it
+    /// is the class's only slot; for the sharded one it names the shard, and a
+    /// merge never crosses shards.
+    size_t slot;
+
+    /// Spelled out rather than left to aggregate initialisation. Omitting the
+    /// slot there is not an error: it value-initialises to 0, and every class
+    /// would then merge against slot 0's catalogue, capacity and container while
+    /// reading its own entries. That is silent, and it corrupts. With this
+    /// constructor the omission does not compile.
+    full_merge_policy(database_impl& d, size_t s) : db(d), slot(s) {}
 
     [[nodiscard]] size_t index() const;
     [[nodiscard]] size_t file_size() const;

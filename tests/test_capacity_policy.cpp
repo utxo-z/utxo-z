@@ -39,6 +39,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 #include <utxoz/types.hpp>
 
@@ -81,7 +83,7 @@ utxoz::raw_outpoint key_of(uint64_t n) {
 template <size_t Index>
 std::pair<size_t, size_t> generation_of(fs::path const& dir, size_t version) {
     constexpr size_t S = utxoz::container_sizes[Index];
-    auto const file = dir / fmt::format(data_file_format, Index, version);
+    auto const file = dir / utxoz::testing::class_file(Index, version);
     REQUIRE(fs::exists(file));
     auto seg = open_existing_segment(file);
     REQUIRE(seg.has_value());
@@ -98,18 +100,60 @@ constexpr size_t max_versions_scanned = 64;
 /// The ladder as arithmetic, in a type wide enough for every step these tests
 /// name. `bucket_step` returns `size_t`, and the overflow checks below reach past
 /// what a 32-bit `size_t` holds on purpose — the point of them is that
+/// A bucket count small enough that the step above it still fits in one
+/// container's file.
+///
+/// Several cases below force a capacity and then require that Boost can grow
+/// once without running out of segment. That needs two rungs to fit, not one,
+/// and which rungs fit depends on the profile: under the testing profile's
+/// `keep` rule a container is the whole ten megabytes and the historical choice
+/// — step 10, 15 359 — has room above it. Under `divide` at eight shards the
+/// container is an eighth of that, and 15 359 does not fit at all, let alone
+/// with a step to spare.
+///
+/// So the historical value is kept wherever it still holds, and derived only
+/// where it cannot: that way the keep profile and every unsharded build run the
+/// numbers they have always run.
+///
+/// "Room to grow" means room for both tables at once. Boost's rehash allocates
+/// the new table while the old one is still alive, so the segment has to hold
+/// the rung and the one above it together - not merely the one above. An
+/// earlier version checked only the larger, which every profile with slack hid
+/// and the rung-exact profile, whose file is the smallest that holds its rung,
+/// did not.
+[[nodiscard]] constexpr bool both_tables_fit(size_t rung, size_t file) {
+    auto const pair = utxoz::detail::sharded_value_type_bytes;
+    return utxoz::detail::segment_bytes_needed(rung, pair)
+         + utxoz::detail::segment_bytes_needed(next_bucket_step(rung), pair) <= file;
+}
+
+[[nodiscard]] constexpr size_t small_with_room_to_grow() {
+    constexpr size_t historical = 15359;        // step 10
+    auto const file = utxoz::detail::testing_slot_capacity[0].file_size;
+    auto const pair = utxoz::detail::sharded_value_type_bytes;
+    if (both_tables_fit(historical, file)) return historical;
+    // Rungs are 15·2^k − 1, so the one below `r` is (r + 1) / 2 − 1.
+    auto r = utxoz::detail::widest_rung_within(file, pair);
+    while (r > 15 && ! both_tables_fit(r, file)) r = (r + 1) / 2 - 1;
+    return r;
+}
+
 /// `max_entries_for` takes a `uint64_t` and stays exact there. Shifting a
 /// `size_t` by 35 is undefined where `size_t` is 32 bits, so the shift is done in
 /// the wider type and tied to the real one where both can represent the answer.
 constexpr uint64_t wide_bucket_step(unsigned k) { return (uint64_t(15) << k) - 1; }
 static_assert(wide_bucket_step(20) == bucket_step(20));
 
+/// How deep one container's history goes.
+///
+/// Shard zero's, because everything in this file goes there: the tests are about
+/// a container's generations — its bucket count across a rotation, its capacity
+/// guard, its compaction — and a class's containers each have a history of their
+/// own. `key_in_shard` puts the keys there deliberately where it matters;
+/// `key_of` lands them there as well, since it varies only the low eight bytes
+/// and shard_of() reads none of them.
 size_t generations(fs::path const& dir, size_t index) {
-    size_t n = 0;
-    for (size_t v = 0; v < max_versions_scanned; ++v) {
-        if (fs::exists(dir / fmt::format(data_file_format, index, v))) ++n;
-    }
-    return n;
+    return utxoz::testing::generations_in_shard(dir, index, 0);
 }
 
 } // namespace
@@ -373,7 +417,7 @@ TEST_CASE("compaction merges what fits and refuses what would grow the target",
         CHECK(generations(t.dir, index) < files_before);
         CHECK(rehashes_observed.load(std::memory_order_relaxed) == before);
         for (size_t v = 0; v < max_versions_scanned; ++v) {
-            if ( ! fs::exists(t.dir / fmt::format(data_file_format, index, v))) continue;
+            if ( ! fs::exists(t.dir / utxoz::testing::class_file(index, v))) continue;
             auto const [b, entries] = generation_of<index>(t.dir, v);
             INFO("generation " << v << " holds " << entries);
             CHECK(b == buckets);
@@ -405,7 +449,7 @@ TEST_CASE("compaction merges what fits and refuses what would grow the target",
         CHECK(rehashes_observed.load(std::memory_order_relaxed) == before);
         size_t surviving = 0;
         for (size_t v = 0; v < max_versions_scanned; ++v) {
-            if ( ! fs::exists(t.dir / fmt::format(data_file_format, index, v))) continue;
+            if ( ! fs::exists(t.dir / utxoz::testing::class_file(index, v))) continue;
             ++surviving;
             auto const [b, entries] = generation_of<index>(t.dir, v);
             INFO("generation " << v << " holds " << entries);
@@ -434,7 +478,7 @@ TEST_CASE("with room to grow, it is the guard that refuses and not the allocator
     // *can* grow here. What refuses is then the policy, and removing it is
     // visible.
     constexpr size_t index = 0;
-    constexpr size_t small = 15359;                     // step 10
+    constexpr size_t small = small_with_room_to_grow();
     auto const growth = max_size_without_rehash(small); // 13439
     std::vector<uint8_t> const value(utxoz::container_capacities[index], 0x11);
 
@@ -453,7 +497,7 @@ TEST_CASE("with room to grow, it is the guard that refuses and not the allocator
             auto db = std::move(*opened);
             db.close();
         }
-        auto const file = probe.dir / fmt::format(data_file_format, index, 0);
+        auto const file = probe.dir / utxoz::testing::class_file(index, 0);
         REQUIRE(fs::exists(file));
         auto seg = open_existing_segment(file);
         REQUIRE(seg.has_value());
@@ -517,7 +561,7 @@ TEST_CASE("with room to grow, it is the guard that refuses and not the allocator
     // not part of the scenario; what is asserted is that there are none.
     CHECK(rehashes_observed.load(std::memory_order_relaxed) == before);
     for (size_t v = 0; v < max_versions_scanned; ++v) {
-        if ( ! fs::exists(t.dir / fmt::format(data_file_format, index, v))) continue;
+        if ( ! fs::exists(t.dir / utxoz::testing::class_file(index, v))) continue;
         INFO("generation " << v);
         auto const [b, entries] = generation_of<index>(t.dir, v);
         CHECK(b == small);
@@ -544,7 +588,7 @@ TEST_CASE("at the limit, a duplicate is a duplicate and a new key is not",
     // never fill a target on its own. Two do, and a third of one entry decides
     // what is reported.
     constexpr size_t index = 0;
-    constexpr size_t small = 15359;
+    constexpr size_t small = small_with_room_to_grow();
     auto const limit = max_size_without_rehash(small);        // 13439
     auto const per_generation = max_entries_for(small);        // 12767
     REQUIRE(limit > per_generation);
@@ -553,6 +597,12 @@ TEST_CASE("at the limit, a duplicate is a duplicate and a new key is not",
 
     // `last` is the single entry of the third source: either a key the first
     // source already holds, or one nothing holds.
+    // Four generations of one container. Every key has to land in the same shard
+    // for that to be what it builds: spread over the class's containers it would
+    // be four generations of the class, one deep in each, which is a different
+    // shape and not the one the assertions below describe.
+    auto const in_shard = [](uint64_t n) { return utxoz::testing::key_in_shard(index, 0, n); };
+
     auto const build = [&](fs::path const& dir, uint64_t last) {
         failpoints::scoped_reset const disarm;
         failpoints::forced_capacity.store(small, std::memory_order_relaxed);
@@ -564,16 +614,16 @@ TEST_CASE("at the limit, a duplicate is a duplicate and a new key is not",
 
         uint64_t n = 0;
         for (uint64_t i = 0; i < per_generation; ++i) {         // v0, exactly full
-            REQUIRE(db.insert(key_of(++n), value, 800000).has_value());
+            REQUIRE(db.insert(in_shard(++n), value, 800000).has_value());
         }
         failpoints::force_rotations.store(1, std::memory_order_relaxed);
         for (uint64_t i = 0; i < remainder; ++i) {              // v1, the remainder
-            REQUIRE(db.insert(key_of(++n), value, 800000).has_value());
+            REQUIRE(db.insert(in_shard(++n), value, 800000).has_value());
         }
         failpoints::force_rotations.store(1, std::memory_order_relaxed);
-        REQUIRE(db.insert(key_of(last), value, 800001).has_value());   // v2, one entry
+        REQUIRE(db.insert(in_shard(last), value, 800001).has_value());   // v2, one entry
         failpoints::force_rotations.store(1, std::memory_order_relaxed);
-        REQUIRE(db.insert(key_of(1000000), value, 800000).has_value()); // v3, active
+        REQUIRE(db.insert(in_shard(1000000), value, 800000).has_value()); // v3, active
         db.close();
     };
 
@@ -660,7 +710,7 @@ TEST_CASE("at the limit, a duplicate is a duplicate and a new key is not",
 
         // And whatever was merged sits at or below the line, never past it.
         for (size_t v = 0; v < max_versions_scanned; ++v) {
-            if ( ! fs::exists(t.dir / fmt::format(data_file_format, index, v))) continue;
+            if ( ! fs::exists(t.dir / utxoz::testing::class_file(index, v))) continue;
             INFO("generation " << v);
             auto const [b, entries] = generation_of<index>(t.dir, v);
             CHECK(b == small);
@@ -726,7 +776,7 @@ TEST_CASE("a compacted target may sit above the operating threshold, and the nex
     // moment it becomes the active map an insert must make a new generation
     // instead of pushing it towards the growth point.
     constexpr size_t index = 0;
-    constexpr size_t small = 15359;
+    constexpr size_t small = small_with_room_to_grow();
     auto const operating = max_entries_for(small);          // 12767
     auto const growth = max_size_without_rehash(small);     // 13439
     REQUIRE(operating < growth);
@@ -783,7 +833,7 @@ TEST_CASE("a compacted target may sit above the operating threshold, and the nex
     size_t packed_entries = 0;
     bool found_packed = false;
     for (size_t v = 0; v < max_versions_scanned; ++v) {
-        if ( ! fs::exists(t.dir / fmt::format(data_file_format, index, v))) continue;
+        if ( ! fs::exists(t.dir / utxoz::testing::class_file(index, v))) continue;
         auto const [b, entries] = generation_of<index>(t.dir, v);
         CHECK(b == small);
         CHECK(entries <= growth);

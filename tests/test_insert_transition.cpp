@@ -44,6 +44,8 @@
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
 
+#include "shard_paths.hpp"
+
 #include "detail/capacity_policy.hpp"
 #include "detail/durability.hpp"
 #include "detail/file_cache.hpp"
@@ -207,7 +209,7 @@ TEST_CASE("Boost lowers its own growth point as entries are erased", "[transitio
         db.close();
     }
 
-    auto const file = t.dir / fmt::format(detail::data_file_format, index, 0);
+    auto const file = t.dir / utxoz::testing::class_file(index, 0);
     REQUIRE(fs::exists(file));
     auto seg = detail::open_existing_segment(file);
     REQUIRE(seg.has_value());
@@ -426,10 +428,15 @@ namespace {
 
 /// Data files a class has on disk. A rotation that completed leaves one more; a
 /// rotation that did not must leave none.
+/// Every generation the class has, across every shard it is split into. Counting
+/// one shard would answer "how many files does shard zero have", which is a
+/// different question and is not the one any caller here is asking.
 size_t files_for(fs::path const& dir, size_t index) {
     size_t n = 0;
-    for (uint64_t v = 0; v < 64; ++v) {
-        if (fs::exists(dir / fmt::format(detail::data_file_format, index, v))) ++n;
+    for (uint32_t sh = 0; sh != utxoz::testing::shards_of(index); ++sh) {
+        for (uint64_t v = 0; v < 64; ++v) {
+            if (fs::exists(dir / utxoz::testing::class_file(index, v, sh))) ++n;
+        }
     }
     return n;
 }
@@ -465,8 +472,9 @@ TEST_CASE("an allocation that fails rotates once, retries once, and stores one c
     auto db = std::move(*opened);
 
     REQUIRE(db.insert(key_of(1), payload_for(index), 800000).has_value());
+    // One generation in each of the class's containers.
     auto const buckets_before = bucket_counts(db, index);
-    REQUIRE(buckets_before.size() == 1);
+    REQUIRE(buckets_before.size() == utxoz::testing::shards_of(index));
     auto const files_before = files_for(t.dir, index);
 
     auto const key = key_of(0xFA11);
@@ -489,8 +497,10 @@ TEST_CASE("an allocation that fails rotates once, retries once, and stores one c
     CHECK(files_for(t.dir, index) == files_before + 1);
 
     // No map grew: a rotation is not a rehash, and this is the difference.
+    // One more generation than before, in exactly one container: the rotation
+    // happened where the key went, and nowhere else.
     auto const buckets_after = bucket_counts(db, index);
-    REQUIRE(buckets_after.size() == 2);
+    REQUIRE(buckets_after.size() == buckets_before.size() + 1);
     for (auto const b : buckets_after) CHECK(b == buckets_before.front());
 
     // One physical copy of the key that the failed attempt was carrying.
@@ -720,7 +730,7 @@ TEST_CASE("the free-memory probe reports rather than throws", "[transition]") {
         auto db = std::move(*opened);
         db.close();
     }
-    auto const file = t.dir / fmt::format(detail::data_file_format, 0, 0);
+    auto const file = t.dir / utxoz::testing::class_file(0, 0);
     auto seg = detail::open_existing_segment(file);
     REQUIRE(seg.has_value());
 
@@ -1419,7 +1429,7 @@ TEST_CASE("a drifted map rotates before the next insert can grow it", "[transiti
 
     // Drive the drift on the file the store will open next.
     {
-        auto const file = t.dir / fmt::format(detail::data_file_format, index, 0);
+        auto const file = t.dir / utxoz::testing::class_file(index, 0);
         auto seg = detail::open_existing_segment(file);
         REQUIRE(seg.has_value());
         auto found = detail::find_single_named<detail::utxo_map<container_sizes[index]>>(
@@ -1456,9 +1466,11 @@ TEST_CASE("a drifted map rotates before the next insert can grow it", "[transiti
     REQUIRE(opened.has_value());
     auto db = std::move(*opened);
 
+    // One generation per container, and every one of them was created under the
+    // forced capacity — the failpoint names the class, so it reached them all.
     auto const buckets_before = bucket_counts(db, index);
-    REQUIRE(buckets_before.size() == 1);
-    REQUIRE(buckets_before.front() == small);
+    REQUIRE(buckets_before.size() == utxoz::testing::shards_of(index));
+    for (auto const b : buckets_before) REQUIRE(b == small);
 
     // One new key, through the API.
     auto const stored = db.insert(scattered_key(90'000'000), payload_for(index), 800001);
@@ -1472,8 +1484,9 @@ TEST_CASE("a drifted map rotates before the next insert can grow it", "[transiti
     CHECK(stats.rotations_by_cause[index].capacity_exception == 0);
 
     // And nothing grew: every generation still has the capacity it was built with.
+    // One more generation than before, and only in the container that rotated.
     auto const buckets_after = bucket_counts(db, index);
-    REQUIRE(buckets_after.size() == 2);
+    REQUIRE(buckets_after.size() == buckets_before.size() + 1);
     for (auto const b : buckets_after) CHECK(b == small);
     db.close();
 }

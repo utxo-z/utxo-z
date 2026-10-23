@@ -33,6 +33,7 @@ target_include_directories(utxoz_benchmarks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 # Large-scale benchmarks (production file sizes, 2GB containers)
 if(UTXOZ_BUILD_LARGE_BENCHMARKS)
     add_executable(utxoz_benchmarks_large
+        bench_large_limits.hpp
         bench_large_main.cpp
         bench_large_ibd.cpp
         bench_large_ops.cpp
@@ -43,4 +44,32 @@ if(UTXOZ_BUILD_LARGE_BENCHMARKS)
             utxoz::utxoz
             nanobench::nanobench
     )
+
+    # The same internal headers the regular suite needs. `bench_common.hpp`
+    # includes detail/durability.hpp, so this target never compiled without it —
+    # it is only noticed when the option is on, which the project's own build
+    # configuration leaves off.
+    target_include_directories(utxoz_benchmarks_large
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 endif()
+
+# The calibration harness.
+#
+# A separate target from the benchmark suites on purpose: it answers a different
+# question — how well can this host resolve a difference at all — and it must
+# stay small enough to read in one sitting. It uses the public API only.
+add_executable(utxoz_calib calib_stationary.cpp)
+target_link_libraries(utxoz_calib PRIVATE utxoz::utxoz)
+
+# The same question asked where the history is real: a lookup the active
+# containers cannot answer, going through find() -> resolve() as published. A
+# separate file so that calib_stationary.cpp stays byte-for-byte what the
+# accepted A/A confirmation measured.
+add_executable(utxoz_calib_hist calib_historical.cpp)
+target_link_libraries(utxoz_calib_hist PRIVATE utxoz::utxoz)
+
+# Insertion and compaction on a private, verified copy of an image built by
+# utxoz_calib_hist. Mutating, so every run gets its own copy and the source is
+# never written.
+add_executable(utxoz_calib_mut calib_mutation.cpp)
+target_link_libraries(utxoz_calib_mut PRIVATE utxoz::utxoz)

@@ -215,6 +215,23 @@ result<bool> full_db::insert(raw_outpoint const& key, output_data_span value, ui
     return impl_->insert(key, value, height);
 }
 
+insert_batch_result full_db::insert_batch(std::span<insert_request const> requests,
+                                          insert_batch_options const& options) {
+    // A refusal before anything starts: every request is reported, as not
+    // applied, with the reason a single insert would have been given.
+    auto refused = [&](error_code why) {
+        insert_batch_result r;
+        r.outcomes.assign(requests.size(), insert_outcome{});
+        r.not_applied = requests.size();
+        if ( ! requests.empty()) r.error = why;
+        return r;
+    };
+    if (!impl_) return refused(error_code::closed);
+    if (auto const ready = impl_->refuse_if_unusable(); ! ready) return refused(ready.error());
+    if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) return refused(usable.error());
+    return impl_->insert_batch(requests, options);
+}
+
 result<full_find_result> full_db::find(raw_outpoint const& key, uint32_t height) const {
     if (!impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());

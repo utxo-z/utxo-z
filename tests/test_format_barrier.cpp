@@ -47,6 +47,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 
 #include "detail/format_identity.hpp"
@@ -87,7 +89,7 @@ utxoz::raw_outpoint outpoint_of(uint64_t n) {
 }
 
 fs::path config_of(fs::path const& dir) { return dir / "utxoz_config.dat"; }
-fs::path v0_of(fs::path const& dir) { return dir / "cont_0_v00000.dat"; }
+fs::path v0_of(fs::path const& dir) { return dir / utxoz::testing::class_file(0, 0); }
 
 /// A small full-mode database with one version and a handful of entries.
 struct fresh_db {
@@ -287,7 +289,7 @@ TEST_CASE("geometry 2 is refused by name: the capacity policy is part of the geo
     // and a database from before is refused rather than opened and operated with
     // thresholds meant for a different file.
     fresh_db f("cfg_geometry_2");
-    REQUIRE(utxoz::detail::geometry_id == 3);
+    REQUIRE(utxoz::detail::geometry_id != 2);
     rewrite_config(f.dir, [](store_config& c) { c.geometry_id = 2; });
 
     // What the refusal must not do is touch the segments, and that is asked of
@@ -332,7 +334,7 @@ TEST_CASE("geometry 1 is refused by name, not merely as some other geometry",
     // operator will be holding. A test that only moves the number up would stay
     // green if 1 were ever quietly accepted.
     fresh_db f("cfg_geometry_1");
-    REQUIRE(utxoz::detail::geometry_id == 3);
+    REQUIRE(utxoz::detail::geometry_id != 1);
     rewrite_config(f.dir, [](store_config& c) { c.geometry_id = 1; });
 
     // As above: the observable is that no segment was written to.
@@ -351,6 +353,30 @@ TEST_CASE("geometry 1 is refused by name, not merely as some other geometry",
     // And no segment was mapped at all: the counter sits at the only place this
     // store maps an existing segment, so zero here is the ordering itself rather
     // than an inference from it.
+    CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+          == mapped_before);
+}
+
+TEST_CASE("geometry 3, the last one before 1.0, is refused by name", "[format]") {
+    // Geometry 3 is what master wrote between 0.10.0 and 1.0: the same classes
+    // and capacities, with the 48-byte class in one container. Those are
+    // exactly the databases an operator upgrading to 1.0 will hold, and the one
+    // difference - one container where 1.0 has eight - is the kind a reader
+    // would otherwise get wrong silently, looking for keys in the wrong file.
+    fresh_db f("cfg_geometry_3");
+    REQUIRE(utxoz::detail::geometry_id != 3);
+    rewrite_config(f.dir, [](store_config& c) { c.geometry_id = 3; });
+
+    auto const before = contents_of(f.dir);
+    REQUIRE_FALSE(before.empty());
+    auto const mapped_before = utxoz::detail::failpoints::segments_mapped.load(
+        std::memory_order_relaxed);
+
+    auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::geometry_mismatch);
+    CHECK(contents_of(f.dir) == before);
+    CHECK(no_leftovers(f.dir));
     CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
           == mapped_before);
 }
@@ -858,7 +884,7 @@ TEST_CASE("a creation that fails leaves no file to block the retry", "[format][r
             REQUIRE_FALSE(refused.has_value());
 
             // Nothing half-built survives, which is what makes the retry possible.
-            CHECK(count_data_files(dir, "cont_0_v") == 0);
+            CHECK(utxoz::testing::count_class_files(dir, 0) == 0);
 
             p.point->store(false, std::memory_order_relaxed);
             auto db = utxoz::full_db::open_for_testing(dir, false);
@@ -894,7 +920,9 @@ TEST_CASE("a creation that succeeds keeps its file", "[format][rollback]") {
     // The control. Without it the case above would pass just as well against a
     // rollback that fired unconditionally and removed every file it created.
     fresh_db f("rollback_control");
-    CHECK(count_data_files(f.dir, "cont_0_v") == 1);
+    // One generation, in each of the class's containers: creating the database
+    // creates every shard, and the test is that the file it just made survived.
+    CHECK(utxoz::testing::count_class_files(f.dir, 0) == utxoz::testing::shards_of(0));
     CHECK(fs::exists(v0_of(f.dir)));
 
     auto db = utxoz::full_db::open_for_testing(f.dir, false);

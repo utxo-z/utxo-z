@@ -123,6 +123,41 @@ inline constexpr std::array<size_t, 5> test_file_sizes = {10_mib, 10_mib, 10_mib
 inline constexpr size_t container_count = container_sizes.size();
 
 /**
+ * @brief How many shards the 48-byte class is split into.
+ *
+ * PART OF THE PERSISTED FORMAT, not a tuning knob: a key's shard decides which
+ * file holds it, so changing this relocates every entry of that class and
+ * requires a new geometry identity and a rebuilt database.
+ *
+ * **Eight, fixed, in every production build.** It is not configurable: a
+ * consumer that compiled against another value would compute other slots than
+ * the library it calls into, and a database written under one value cannot be
+ * read under another. The value is a product decision for 1.0; the measurements
+ * it was taken on, and what they do not show, are in doc/roadmap-1.0.md.
+ *
+ * Other shard counts exist only for tests and experiments, and only through the
+ * build option UTXOZ_EXPERIMENTAL_SHARD_COUNT. Such a build is marked
+ * experimental (`experimental_build`), writes an experimental geometry id that
+ * no production build accepts, and is not installable or packageable. It is
+ * never a silent alternative to eight.
+ */
+inline constexpr uint32_t production_shard_count = 8;
+
+#if defined(UTXOZ_SHARD_COUNT)
+#error "UTXOZ_SHARD_COUNT was removed in 1.0: production uses 8 shards, fixed. For a test or experiment with another count, build with UTXOZ_EXPERIMENTAL_SHARD_COUNT (never installable)."
+#endif
+
+#if defined(UTXOZ_EXPERIMENTAL_SHARD_COUNT)
+static_assert(UTXOZ_EXPERIMENTAL_SHARD_COUNT != 8,
+              "8 is the production shard count; an experimental build must use another one");
+inline constexpr uint32_t shard_count = UTXOZ_EXPERIMENTAL_SHARD_COUNT;
+inline constexpr bool experimental_build = true;
+#else
+inline constexpr uint32_t shard_count = production_shard_count;
+inline constexpr bool experimental_build = false;
+#endif
+
+/**
  * @brief Storage mode selection
  *
  * - full: Stores complete UTXO output data (scriptPubKey + amount) across 5 size-tiered containers

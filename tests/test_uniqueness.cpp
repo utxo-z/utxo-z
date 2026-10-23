@@ -44,6 +44,10 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <fmt/format.h>
 
+#include "detail/shard.hpp"
+
+#include "shard_paths.hpp"
+
 #include <utxoz/census.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/types.hpp>
@@ -52,7 +56,10 @@
 #include "detail/durability.hpp"
 #include "detail/file_cache.hpp"
 #include "detail/budget_meter.hpp"
+#include "detail/file_metadata_io.hpp"
 #include "detail/distinct_keys.hpp"
+#include "detail/segment_open.hpp"
+#include "detail/utxo_value.hpp"
 
 namespace fs = std::filesystem;
 using namespace utxoz;
@@ -1078,7 +1085,9 @@ TEST_CASE("generations visited is not segment opens", "[unique]") {
     // five active ones are already mapped.
     auto const passes = r->planning_passes + r->data_passes;
     REQUIRE(passes == 2);
-    CHECK(r->generations_visited == passes * (container_count + 1));
+    // Containers, not classes: a sharded class is several containers and a pass
+    // visits each of them, plus the one extra generation this fixture leaves.
+    CHECK(r->generations_visited == passes * (utxoz::detail::slot_count + 1));
     CHECK(opened == passes);
     // Which is the whole point of the name: the visits are six times the opens
     // here, and calling them opens would overstate the I/O by that much.
@@ -1289,7 +1298,7 @@ TEST_CASE("a generation that will not open produces no verdict", "[unique]") {
     auto db = std::move(*full_db::open_for_testing(t.dir, false));
     REQUIRE(db.verify_unique_outpoints().has_value());   // the control
 
-    auto const historical = t.dir / fmt::format(detail::data_file_format, 0, 0);
+    auto const historical = t.dir / utxoz::testing::class_file(0, 0);
     REQUIRE(fs::exists(historical));
     {
         std::ofstream out(historical, std::ios::binary | std::ios::trunc);
@@ -1720,4 +1729,247 @@ TEST_CASE("the tool opens the storage mode it was told to", "[unique]") {
     CHECK(as_full.status == 1);
 }
 
+TEST_CASE("the tool exits 2 when a unique key is in the wrong shard", "[unique][shard][placement]") {
+    if (utxoz::shard_count == 1) {
+        SUCCEED("a class with one shard has no wrong shard to be in");
+        return;
+    }
+
+    failpoints::scoped_reset const disarm;
+    temp_db t;
+
+    // One key per shard, each stored once, and then one of them moved by hand
+    // into a container it does not belong to. Nothing is duplicated: the point
+    // is that a store can be free of duplicates and still be unusable, because
+    // a lookup computes the shard and searches there.
+    auto const native = utxoz::testing::key_in_shard(0, 0, 21);
+    auto const stranger = utxoz::testing::key_in_shard(0, 1, 22);
+    REQUIRE(utxoz::testing::shard_for(0, stranger) == 1);
+
+    {
+        auto db = std::move(*full_db::open_for_testing(t.dir, true));
+        REQUIRE(db.insert(native, payload_for(0), 800000).has_value());
+        db.close();
+    }
+
+    // The name is spelled here rather than asked of the library. An oracle built
+    // by calling the same function the library names its files with would agree
+    // with a wrong implementation as readily as a right one.
+    auto const shard0 = t.dir / "cont_0s0_v00000.dat";
+    REQUIRE(fs::exists(shard0));
+    {
+        auto seg = detail::open_existing_segment(shard0);
+        REQUIRE(seg.has_value());
+        auto found = detail::find_single_named<detail::utxo_map<utxoz::container_sizes[0]>>(
+            **seg, detail::map_object_name, shard0);
+        REQUIRE(found.has_value());
+        detail::utxo_value<utxoz::container_sizes[0]> v{};
+        v.set_data(payload_for(0));
+        REQUIRE((**found).emplace(stranger, v).second);
+    }
+
+    // Run against a copy, so the evidence stays as it was found and the tool is
+    // measured on bytes nothing else is holding open.
+    auto const copy = t.dir.parent_path() / (t.dir.filename().string() + ".placement-copy");
+    std::error_code ec;
+    fs::remove_all(copy, ec);
+    fs::copy(t.dir, copy, fs::copy_options::recursive, ec);
+    REQUIRE_FALSE(ec);
+    fs::remove(copy / ".utxoz.lock", ec);   // a lock from the original is not ours
+
+    auto const run = run_verify_tool(copy, "--json");
+    INFO(run.out);
+
+    // Two. The store holds no duplicate, so the old verdict would have been zero
+    // — which is the contract change this case exists to pin: success now means
+    // unique AND correctly placed.
+    CHECK(run.status == 2);
+
+    auto const parsed = boost::json::parse(run.out, ec);
+    REQUIRE_FALSE(ec);
+    CHECK(parsed.at("unique").as_bool());
+    CHECK_FALSE(parsed.at("placement_correct").as_bool());
+    CHECK(parsed.at("misplaced_entries").as_int64() == 1);
+    CHECK(parsed.at("first_misplaced").at("stored_shard").as_int64() == 0);
+    CHECK(parsed.at("first_misplaced").at("expected_shard").as_int64() == 1);
+
+    // And the text report says both things too, for a person reading it.
+    // --text, because the tool's default is JSON. Passing no argument and
+    // expecting prose got a JSON document that happened not to contain the
+    // phrase, which is a test failing for the wrong reason.
+    auto const text = run_verify_tool(copy, "--text");
+    INFO("text report: [" << text.out << "]");
+    CHECK(text.status == 2);
+    CHECK(text.out.find("WRONG SHARD") != std::string::npos);
+
+    fs::remove_all(copy, ec);
+}
+
 #endif // UTXOZ_VERIFY_TOOL
+
+// =============================================================================
+// Placement: an entry in the wrong shard
+// =============================================================================
+//
+// A separate property from uniqueness, and the one the fourth check exists for.
+// A misplaced entry is not a duplicate — the key appears once — and it is not
+// absent either: it is on disk, in a file nobody will ever search for it in.
+// A lookup computes the shard from the key and goes there, so an entry filed
+// anywhere else is invisible while being present, which is the worst of the two.
+//
+// It cannot be produced through the API, which is the point: the library always
+// files a key where shard_of() says. So the entry is written into the wrong file
+// by hand, the way a bug or a corrupt write would leave it.
+
+TEST_CASE("an entry filed in the wrong shard is reported, and is not a duplicate",
+          "[unique][shard][placement]") {
+    if (utxoz::shard_count == 1) {
+        SUCCEED("a class with one shard has no wrong shard to be in");
+        return;
+    }
+
+    failpoints::scoped_reset const disarm;
+    temp_db t;
+
+    // Belongs in shard 1, and will be put in shard 0.
+    auto const stranger = utxoz::testing::key_in_shard(0, 1, 7);
+    auto const native = utxoz::testing::key_in_shard(0, 0, 3);
+    REQUIRE(utxoz::testing::shard_for(0, stranger) == 1);
+    REQUIRE(utxoz::testing::shard_for(0, native) == 0);
+
+    {
+        auto db = std::move(*full_db::open_for_testing(t.dir, true));
+        REQUIRE(db.insert(native, payload_for(0), 800000).has_value());
+        db.close();
+    }
+
+    {
+        auto const file = t.dir / utxoz::testing::class_file(0, 0, 0);
+        REQUIRE(fs::exists(file));
+        auto seg = detail::open_existing_segment(file);
+        REQUIRE(seg.has_value());
+        auto found = detail::find_single_named<detail::utxo_map<utxoz::container_sizes[0]>>(
+            **seg, detail::map_object_name, file);
+        REQUIRE(found.has_value());
+
+        detail::utxo_value<utxoz::container_sizes[0]> v{};
+        v.set_data(payload_for(0));
+        REQUIRE((**found).emplace(stranger, v).second);
+    }
+
+    auto const r = verify_of(t.dir);
+
+    // Two distinct keys, one copy each: nothing about this is a duplicate.
+    CHECK(r.unique);
+    CHECK(r.physical_entries == 2);
+    CHECK(r.distinct_outpoints == 2);
+    CHECK(r.duplicate_copies == 0);
+
+    // And the placement verdict is the one that fails, naming where the entry is
+    // and where it belongs.
+    CHECK_FALSE(r.placement_correct);
+    CHECK(r.misplaced_entries == 1);
+    CHECK(r.misplaced_first_class == 0);
+    CHECK(r.misplaced_first_stored_shard == 0);
+    CHECK(r.misplaced_first_expected_shard == 1);
+}
+
+// =============================================================================
+// D4: an empty container, its metadata, and what damage looks like beside it
+// =============================================================================
+//
+// Sharding makes empty containers reachable. A metadata record is created when a
+// version first receives an entry, so a container that was opened and never
+// written to has a data file and no metadata — correct, and unreachable while
+// the 48-byte class was one container, because every insert of that class went
+// to it.
+//
+// Three things have to hold for that to be benign rather than merely tolerated:
+// absence must be told from damage, the first insert must create the record, and
+// it must survive a reopen. The record-level half of this is already covered in
+// test_file_metadata_io.cpp; what follows is the database-level half.
+
+TEST_CASE("an empty container has no metadata, and its first insert creates one",
+          "[unique][shard][metadata]") {
+    if (utxoz::shard_count == 1) {
+        SUCCEED("a class of one container never stays empty");
+        return;
+    }
+
+    failpoints::scoped_reset const disarm;
+    temp_db t;
+
+    // Two keys in two different shards, so one container is written to and at
+    // least one other is not.
+    auto const written = utxoz::testing::key_in_shard(0, 0, 11);
+    auto const other_shard = uint32_t{1};
+
+    {
+        auto db = std::move(*full_db::open_for_testing(t.dir, true));
+        REQUIRE(db.insert(written, payload_for(0), 800000).has_value());
+        db.close();
+    }
+
+    // The container that received nothing: its data file is there and its
+    // metadata is not. Spelled with the names rather than a count, so the case
+    // says which file it means.
+    auto const empty_data = t.dir / utxoz::testing::class_file(0, 0, other_shard);
+    auto const empty_meta = t.dir / (utxoz::testing::class_meta_prefix(0, other_shard)
+                                     + "00000.dat");
+    INFO("empty container data: " << empty_data.string());
+    INFO("empty container meta: " << empty_meta.string());
+    REQUIRE(fs::exists(empty_data));
+    CHECK_FALSE(fs::exists(empty_meta));
+
+    // Absence is not damage: reading it reports an ordinary absent record rather
+    // than a corrupt one, and the database opens.
+    {
+        auto const record = utxoz::detail::read_metadata_file(empty_meta);
+        REQUIRE_FALSE(record.has_value());
+        CHECK(record.error() == utxoz::detail::metadata_read_error::absent);
+    }
+
+    // The first insert into that container creates the record, and closing
+    // publishes it.
+    auto const first = utxoz::testing::key_in_shard(0, other_shard, 12);
+    REQUIRE(utxoz::testing::shard_for(0, first) == other_shard);
+    {
+        auto db = std::move(*full_db::open_for_testing(t.dir, false));
+        REQUIRE(db.insert(first, payload_for(0), 800100).has_value());
+        db.close();
+    }
+    CHECK(fs::exists(empty_meta));
+
+    // And it survives the reopen, with both keys still reachable: the point of
+    // the record is the history it describes, so a reopen that lost it would be
+    // the failure this case is looking for.
+    {
+        auto db = std::move(*full_db::open_for_testing(t.dir, false));
+        CHECK(db.find(written, 800200).has_value());
+        CHECK(db.find(first, 800200).has_value());
+        db.close();
+    }
+    CHECK(fs::exists(empty_meta));
+
+    // Damage is told from absence. A truncated record is refused as damage, and
+    // the refusal is a different answer from "there is none".
+    {
+        std::ofstream ofs(empty_meta, std::ios::binary | std::ios::trunc);
+        ofs << "short";
+        ofs.close();
+        auto const record = utxoz::detail::read_metadata_file(empty_meta);
+        REQUIRE_FALSE(record.has_value());
+        CHECK(record.error() != utxoz::detail::metadata_read_error::absent);
+    }
+
+    // A database whose derived metadata is damaged still opens and still finds
+    // its entries: the record describes history, it does not hold it.
+    {
+        auto opened = full_db::open_for_testing(t.dir, false);
+        REQUIRE(opened.has_value());
+        auto db = std::move(*opened);
+        CHECK(db.find(written, 800300).has_value());
+        CHECK(db.find(first, 800300).has_value());
+        db.close();
+    }
+}

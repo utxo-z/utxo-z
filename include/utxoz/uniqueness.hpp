@@ -164,6 +164,21 @@ struct uniqueness_report {
     uint64_t keys_with_multiple_copies = 0;
     uint64_t max_copies_for_one_key = 0;
 
+    // --- placement -----------------------------------------------------------
+    // A key belongs to exactly one shard, the one shard_of() names for it. An
+    // entry stored anywhere else is unreachable: a lookup computes the shard and
+    // searches there, so a misplaced entry is invisible without being absent.
+    // This is a separate property from uniqueness, and it is reported separately:
+    // a store can be perfectly free of duplicates and still be misfiled.
+    bool placement_correct = true;
+    uint64_t misplaced_entries = 0;
+    /// The first misplacement found, so a failure names a file to look at rather
+    /// than only a count. Meaningless while `misplaced_entries` is zero.
+    uint64_t misplaced_first_class = 0;
+    uint64_t misplaced_first_generation = 0;
+    uint32_t misplaced_first_stored_shard = 0;
+    uint32_t misplaced_first_expected_shard = 0;
+
     /// A bounded sample. Empty when `unique`.
     std::vector<duplicate_finding> findings;
     uint64_t findings_omitted = 0;            ///< keys_with_multiple_copies − findings.size()

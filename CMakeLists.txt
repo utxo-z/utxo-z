@@ -94,6 +94,73 @@ else()
 endif()
 message(STATUS "Statistics level: ${UTXOZ_STATISTICS_LEVEL} (${UTXOZ_STATISTICS_LEVEL_VALUE})")
 
+# The number of shards the 48-byte class is split into: eight, fixed. It is a
+# constant in a public header and part of the persisted format, not a build
+# option. UTXOZ_SHARD_COUNT, the option it used to be, is refused rather than
+# ignored, so a build script that still sets it learns that it does nothing.
+if(DEFINED UTXOZ_SHARD_COUNT OR DEFINED CACHE{UTXOZ_SHARD_COUNT})
+    message(FATAL_ERROR
+        "UTXOZ_SHARD_COUNT was removed in 1.0: production uses 8 shards, fixed. "
+        "For a test or an experiment with another count, use "
+        "UTXOZ_EXPERIMENTAL_SHARD_COUNT, which makes the build experimental and "
+        "not installable. (In an existing build directory, remove it from the cache.)")
+endif()
+
+# Tests and experiments only. Any other shard count than eight writes a geometry
+# no production build accepts, and the build is marked experimental: it defines
+# UTXOZ_EXPERIMENTAL_SHARD_COUNT publicly, and it installs nothing, so it cannot
+# become a package by accident.
+set(UTXOZ_EXPERIMENTAL_SHARD_COUNT "" CACHE STRING
+    "Experimental only: another shard count than the production 8 (1, 2, 4, 16, 32). Not installable.")
+if(NOT UTXOZ_EXPERIMENTAL_SHARD_COUNT STREQUAL "")
+    if(NOT UTXOZ_EXPERIMENTAL_SHARD_COUNT MATCHES "^(1|2|4|16|32)$")
+        message(FATAL_ERROR
+            "UTXOZ_EXPERIMENTAL_SHARD_COUNT is '${UTXOZ_EXPERIMENTAL_SHARD_COUNT}'. "
+            "It must be 1, 2, 4, 16 or 32: a power of two no greater than 32, and not "
+            "8, which is the production count and needs no option.")
+    endif()
+    message(STATUS "Shards for the 48-byte class: ${UTXOZ_EXPERIMENTAL_SHARD_COUNT} "
+                   "(EXPERIMENTAL build: experimental geometry, not installable)")
+else()
+    message(STATUS "Shards for the 48-byte class: 8 (production)")
+endif()
+
+# How the testing capacity profile treats a sharded class's file.
+#
+# OFF (the default) keeps ten megabytes per container, which is the reading that
+# keeps the profile's sentence true per file — and which lets the class's
+# aggregate capacity grow with the shard count, so a suite run under it never
+# meets the constraint a sharded production class meets.
+#
+# ON divides the ten megabytes among the shards and re-derives the bucket count
+# from the share. That is the configuration in which capacity, rotation,
+# insufficient-space, compaction, recovery and sizing are actually exercised.
+option(UTXOZ_TESTING_DIVIDE_FILE
+       "Testing profile: split the class's file among its shards" OFF)
+
+# Experimental, testing only, and for comparing shard counts: each shard of the
+# sharded class gets exactly the N=1 rung divided by N, in the smallest file the
+# derived segment bound says holds it. That is what production's `divide` rule
+# gives at every N up to 8; the testing profile's ten megabytes, divided, falls
+# one rung short at N=8 and doubles that class's history. No effect at N=1, and
+# never on the production profile.
+option(UTXOZ_TESTING_RUNG_EXACT
+       "Testing profile (experimental): each shard gets the N=1 rung divided by N" OFF)
+
+if(UTXOZ_TESTING_DIVIDE_FILE AND UTXOZ_TESTING_RUNG_EXACT)
+    message(FATAL_ERROR "UTXOZ_TESTING_DIVIDE_FILE and UTXOZ_TESTING_RUNG_EXACT are two "
+                        "different testing profiles; choose one")
+endif()
+
+if(UTXOZ_TESTING_RUNG_EXACT)
+    message(STATUS "Testing profile: each shard gets the N=1 rung divided by N (experimental)")
+elseif(UTXOZ_TESTING_DIVIDE_FILE)
+    message(STATUS "Testing profile: the class's file is divided among its shards")
+else()
+    message(STATUS "Testing profile: every container keeps the whole file size")
+endif()
+
+
 # Set variables for config.hpp generation
 set(UTXOZ_LOG_CUSTOM OFF)
 set(UTXOZ_LOG_SPDLOG OFF)
@@ -197,6 +264,22 @@ target_compile_definitions(utxoz
 # may link a compiled Boost of their own, and which libraries their linker goes
 # looking for is their decision. This changes no inline function — only that.
 target_compile_definitions(utxoz PRIVATE BOOST_ALL_NO_LIB)
+
+# Public, unlike the two above: this one changes a constant that consumer code
+# sees through <utxoz/types.hpp>.
+if(NOT UTXOZ_EXPERIMENTAL_SHARD_COUNT STREQUAL "")
+    target_compile_definitions(utxoz PUBLIC
+        UTXOZ_EXPERIMENTAL_SHARD_COUNT=${UTXOZ_EXPERIMENTAL_SHARD_COUNT})
+endif()
+
+# Public for the same reason: it changes a constant consumer code sees through
+# the capacity table.
+if(UTXOZ_TESTING_DIVIDE_FILE)
+    target_compile_definitions(utxoz PUBLIC UTXOZ_TESTING_DIVIDE_FILE=1)
+endif()
+if(UTXOZ_TESTING_RUNG_EXACT)
+    target_compile_definitions(utxoz PUBLIC UTXOZ_TESTING_RUNG_EXACT=1)
+endif()
 
 # Log backend configuration (defines are in config.hpp)
 if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
@@ -309,6 +392,18 @@ if(UTXOZ_BUILD_DOCS)
 endif()
 
 # Installation
+#
+# Only a production build installs. An experimental shard count writes a geometry
+# no production build reads, and the testing profiles change what
+# open_for_testing() builds; neither may become a package, so neither installs
+# anything - not the library, not the headers, not the CMake config.
+set(UTXOZ_INSTALLABLE ON)
+if(NOT UTXOZ_EXPERIMENTAL_SHARD_COUNT STREQUAL "" OR UTXOZ_TESTING_DIVIDE_FILE OR UTXOZ_TESTING_RUNG_EXACT)
+    set(UTXOZ_INSTALLABLE OFF)
+    message(STATUS "Not installable: an experimental shard count or a testing profile is set")
+endif()
+
+if(UTXOZ_INSTALLABLE)
 include(GNUInstallDirs)
 
 # Install library
@@ -389,3 +484,4 @@ set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
 
 include(CPack)
+endif()

@@ -37,6 +37,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 #include <utxoz/types.hpp>
 
@@ -89,7 +91,10 @@ std::vector<uint8_t> payload_of(size_t size) {
 template <size_t Index>
 bool key_in_container(fs::path const& dir, utxoz::raw_outpoint const& key) {
     constexpr size_t Size = utxoz::container_sizes[Index];
-    auto const file = dir / fmt::format(utxoz::detail::data_file_format, Index, 0);
+    // The key names its shard, so this looks in the one container that could
+    // hold it. Looking in the class's first file would report a key as missing
+    // whenever it hashed to any other shard.
+    auto const file = dir / utxoz::testing::file_for_key(Index, key, 0);
     if ( ! fs::exists(file)) return false;
 
     auto opened = utxoz::detail::open_existing_segment(file);
@@ -104,7 +109,10 @@ bool key_in_container(fs::path const& dir, utxoz::raw_outpoint const& key) {
 template <size_t Index>
 std::vector<uint8_t> stored_payload(fs::path const& dir, utxoz::raw_outpoint const& key) {
     constexpr size_t Size = utxoz::container_sizes[Index];
-    auto const file = dir / fmt::format(utxoz::detail::data_file_format, Index, 0);
+    // The key names its shard, so this looks in the one container that could
+    // hold it. Looking in the class's first file would report a key as missing
+    // whenever it hashed to any other shard.
+    auto const file = dir / utxoz::testing::file_for_key(Index, key, 0);
     auto opened = utxoz::detail::open_existing_segment(file);
     REQUIRE(opened.has_value());
     auto const found = utxoz::detail::find_single_named<utxoz::detail::utxo_map<Size>>(

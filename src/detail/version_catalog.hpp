@@ -34,6 +34,7 @@
 #include <utxoz/types.hpp>
 
 #include "file_metadata.hpp"
+#include "map_room.hpp"
 #include "path_display.hpp"
 
 namespace utxoz::detail {
@@ -132,6 +133,13 @@ public:
     file_metadata* find_metadata(size_t version) {
         auto const it = metadata_.find(version);
         return it == metadata_.end() ? nullptr : &it->second;
+    }
+
+    /// Makes sure `metadata(version)` will not allocate: room for its record if
+    /// there is none yet. Creates no record - an absent one means "unknown",
+    /// and only an insert may turn it into a description. May throw.
+    void make_room_for_metadata(size_t version) {
+        if ( ! metadata_.contains(version)) make_room(metadata_, 1);
     }
 
     void erase_metadata(size_t version) { metadata_.erase(version); }

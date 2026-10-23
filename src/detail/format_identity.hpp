@@ -244,17 +244,87 @@ static_assert(sizeof(segment_manager_t) > 0,
 ///    1340 MiB, chosen by measurement rather than by a bisection that read
 ///    `bad_alloc` as an answer, and sized so that a growth cannot fit.
 ///
-/// Everything before 3 is refused with `geometry_mismatch` and has to be rebuilt.
 /// There is no migrator, and there will not be one: a database's container
 /// assignment and its capacity are decided when it is written.
-inline constexpr uint32_t geometry_id = 3;
+///
+/// 4: 1.0. The 48-byte class split into eight shards, each a container of its own
+///    with one eighth of the class's capacity (1 966 079 buckets) in one eighth
+///    of its file (167.5 MiB). The other classes are those of geometry 3,
+///    unchanged. Fixed: eight is the production shard count, not an option.
+///
+/// Everything before 4 is refused with `geometry_mismatch` and has to be rebuilt.
+/// Geometry 3 never shipped in a release; it is what a master build between
+/// 0.10.0 and 1.0 wrote. A database from 0.10.0 or earlier carries no identity
+/// at all and is refused before this check, as `migration_required`.
+///
+/// Sharding is part of the geometry, not a tuning knob laid over it. Splitting a
+/// class into N shards divides that class's per-container capacity by N and
+/// changes how many containers exist, so a store written at one shard count
+/// cannot be read at another: the same key resolves to a different container.
+///
+/// Builds with UTXOZ_EXPERIMENTAL_SHARD_COUNT write ids in the 0x80000000
+/// namespace, reserved for geometries that are being measured and are not
+/// promised to anybody - one per shard count, and none equal to a production id.
+/// N=1 included: an experimental unsharded build does not write geometry 3, so it
+/// cannot produce a database that looks like one from before 1.0.
+inline constexpr uint32_t production_geometry_id = 4;
 
-static_assert(geometry_id != 3 || (production_capacity == geometry_3_capacity
-                                   && production_reference == geometry_3_reference),
-              "geometry 3 is a capacity policy as well as a set of classes. The whole "
-              "table is compared, not a list of fields somebody chose: a segment size, a "
-              "capacity or a bucket count that moves is a different geometry and needs a "
-              "new id");
+[[nodiscard]] inline constexpr uint32_t experimental_geometry_id_for_shards(uint32_t shards) noexcept {
+    switch (shards) {
+        case 1:  return 0x8000000F;
+        case 2:  return 0x80000010;
+        case 4:  return 0x80000011;
+        case 16: return 0x80000013;
+        case 32: return 0x80000014;
+        default: return 0;   // 8 is production; anything else valid_shard_count() refused
+    }
+}
+
+inline constexpr uint32_t geometry_id = experimental_build
+    ? experimental_geometry_id_for_shards(shard_count)
+    : production_geometry_id;
+
+static_assert(geometry_id != 0,
+              "every shard count this build accepts must name a geometry id; a count that "
+              "reaches here without one would stamp 0 and let two incompatible layouts open "
+              "each other");
+static_assert(experimental_build == ((geometry_id & 0x80000000u) != 0),
+              "a production build writes a production id and an experimental build an "
+              "experimental one; never the other way round");
+static_assert(experimental_build || shard_count == production_shard_count,
+              "a production build has the production shard count");
+
+/// Geometry 4, written down whole: eight shards of the 48-byte class, then the
+/// other four classes. Compared entry for entry with what the build derives, so
+/// any change to the classes, the capacities, the file sizes or the shard count
+/// stops the build until it gets a new id.
+inline constexpr std::array<capacity_entry, 12> geometry_4_slot_capacity = {{
+    {1340_mib / 8, 1966079, 1966079, true}, {1340_mib / 8, 1966079, 1966079, true},
+    {1340_mib / 8, 1966079, 1966079, true}, {1340_mib / 8, 1966079, 1966079, true},
+    {1340_mib / 8, 1966079, 1966079, true}, {1340_mib / 8, 1966079, 1966079, true},
+    {1340_mib / 8, 1966079, 1966079, true}, {1340_mib / 8, 1966079, 1966079, true},
+    { 500_mib,  3932159,  3932159, false},
+    {   1_gib,  3932159,  3932159, false},
+    {  50_mib,   122879,   122879, false},
+    {  10_mib,      959,      959, false},
+}};
+
+[[nodiscard]] inline constexpr bool production_slots_are_geometry_4() noexcept {
+    if constexpr (shard_count != production_shard_count) {
+        return false;
+    } else {
+        for (size_t i = 0; i != geometry_4_slot_capacity.size(); ++i) {
+            if ( ! (production_slot_capacity[i] == geometry_4_slot_capacity[i])) return false;
+        }
+        return production_capacity == geometry_3_capacity
+            && production_reference == geometry_3_reference;
+    }
+}
+
+static_assert(experimental_build || production_slots_are_geometry_4(),
+              "geometry 4 is eight shards of geometry 3's 48-byte class and geometry 3's "
+              "other classes, entry for entry. A segment size, a capacity, a bucket count or "
+              "a shard count that moves is a different geometry and needs a new id");
 
 static_assert(container_sizes == std::array<size_t, 5>{48, 96, 128, 256, 10240},
               "the container geometry changed; bump geometry_id and update this assertion, "
