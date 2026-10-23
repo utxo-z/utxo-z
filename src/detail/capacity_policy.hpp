@@ -351,6 +351,22 @@ inline constexpr bool testing_divides_file = true;
 inline constexpr bool testing_divides_file = false;
 #endif
 
+#if defined(UTXOZ_TESTING_RUNG_EXACT) && UTXOZ_TESTING_RUNG_EXACT
+inline constexpr bool testing_rung_exact = true;
+#else
+inline constexpr bool testing_rung_exact = false;
+#endif
+
+static_assert( ! (testing_divides_file && testing_rung_exact),
+              "UTXOZ_TESTING_DIVIDE_FILE and UTXOZ_TESTING_RUNG_EXACT are two different "
+              "testing profiles; a build gets one");
+
+/// The rung a shard gets under UTXOZ_TESTING_RUNG_EXACT: the N=1 rung divided by
+/// N. On Boost's ladder by construction, since the N=1 rung is `15·2^k − 1` and
+/// N is a power of two.
+inline constexpr size_t rung_exact_bucket_count =
+    (testing_capacity[0].bucket_count + 1) / shard_count - 1;
+
 /// The testing profile's per-slot table.
 ///
 /// Under `keep` the shards each take the whole ten megabytes and the class's
@@ -368,6 +384,17 @@ inline constexpr bool testing_divides_file = false;
         auto const rung = widest_rung_within(share, sharded_value_type_bytes);
         for (uint32_t sh = 0; sh != shard_count; ++sh) {
             by_slot[sh] = capacity_entry{share, rung, rung, false};
+        }
+    }
+    // Experimental: the N=1 rung divided by N, in the smallest file the derived
+    // bound says holds it. The file is computed from the rung, not the other way
+    // round, so no shard count loses a rung to the rounding of a fixed size.
+    if (testing_rung_exact && shard_count > 1) {
+        auto const rung = rung_exact_bucket_count;
+        auto const file = static_cast<size_t>(
+            segment_bytes_needed(rung, sharded_value_type_bytes));
+        for (uint32_t sh = 0; sh != shard_count; ++sh) {
+            by_slot[sh] = capacity_entry{file, rung, rung, false};
         }
     }
     return by_slot;
@@ -391,6 +418,25 @@ static_assert(testing_slot_capacity[0].bucket_count == 0
 static_assert(testing_slot_capacity[0].bucket_count != 0,
               "the testing profile found no bucket count that fits one shard's share of "
               "its file; UTXOZ_TESTING_DIVIDE_FILE cannot be used at this shard count");
+
+// The rung-exact profile, checked in both directions against the same derived
+// bound: the rung is on the ladder, the file holds it, and it is the widest rung
+// that file holds - so the file is the smallest for that rung, not merely one
+// that happens to fit.
+static_assert( ! testing_rung_exact || shard_count == 1 || [] {
+    auto const rung = rung_exact_bucket_count;
+    if ((rung + 1) % 15 != 0) return false;
+    auto const groups = (rung + 1) / 15;
+    if ((groups & (groups - 1)) != 0) return false;
+    auto const& e = testing_slot_capacity[0];
+    return e.bucket_count == rung
+        && e.file_size >= segment_bytes_needed(rung, sharded_value_type_bytes)
+        && widest_rung_within(e.file_size, sharded_value_type_bytes) == rung;
+}(), "the rung-exact testing profile must give each shard the N=1 rung divided by N, "
+     "in the smallest file that holds it");
+static_assert( ! testing_rung_exact || shard_count != 1
+                   || testing_slot_capacity[0] == testing_capacity[0],
+              "at N=1 the rung-exact profile must be the testing profile, unchanged");
 
 static_assert(production_slot_capacity.size() == shard_count + container_count - 1,
               "the per-slot table must have exactly one entry per slot");

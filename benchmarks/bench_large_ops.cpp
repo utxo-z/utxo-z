@@ -4,6 +4,11 @@
 
 #include "bench_common.hpp"
 
+#include "bench_large_limits.hpp"
+#include <string>
+#include <vector>
+#include <cstdlib>
+
 #include <chrono>
 #include <filesystem>
 #include <random>
@@ -51,21 +56,16 @@ struct LargeBenchFixture {
     std::string path;
 };
 
-// ~15M entries fills container 0 to ~70% of a 2GB file (one generation)
-constexpr size_t single_gen_entries = 15'000'000;
-
-// ~25M entries triggers file rotation in container 0 (~20M per 2GB file)
-constexpr size_t multi_gen_entries = 25'000'000;
-
 } // anonymous namespace
 
-void run_large_ops(ankerl::nanobench::Bench& bench) {
+void run_large_ops(ankerl::nanobench::Bench& bench, large_limits const& limits) {
     fmt::println("{:=^80}", " Large-Scale Operation Benchmarks ");
 
     // =========================================================================
     // Fixture 1: Single generation (~15M P2PKH entries in one 2GB file)
     // =========================================================================
     {
+        auto const single_gen_entries = limits.single_gen_entries;
         fmt::println("\n  Populating single-generation fixture ({:L} entries)...", single_gen_entries);
         auto t0 = std::chrono::high_resolution_clock::now();
         LargeBenchFixture f;
@@ -90,12 +90,43 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
             ankerl::nanobench::doNotOptimizeAway(f.db->insert(key, value, 500));
         });
 
-        // Erase — sequential from the beginning (all keys in latest version)
-        uint32_t next_erase = 0;
-        bench.run("erase from 2GB map", [&] {
-            auto key = bench::make_test_key(next_erase++, 0);
-            ankerl::nanobench::doNotOptimizeAway(f.db->erase(key, 500));
-        });
+        // Deletion.
+        //
+        // DIAGNOSTIC, and not usable as an equivalence gate. `erase` per key is
+        // gone; `apply_deletes` takes a batch and answers with what it applied,
+        // what it proved absent and what is still owed. Repeating one call under
+        // nanobench would delete already-deleted keys, which move from `erased`
+        // to `absent` — a different operation each epoch, so the dispersion
+        // would describe the fixture's decay and not the code's cost.
+        //
+        // So it is timed once over a prepared batch, and the outcome is checked:
+        // a figure for an operation that half failed is worse than no figure.
+        {
+            size_t const batch_size = std::min(single_gen_entries, limits.delete_batch);
+            std::vector<utxoz::deferred_deletion_entry> batch;
+            batch.reserve(batch_size);
+            for (size_t i = 0; i < batch_size; ++i) {
+                batch.emplace_back(bench::make_test_key(static_cast<uint32_t>(i), 0), 500);
+            }
+
+            auto const t_start = std::chrono::high_resolution_clock::now();
+            auto const progress = f.db->apply_deletes(batch);
+            auto const t_end = std::chrono::high_resolution_clock::now();
+            auto const seconds = std::chrono::duration<double>(t_end - t_start).count();
+
+            bool const clean = ! progress.error.has_value()
+                               && progress.unresolved.empty()
+                               && progress.absent.empty()
+                               && progress.erased.size() == batch_size;
+            fmt::println("  apply_deletes over {:L} keys: {:.1f} ns/entry  "
+                         "[erased {:L}, absent {:L}, unresolved {:L}, error {}]  {}",
+                         batch_size, seconds * 1e9 / double(batch_size),
+                         progress.erased.size(), progress.absent.size(),
+                         progress.unresolved.size(),
+                         progress.error.has_value()
+                             ? std::to_string(static_cast<int>(*progress.error)) : "none",
+                         clean ? "diagnostic" : "DIAGNOSTIC, AND THE BATCH DID NOT COMPLETE");
+        }
     }
     fmt::println("");
 
@@ -103,6 +134,7 @@ void run_large_ops(ankerl::nanobench::Bench& bench) {
     // Fixture 2: Multiple generations (~25M entries, file rotation triggered)
     // =========================================================================
     {
+        auto const multi_gen_entries = limits.multi_gen_entries;
         fmt::println("  Populating multi-generation fixture ({:L} entries)...", multi_gen_entries);
         fmt::println("  (triggers file rotation past 2GB boundary)");
         auto t0 = std::chrono::high_resolution_clock::now();
