@@ -41,6 +41,7 @@ add_executable(utxoz_tests
     test_uniqueness.cpp
     test_lookup_telemetry.cpp
     test_shard_routing.cpp
+    test_insert_batch.cpp
     test_open_for_inspection.cpp
 )
 
@@ -188,3 +189,13 @@ else()
 endif()
 message(STATUS "Per-test timeout: ${UTXOZ_TEST_TIMEOUT}s")
 catch_discover_tests(utxoz_tests PROPERTIES TIMEOUT ${UTXOZ_TEST_TIMEOUT})
+
+# insert_batch's allocation test replaces operator new for the whole program, so
+# it is a program of its own; the main suite keeps the default allocator.
+add_executable(utxoz_batch_alloc_tests test_batch_allocation.cpp)
+target_link_libraries(utxoz_batch_alloc_tests PRIVATE utxoz::utxoz Catch2::Catch2WithMain)
+target_include_directories(utxoz_batch_alloc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(utxoz_batch_alloc_tests
+    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
+            BOOST_ALL_NO_LIB)
+catch_discover_tests(utxoz_batch_alloc_tests PROPERTIES TIMEOUT ${UTXOZ_TEST_TIMEOUT})

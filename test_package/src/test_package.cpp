@@ -114,9 +114,24 @@ int main() {
             return EXIT_FAILURE;
         }
 
+        // insert_batch links and runs, with as many workers as there are shards.
+        std::array<utxoz::insert_request, 16> requests{};
+        for (size_t i = 0; i != requests.size(); ++i) {
+            utxoz::raw_outpoint k{};
+            k[0] = 3;
+            k[1] = uint8_t(i);
+            k[24] = uint8_t(i * 37);
+            requests[i] = {k, utxoz::output_data_span{value}, 300};
+        }
+        auto const batch = db.insert_batch(requests, {.workers = 8});
+        if (batch.error || batch.inserted != requests.size()) {
+            std::cout << "full_db: insert_batch failed\n";
+            return EXIT_FAILURE;
+        }
+
         db.close();
         std::filesystem::remove_all(path);
-        std::cout << "full_db: ok (8 shards, geometry 4)\n";
+        std::cout << "full_db: ok (8 shards, geometry 4, insert_batch)\n";
     }
 
     {

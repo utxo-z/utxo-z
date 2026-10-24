@@ -347,6 +347,36 @@ struct failpoints {
     /// about real randomness to know what it should find. Zero means "draw one".
     static inline std::atomic<uint64_t> forced_merge_id{0};
 
+    /// Makes insert_batch throw `std::bad_alloc` at the end of its preparation:
+    /// after every allocation it makes up front, before the first request is
+    /// attempted. Stands for any of those allocations failing.
+    static inline std::atomic<bool> fail_batch_prepare{false};
+
+    /// Marks the code that must not allocate, for a test that checks it does
+    /// not.
+    ///
+    /// Armed, a `no_allocation_region` sets a flag on its own thread for as long
+    /// as it lives; a test binary that replaces `operator new` reads the flag and
+    /// fails any allocation made under it. Disarmed, entering a region is one
+    /// relaxed load and sets nothing. The library never reads the flag itself.
+    static inline std::atomic<bool> watch_no_allocation{false};
+    static inline thread_local bool in_no_allocation_region = false;
+
+    class no_allocation_region {
+    public:
+        no_allocation_region() noexcept
+            : armed_(watch_no_allocation.load(std::memory_order_relaxed))
+            , was_(in_no_allocation_region) {
+            if (armed_) in_no_allocation_region = true;
+        }
+        ~no_allocation_region() { if (armed_) in_no_allocation_region = was_; }
+        no_allocation_region(no_allocation_region const&) = delete;
+        no_allocation_region& operator=(no_allocation_region const&) = delete;
+    private:
+        bool armed_;
+        bool was_;
+    };
+
     static void run_before_target_publish() {
         if (auto* hook = before_target_publish.load(std::memory_order_relaxed)) hook();
     }
@@ -396,6 +426,8 @@ struct failpoints {
         force_database_id.store(false, std::memory_order_relaxed);
         delete_config_after_claim.store(false, std::memory_order_relaxed);
         fail_segment_open_after.store(0, std::memory_order_relaxed);
+        fail_batch_prepare.store(false, std::memory_order_relaxed);
+        watch_no_allocation.store(false, std::memory_order_relaxed);
         forced_database_id.fill(0);
     }
 
@@ -404,11 +436,18 @@ struct failpoints {
     /// Both size-class and reference inserts consult this, and the decrement has
     /// to happen exactly once per rotation granted — two copies of that is two
     /// places for the counter to stop being consumed.
+    ///
+    /// A compare-and-swap rather than a load and a store: a batch rotates from
+    /// several workers, and two of them must not both take the last one.
     static bool consume_forced_rotation() noexcept {
         auto pending = force_rotations.load(std::memory_order_relaxed);
-        if (pending == 0) return false;
-        force_rotations.store(pending - 1, std::memory_order_relaxed);
-        return true;
+        while (pending != 0) {
+            if (force_rotations.compare_exchange_weak(pending, pending - 1,
+                                                      std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Disarms every seam when it goes out of scope.
