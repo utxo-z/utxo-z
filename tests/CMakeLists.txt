@@ -41,6 +41,7 @@ add_executable(utxoz_tests
     test_uniqueness.cpp
     test_lookup_telemetry.cpp
     test_shard_routing.cpp
+    test_rung_exact.cpp
     test_insert_batch.cpp
     test_open_for_inspection.cpp
 )

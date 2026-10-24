@@ -112,3 +112,7 @@ build-div8/
 # let back in: an unanchored pattern also hid every new file under test_package/.
 /test_*/
 !/test_package/
+build-bench1/
+build-bench8/
+bench_large_ibd_*/
+bench_large_ops_*/
