@@ -62,6 +62,47 @@ std::vector<size_t> working_set_of(std::span<Request const> requests) {
     return pending;
 }
 
+/// Which shard of the sharded class each request's key belongs to, by request
+/// index, for the historical walks to route with.
+///
+/// Computed once per call because the walks ask it once per key per file, and at
+/// N = 8 a miss meets hundreds of files. Empty at N = 1, where there is nothing
+/// to route: the single shard admits every key, and the walks never look here.
+template <typename Request>
+std::vector<uint32_t> key_shards_of(std::span<Request const> requests) {
+    std::vector<uint32_t> shards;
+    if constexpr (utxoz::shard_count > 1) {
+        shards.reserve(requests.size());
+        for (auto const& r : requests) shards.push_back(detail::shard_of(r.key, utxoz::shard_count));
+    }
+    return shards;
+}
+
+/// Whether request `idx` can be in a file of `slot`. See detail::slot_may_hold.
+inline bool request_may_be_in(std::vector<uint32_t> const& key_shards, size_t idx,
+                              size_t slot) noexcept {
+    if constexpr (utxoz::shard_count == 1) {
+        (void) key_shards; (void) idx; (void) slot;
+        return true;
+    } else {
+        return detail::slot_may_hold(slot, key_shards[idx]);
+    }
+}
+
+/// How many of the still-pending requests a file of `slot` could hold.
+inline size_t pending_eligible_in(std::vector<size_t> const& pending,
+                                  std::vector<uint32_t> const& key_shards,
+                                  size_t slot) noexcept {
+    if constexpr (utxoz::shard_count == 1) {
+        (void) key_shards; (void) slot;
+        return pending.size();
+    } else {
+        size_t n = 0;
+        for (auto const idx : pending) n += request_may_be_in(key_shards, idx, slot);
+        return n;
+    }
+}
+
 } // namespace
 
 deletion_progress refuse_deletions(std::span<deferred_deletion_entry const> requests,
@@ -127,13 +168,13 @@ database_impl::~database_impl() {
 // =============================================================================
 
 template<size_t Index> requires (Index < container_count)
-utxo_map<container_sizes[Index]>& database_impl::container() {
-    return *static_cast<utxo_map<container_sizes[Index]>*>(containers_[Index]);
+utxo_map<container_sizes[Index]>& database_impl::container(size_t slot) {
+    return *static_cast<utxo_map<container_sizes[Index]>*>(containers_[slot]);
 }
 
 template<size_t Index> requires (Index < container_count)
-utxo_map<container_sizes[Index]> const& database_impl::container() const {
-    return *static_cast<utxo_map<container_sizes[Index]> const*>(containers_[Index]);
+utxo_map<container_sizes[Index]> const& database_impl::container(size_t slot) const {
+    return *static_cast<utxo_map<container_sizes[Index]> const*>(containers_[slot]);
 }
 
 // =============================================================================
@@ -143,13 +184,20 @@ utxo_map<container_sizes[Index]> const& database_impl::container() const {
 /// The capacity a new map is built with: the policy, unless a test has asked for
 /// something else. One place, so the seam cannot apply to some maps and not
 /// others and leave a compaction target disagreeing with its sources.
-size_t database_impl::capacity_for(size_t index) const {
+size_t database_impl::capacity_for(size_t slot) const {
+    // The failpoint names a *class*, and forces every container that class has.
+    // Naming a slot would let a test that means "make this class small" shrink
+    // one shard and leave the rest at full size, which is not a smaller class —
+    // it is a class with one odd container, and no test asks for that.
+    //
+    // With one shard the two readings coincide, so this changes nothing there.
     if (auto const forced = failpoints::forced_capacity.load(std::memory_order_relaxed);
         forced != 0
-        && index == failpoints::forced_capacity_index.load(std::memory_order_relaxed)) {
+        && detail::class_of_slot(slot)
+               == failpoints::forced_capacity_index.load(std::memory_order_relaxed)) {
         return forced;
     }
-    return capacity_[index].capacity;
+    return capacity_[slot].capacity;
 }
 
 size_t database_impl::capacity_for_reference() const {
@@ -174,8 +222,8 @@ size_t database_impl::get_index_from_size(size_t size) const {
 // =============================================================================
 
 template<size_t Index>
-result<> database_impl::open_existing_container(size_t version) {
-    auto const file_name = db_path_ / fmt::format(data_file_format, Index, version);
+result<> database_impl::open_existing_container(size_t slot, size_t version) {
+    auto const file_name = db_path_ / detail::container_file_name(slot, version);
 
     auto opened = open_existing_segment(file_name);
     if ( ! opened) return std::unexpected(opened.error());
@@ -184,7 +232,7 @@ result<> database_impl::open_existing_container(size_t version) {
     // different layout does not fail, it reinterprets, and there is no later
     // point at which that becomes visible.
     if (auto const stamped = validate_stamp(**opened, file_name,
-                                            expected_identity(uint32_t(Index), version));
+                                            expected_identity(uint32_t(slot), version));
         ! stamped) {
         return std::unexpected(stamped.error());
     }
@@ -193,16 +241,16 @@ result<> database_impl::open_existing_container(size_t version) {
         **opened, map_object_name, file_name);
     if ( ! found) return std::unexpected(found.error());
 
-    segments_[Index] = std::move(*opened);
-    containers_[Index] = *found;
-    rehash_watch_[Index].reset((*found)->bucket_count());
-    current_versions_[Index] = version;
+    segments_[slot] = std::move(*opened);
+    containers_[slot] = *found;
+    rehash_watch_[slot].reset((*found)->bucket_count());
+    current_versions_[slot] = version;
     return {};
 }
 
 template<size_t Index>
-result<> database_impl::create_container(size_t version) {
-    auto const file_name = db_path_ / fmt::format(data_file_format, Index, version);
+result<> database_impl::create_container(size_t slot, size_t version) {
+    auto const file_name = db_path_ / detail::container_file_name(slot, version);
 
     // create_only, so a name already taken is reported rather than adopted. A
     // version this call believes is new and is not means the catalogue and the
@@ -211,7 +259,7 @@ result<> database_impl::create_container(size_t version) {
     std::unique_ptr<bip::managed_mapped_file> segment;
     try {
         segment = std::make_unique<bip::managed_mapped_file>(
-            bip::create_only, file_name.c_str(), capacity_[Index].file_size);
+            bip::create_only, file_name.c_str(), capacity_[slot].file_size);
     } catch (std::exception const& e) {
         log::error("container {} v{} could not be created: {}", Index, version, e.what());
         return std::unexpected(error_code::identity_collision);
@@ -239,7 +287,7 @@ result<> database_impl::create_container(size_t version) {
     }
 
     if (auto const stamped = place_stamp(*segment, file_name,
-                                         expected_identity(uint32_t(Index), version));
+                                         expected_identity(uint32_t(slot), version));
         ! stamped) {
         return std::unexpected(stamped.error());
     }
@@ -249,7 +297,7 @@ result<> database_impl::create_container(size_t version) {
     }
 
     auto* map = segment->construct<utxo_map<container_sizes[Index]>>(map_object_name, std::nothrow)(
-        capacity_for(Index),
+        capacity_for(slot),
         outpoint_hash{},
         outpoint_equal{},
         segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>()
@@ -259,26 +307,26 @@ result<> database_impl::create_container(size_t version) {
         return std::unexpected(error_code::identity_collision);
     }
 
-    segments_[Index] = std::move(segment);
-    containers_[Index] = map;
-    rehash_watch_[Index].reset(map->bucket_count());
-    current_versions_[Index] = version;
+    segments_[slot] = std::move(segment);
+    containers_[slot] = map;
+    rehash_watch_[slot].reset(map->bucket_count());
+    current_versions_[slot] = version;
     published = true;
     return {};
 }
 
 template<size_t Index>
-void database_impl::close_container() {
-    if (segments_[Index]) {
-        save_metadata_to_disk(Index, current_versions_[Index]);
-        segments_[Index]->flush();
-        segments_[Index].reset();
-        containers_[Index] = nullptr;
+void database_impl::close_container(size_t slot) {
+    if (segments_[slot]) {
+        save_metadata_to_disk(slot, current_versions_[slot]);
+        segments_[slot]->flush();
+        segments_[slot].reset();
+        containers_[slot] = nullptr;
     }
 }
 
 template<size_t Index>
-void database_impl::new_version() {
+void database_impl::new_version(size_t slot) {
     // The version being retired received every insert since it was opened, and
     // closing it flushes asynchronously — which schedules writeback and
     // promises nothing. Once it stops being active it is no longer covered by
@@ -289,27 +337,27 @@ void database_impl::new_version() {
     // one, so the only moment coverage could be lost is the moment it stops
     // being active. Marking per insert would put a set lookup on the hot path
     // to record something already known.
-    note_dirty(Index, current_versions_[Index]);
+    note_dirty(slot, current_versions_[slot]);
 
-    close_container<Index>();
+    close_container<Index>(slot);
 
     // The file first, the catalogue after. Publishing the identity before the
     // file exists leaves a version in the catalogue that nothing on disk backs
     // if the open throws — a phantom every later traversal would try to visit.
     // This is not durable creation, which belongs with the barrier work; it only
     // keeps the in-memory catalogue from describing something that is not there.
-    auto const next = catalogs_[Index].next_version();
+    auto const next = catalogs_[slot].next_version();
     // A rotation always makes a file that did not exist, so this is the create
     // path and never the open one. Failure throws, as it already did when Boost
     // refused the mapping: insert() is the only caller and has no way to report
     // a rotation that could not happen.
-    if (auto const created = create_container<Index>(next); ! created) {
+    if (auto const created = create_container<Index>(slot, next); ! created) {
         throw std::runtime_error(fmt::format("container {} could not rotate to v{}", Index, next));
     }
 
-    catalogs_[Index].add(next);
-    catalogs_[Index].metadata(next) = file_metadata{};
-    log::debug("Container {} rotated to version {}", Index, current_versions_[Index]);
+    catalogs_[slot].add(next);
+    catalogs_[slot].metadata(next) = file_metadata{};
+    log::debug("Container {} rotated to version {}", Index, current_versions_[slot]);
 }
 
 // =============================================================================
@@ -317,14 +365,14 @@ void database_impl::new_version() {
 // =============================================================================
 
 template<size_t Index>
-bool database_impl::can_insert_safely(uint64_t* free_bytes) const {
+bool database_impl::can_insert_safely(size_t slot, uint64_t* free_bytes) const {
     // The generator's seam: consumed one rotation at a time, so a fixture can be
     // given more than one generation without the hundred thousand entries a real
     // one needs. Answering here means the ordinary rotation path runs — nothing
     // downstream can tell this apart from a container that filled up.
     if (failpoints::consume_forced_rotation()) return false;
 
-    auto const& map = container<Index>();
+    auto const& map = container<Index>(slot);
 
     // From the bucket count of the map that is open, never from the policy: a
     // generation written under an older one has its own, and it is the one that
@@ -347,9 +395,9 @@ bool database_impl::can_insert_safely(uint64_t* free_bytes) const {
     }
 
     // Check available memory
-    if (segments_[Index]) {
+    if (segments_[slot]) {
         try {
-            size_t free_memory = segments_[Index]->get_free_memory();
+            size_t free_memory = segments_[slot]->get_free_memory();
             if (free_bytes) *free_bytes = free_memory;
             size_t entry_size = sizeof(typename utxo_map<container_sizes[Index]>::value_type);
             size_t buffer_size = entry_size * 10; // Safety buffer
@@ -382,15 +430,15 @@ bool database_impl::can_insert_safely_in_map(utxo_map<container_sizes[Index]> co
 }
 
 template<size_t Index>
-bool database_impl::should_rotate() const {
-    auto const& map = container<Index>();
+bool database_impl::should_rotate(size_t slot) const {
+    auto const& map = container<Index>(slot);
     if (map.bucket_count() == 0) return false;
-    return !can_insert_safely<Index>();
+    return !can_insert_safely<Index>(slot);
 }
 
 template<size_t Index>
-float database_impl::next_load_factor() const {
-    auto const& map = container<Index>();
+float database_impl::next_load_factor(size_t slot) const {
+    auto const& map = container<Index>(slot);
     if (map.bucket_count() == 0) return 0.0f;
     return float(map.size() + 1) / float(map.bucket_count());
 }
@@ -445,7 +493,7 @@ void database_impl::save_metadata_to_disk(size_t index, size_t version) noexcept
     // from the reporting itself, and including whatever a formatting or
     // allocation failure would raise.
     try {
-        auto const path = db_path_ / fmt::format("meta_{}_v{:05}.dat", index, version);
+        auto const path = db_path_ / detail::metadata_file_name(index, version);
         if (auto const written = write_metadata_file(path, *meta_ptr); ! written) {
             // Derived data: failing to persist it costs a rescan later and
             // nothing else. What must not happen — a half-written record read
@@ -458,7 +506,7 @@ void database_impl::save_metadata_to_disk(size_t index, size_t version) noexcept
 }
 
 void database_impl::load_metadata_from_disk(size_t index, size_t version) {
-    auto const path = db_path_ / fmt::format("meta_{}_v{:05}.dat", index, version);
+    auto const path = db_path_ / detail::metadata_file_name(index, version);
 
     auto record = read_metadata_file(path);
     if ( ! record) {
@@ -481,13 +529,13 @@ void database_impl::load_metadata_from_disk(size_t index, size_t version) {
 // =============================================================================
 
 result<> database_impl::open_for_inspection(fs::path path, storage_mode mode) {
-    capacity_ = production_capacity;
+    capacity_ = production_slot_capacity;
     reference_capacity_ = production_reference;
     return configure_internal(std::move(path), false, mode, open_intent::inspection);
 }
 
 result<> database_impl::open_for_inspection_for_testing(fs::path path, storage_mode mode) {
-    capacity_ = testing_capacity;
+    capacity_ = testing_slot_capacity;
     reference_capacity_ = testing_reference;
     return configure_internal(std::move(path), false, mode, open_intent::inspection);
 }
@@ -497,13 +545,13 @@ result<> database_impl::configure(fs::path path, bool remove_existing, storage_m
     // and takes the file size that was measured for it; testing fixes the file
     // size at ten megabytes and takes the capacity that fits. They answer
     // different questions and share no formula.
-    capacity_ = production_capacity;
+    capacity_ = production_slot_capacity;
     reference_capacity_ = production_reference;
     return configure_internal(std::move(path), remove_existing, mode, open_intent::open_or_create);
 }
 
 result<> database_impl::configure_for_testing(fs::path path, bool remove_existing, storage_mode mode) {
-    capacity_ = testing_capacity;
+    capacity_ = testing_slot_capacity;
     reference_capacity_ = testing_reference;
     return configure_internal(std::move(path), remove_existing, mode, open_intent::open_or_create);
 }
@@ -638,7 +686,7 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing,
         // No config file — check for pre-existing data files from the other mode
         if (!remove_existing) {
             auto const other_mode_file = mode == storage_mode::reference
-                ? db_path_ / fmt::format(data_file_format, 0, 0)
+                ? db_path_ / detail::container_file_name(0, 0)
                 : db_path_ / fmt::format(reference_data_file_format, 0);
 
             auto const other_exists = path_exists(other_mode_file);
@@ -764,16 +812,18 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing,
         // opened, and a failure to read one aborts the open rather than being
         // taken for an empty container.
         result<> catalog_error;
-        for_each_index<container_count>([&](auto I) {
-            if ( ! catalog_error.has_value()) return;
-            auto listed = enumerate_versions(db_path_, fmt::format("cont_{}_v", I.value));
+        // Over SLOTS, not classes: a sharded class has one catalogue per shard,
+        // and each is read from the files that carry that shard's name. With
+        // shard_count == 1 this is the same loop it always was.
+        for (size_t slot = 0; slot != detail::slot_count; ++slot) {
+            auto listed = enumerate_versions(db_path_, detail::container_prefix(slot));
             if ( ! listed) {
                 catalog_error = std::unexpected(listed.error());
-                return;
+                break;
             }
-            catalogs_[I].clear();
-            for (auto const v : *listed) catalogs_[I].add(v);
-        });
+            catalogs_[slot].clear();
+            for (auto const v : *listed) catalogs_[slot].add(v);
+        }
         if ( ! catalog_error.has_value()) return catalog_error;
 
         // See the reference branch. Every class of a database that was created
@@ -801,9 +851,6 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing,
         for_each_index<container_count>([&](auto I) {
             if ( ! count_error.has_value()) return;
 
-            // See the reference branch: the catalogue decides, not the map.
-            bool const fresh = catalogs_[I].empty();
-            size_t const latest_version = catalogs_[I].active();
 
             // A class with no generations at all. Compaction can drain one
             // completely, so this is an ordinary state of a working database and
@@ -816,47 +863,63 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing,
             // zero generations and zero entries, and every operation that would
             // need the container it does not have is refused; see
             // refuse_if_inspection_only().
-            if (fresh && intent == open_intent::inspection) return;
+            // Every shard of this class gets its own container, catalogue and
+            // stamp identity. A file written for shard 3 cannot be opened as
+            // shard 5: the identity carries the slot.
+            for (uint32_t sh = 0; sh != detail::shards_in_class(I.value); ++sh) {
+                auto const slot = detail::slot_of(I.value, sh);
 
-            if (auto const ready = fresh ? create_container<I>(latest_version)
-                                         : open_existing_container<I>(latest_version);
-                ! ready) {
-                count_error = std::unexpected(ready.error());
-                return;
-            }
-            catalogs_[I].add(latest_version);   // a fresh database has just created it
+                // Per shard, not per class. Each shard has its own catalogue
+                // and rotates on its own, so they sit at different versions,
+                // and one can be empty while its neighbours are not. Reading
+                // these once for the class would open every shard at shard
+                // zero's version, a file that in general is not there.
+                // See the reference branch: the catalogue decides, not the map.
+                bool const fresh = catalogs_[slot].empty();
+                size_t const latest_version = catalogs_[slot].active();
 
-            // Count existing entries in active container
-            entries_count_ += container<I>().size();
+                if (fresh && intent == open_intent::inspection) continue;
 
-            // Count entries in previous versions (still searchable/deletable)
-            for (auto const v : catalogs_[I].below(latest_version)) {
-                auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
-                // See the reference branch: a catalogued version this instance
-                // cannot read is not a smaller database.
-                auto opened = open_existing_segment(file_name);
-                if ( ! opened) {
-                    count_error = std::unexpected(opened.error());
+                if (auto const ready = fresh ? create_container<I>(slot, latest_version)
+                                             : open_existing_container<I>(slot, latest_version);
+                    ! ready) {
+                    count_error = std::unexpected(ready.error());
                     return;
                 }
-                // See the reference branch: the stamp is checked before the map.
-                if (auto const stamped = validate_stamp(
-                        **opened, file_name, expected_identity(uint32_t(I.value), v));
-                    ! stamped) {
-                    count_error = std::unexpected(stamped.error());
-                    return;
-                }
-                auto const found = find_single_named<utxo_map<container_sizes[I]>>(
-                    **opened, map_object_name, file_name);
-                if ( ! found) {
-                    count_error = std::unexpected(found.error());
-                    return;
-                }
-                entries_count_ += (*found)->size();
-            }
+                catalogs_[slot].add(latest_version);   // a fresh database has just created it
 
-            for (auto const v : catalogs_[I].versions()) {
-                load_metadata_from_disk(I, v);
+                // Count existing entries in active container
+                entries_count_ += container<I>(slot).size();
+
+                // Count entries in previous versions (still searchable/deletable)
+                for (auto const v : catalogs_[slot].below(latest_version)) {
+                    auto file_name = db_path_ / detail::container_file_name(slot, v);
+                    // See the reference branch: a catalogued version this instance
+                    // cannot read is not a smaller database.
+                    auto opened = open_existing_segment(file_name);
+                    if ( ! opened) {
+                        count_error = std::unexpected(opened.error());
+                        return;
+                    }
+                    // See the reference branch: the stamp is checked before the map.
+                    if (auto const stamped = validate_stamp(
+                            **opened, file_name, expected_identity(uint32_t(slot), v));
+                        ! stamped) {
+                        count_error = std::unexpected(stamped.error());
+                        return;
+                    }
+                    auto const found = find_single_named<utxo_map<container_sizes[I]>>(
+                        **opened, map_object_name, file_name);
+                    if ( ! found) {
+                        count_error = std::unexpected(found.error());
+                        return;
+                    }
+                    entries_count_ += (*found)->size();
+                }
+
+                for (auto const v : catalogs_[slot].versions()) {
+                    load_metadata_from_disk(slot, v);
+                }
             }
         });
         if ( ! count_error.has_value()) return count_error;
@@ -870,7 +933,9 @@ void database_impl::close() {
         reference_close_container();
     } else {
         for_each_index<container_count>([&](auto I) {
-            close_container<I>();
+            for (uint32_t sh = 0; sh != detail::shards_in_class(I.value); ++sh) {
+                close_container<I>(detail::slot_of(I.value, sh));
+            }
         });
     }
 }
@@ -896,22 +961,22 @@ result<bool> database_impl::insert(raw_outpoint const& key, output_data_span val
     }
 
     return std::visit([&](auto ic) -> result<bool> {
-        return insert_in_index<ic>(key, value, height);
+        return insert_in_index<ic>(detail::slot_for_key(index, key), key, value, height);
     }, make_index_variant(index));
 }
 
 template<size_t Index>
-result<> database_impl::rotate_for(rotation_cause cause) {
+result<> database_impl::rotate_for(size_t slot, rotation_cause cause) {
     try {
-        new_version<Index>();
+        new_version<Index>(slot);
     } catch (std::exception const& e) {
         // Counted, and then refused for good. `new_version` closes the previous
         // container before it makes the next one, so a failure here leaves
-        // `containers_[Index]` null — and `container<Index>()` dereferences it.
+        // `containers_[slot]` null — and `container<Index>(slot)` dereferences it.
         // The data on disk is untouched; this instance simply has nowhere to put
         // the next entry of this class, and finding that out by dereferencing
         // nothing is not an option.
-        ++rotation_causes_[Index].failed;
+        ++rotation_causes_[slot].failed;
         integrity_latched_ = error_code::file_open_failed;
         diagnose([&] {
             log::error("container {} could not rotate ({}): {}. No generation was made "
@@ -921,13 +986,13 @@ result<> database_impl::rotate_for(rotation_cause cause) {
         });
         return std::unexpected(error_code::file_open_failed);
     }
-    if (cause == rotation_cause::preventive) ++rotation_causes_[Index].preventive;
-    else                                     ++rotation_causes_[Index].capacity_exception;
+    if (cause == rotation_cause::preventive) ++rotation_causes_[slot].preventive;
+    else                                     ++rotation_causes_[slot].capacity_exception;
     return {};
 }
 
 template<size_t Index>
-result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data_span value, uint32_t height) {
+result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key, output_data_span value, uint32_t height) {
     // The guard already reads the segment's free bytes, and that is the figure
     // the diagnostic below wants. Taking it from there rather than asking again
     // keeps the common path to one read of the segment header — a different
@@ -938,7 +1003,7 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
     // refuses on the size check or when a seam forces the rotation, and "no
     // segment measured" must not be logged as "no bytes left".
     uint64_t free_before = free_bytes_unavailable;
-    if ( ! can_insert_safely<Index>(&free_before)) {
+    if ( ! can_insert_safely<Index>(slot, &free_before)) {
         // The guard says the next insert would make the map grow. Only an insert
         // that actually inserts can: `emplace` looks the key up first and returns
         // without growing when it finds it.
@@ -952,31 +1017,31 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
         // once per generation, not once per insert. It closes the active map's
         // half of the question and no more. A copy in an older generation is a
         // different contract and this does not look for it.
-        if (auto const& current = container<Index>(); current.find(key) != current.end()) {
+        if (auto const& current = container<Index>(slot); current.find(key) != current.end()) {
             diagnose([&] {
                 log::warn("insert: duplicate key at the rotation threshold, so not "
                           "rotating. container={} generation={} height={} outpoint={}",
-                          Index, current_versions_[Index], height, outpoint_to_string(key));
+                          Index, current_versions_[slot], height, outpoint_to_string(key));
             });
             return false;
         }
         // The figures of the generation about to be sealed, taken while it is
         // still open and by value, because the report of the rotation comes
         // after the rotation and the map it describes will be closed by then.
-        auto const sealed = snapshot_of(container<Index>());
-        auto const sealed_generation = current_versions_[Index];
-        if (auto const rotated = rotate_for<Index>(rotation_cause::preventive); ! rotated) {
+        auto const sealed = snapshot_of(container<Index>(slot));
+        auto const sealed_generation = current_versions_[slot];
+        if (auto const rotated = rotate_for<Index>(slot, rotation_cause::preventive); ! rotated) {
             return std::unexpected(rotated.error());
         }
         // The figure the guard measured describes the generation that was just
         // sealed. Every attempt below has to report the segment it actually ran
         // on, or the log compares one file's free bytes with another's.
-        free_before = free_bytes_best_effort(segments_[Index].get());
+        free_before = free_bytes_best_effort(segments_[slot].get());
         diagnose([&] {
             log::debug("container {} reached its insert limit and was rotated. "
                        "old_generation={} new_generation={} size={} buckets={} "
                        "live_max_load={} effective_limit={}",
-                       Index, sealed_generation, current_versions_[Index], sealed.size,
+                       Index, sealed_generation, current_versions_[slot], sealed.size,
                        sealed.bucket_count, sealed.live_max_load,
                        effective_insert_limit(sealed.bucket_count, sealed.live_max_load));
         });
@@ -996,9 +1061,9 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
     // a full file; it is a configuration or a filesystem, and making more of them
     // does not help.
     for (unsigned attempt = 1; attempt <= 2; ++attempt) {
-        auto& map = container<Index>();
+        auto& map = container<Index>(slot);
         auto const before = snapshot_of(map);
-        auto const segment_size = segments_[Index] ? segments_[Index]->get_size() : 0;
+        auto const segment_size = segments_[slot] ? segments_[slot]->get_size() : 0;
 
         try {
             // The seam that makes the recovery below testable exactly; see
@@ -1029,18 +1094,18 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
                 // twice. It is reported and counted, and the insert is still a
                 // success, because the entry is there.
                 bool const rehashed = note_rehash_if_grown(
-                    Index, rehash_watch_[Index], map.bucket_count());
+                    Index, rehash_watch_[slot], map.bucket_count());
 
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 // Update statistics
-                ++container_stats_[Index].total_inserts;
-                ++container_stats_[Index].current_size;
-                ++container_stats_[Index].value_size_distribution[value.size()];
+                ++container_stats_[slot].total_inserts;
+                ++container_stats_[slot].current_size;
+                ++container_stats_[slot].value_size_distribution[value.size()];
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].inserts[Index];
-                if (rehashed) ++container_stats_[Index].rehash_count;
+                if (rehashed) ++container_stats_[slot].rehash_count;
 #endif
 
-                update_metadata_on_insert(Index, current_versions_[Index], key, height);
+                update_metadata_on_insert(slot, current_versions_[slot], key, height);
 
                 if (attempt > 1) {
                     // The entry is in and the bookkeeping is done; what is left is
@@ -1050,7 +1115,7 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
                         log::info("insert retry after capacity rotation succeeded: "
                                   "container={} new_generation={} attempt={}/2 height={} "
                                   "outpoint={} size={} buckets={} live_max_load={}",
-                                  Index, current_versions_[Index], attempt, height,
+                                  Index, current_versions_[slot], attempt, height,
                                   outpoint_to_string(key), map.size(), map.bucket_count(),
                                   map.max_load());
                     });
@@ -1063,10 +1128,10 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
             // `emplace` documents these are the figures it had before. All three
             // accessors are `noexcept`, and the probe is best-effort, so reaching
             // the classification cannot itself fail.
-            auto& after_map = container<Index>();
+            auto& after_map = container<Index>(slot);
             auto const after = snapshot_of(after_map);
             bool const key_present_after = after_map.find(key) != after_map.end();
-            auto const free_after = free_bytes_best_effort(segments_[Index].get());
+            auto const free_after = free_bytes_best_effort(segments_[slot].get());
             auto const state = classify_post_exception(before, after, key_present_after);
 
             // Everything the next reader of this log would otherwise have to
@@ -1078,7 +1143,7 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
             // The generation and the free-byte count are copied rather than read
             // through, because a rotation below replaces both and this describes
             // the failure, not what came after it.
-            auto const failed_generation = current_versions_[Index];
+            auto const failed_generation = current_versions_[slot];
             auto const failed_free_before = free_before;
             auto const shared = [&] {
                 return fmt::format(
@@ -1104,7 +1169,7 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
                 // stops here.
                 //
                 // Counted and latched before a word is written about it.
-                ++rotation_causes_[Index].unexpected_post_exception;
+                ++rotation_causes_[slot].unexpected_post_exception;
                 integrity_latched_ = error_code::entry_corrupt;
                 diagnose([&] {
                     log::critical("insert: the active map changed after a failed "
@@ -1141,7 +1206,7 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
             // reconstructed as `new - 1`: a version number is an identity and the
             // sequence has holes in it wherever compaction has drained one. See
             // version_catalog.hpp.
-            auto const rotated = rotate_for<Index>(rotation_cause::capacity_exception);
+            auto const rotated = rotate_for<Index>(slot, rotation_cause::capacity_exception);
             if ( ! rotated) {
                 // Already counted, latched and reported by rotate_for; this adds
                 // the figures of the failure that wanted the rotation, which
@@ -1153,13 +1218,13 @@ result<bool> database_impl::insert_in_index(raw_outpoint const& key, output_data
                 return std::unexpected(rotated.error());
             }
             // The retry runs on the new generation, so its diagnostic must too.
-            free_before = free_bytes_best_effort(segments_[Index].get());
+            free_before = free_bytes_best_effort(segments_[slot].get());
             diagnose([&] {
                 log::info("insert: allocation failed and the map was unchanged, so the "
                           "generation was rotated and the entry will be retried. "
                           "cause=allocator_refused_growth container={} old_generation={} "
                           "new_generation={} {}",
-                          Index, failed_generation, current_versions_[Index], shared());
+                          Index, failed_generation, current_versions_[slot], shared());
             });
         }
     }
@@ -1202,13 +1267,16 @@ std::optional<find_result> database_impl::find_in_latest_version(raw_outpoint co
 
     for_each_index<container_count>([&](auto I) {
         if (!result) {
-            auto& map = container<I>();
+            // One shard, never all of them: the key decides which, so a class
+            // that is split costs the same single probe it always did.
+            auto const slot = detail::slot_for_key(I.value, key);
+            auto& map = container<I>(slot);
             if (auto it = map.find(key); it != map.end()) {
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 probe_stats_.record_answered(height, it->second.block_height);
 #endif
 #if UTXOZ_STATISTICS_LEVEL >= 2
-                lookup_stats_[I.value].record_answered_from_active();
+                lookup_stats_[slot].record_answered_from_active();
 #endif
                 auto data = it->second.get_data();
                 result = find_result{bytes(data.begin(), data.end()), it->second.block_height};
@@ -1229,7 +1297,8 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
 
     for_each_index<container_count>([&](auto I) {
         if (result == 0) {
-            auto& map = container<I>();
+            auto const slot = detail::slot_for_key(I.value, key);
+            auto& map = container<I>(slot);
             if (auto it = map.find(key); it != map.end()) {
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 // Track UTXO lifetime
@@ -1246,8 +1315,8 @@ size_t database_impl::erase_in_latest_version(raw_outpoint const& key, uint32_t 
                 map.erase(it);
 
 #if UTXOZ_STATISTICS_LEVEL >= 1
-                --container_stats_[I].current_size;
-                ++container_stats_[I].total_deletes;
+                --container_stats_[slot].current_size;
+                ++container_stats_[slot].total_deletes;
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[I];
 #endif
 
@@ -1273,6 +1342,11 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     // deletions are applied. Nothing is taken: the requests stay in the caller's
     // span and are still the caller's when this returns (#119).
     auto pending = working_set_of<deferred_deletion_entry>(requests);
+
+    // Where each key can be, for the historical walk below. The same routing as a
+    // resolution: inside the sharded class only the key's own shard can hold it,
+    // and every class stays a candidate. See full_resolve().
+    auto const key_shards = key_shards_of<deferred_deletion_entry>(requests);
 
     // Reserved before anything is erased. progress.erased is written while the
     // maps are being changed, and a vector growing at that moment is an
@@ -1356,7 +1430,10 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     // The bookkeeping is a parameter rather than a branch inside. Which catalogue
     // a deletion belongs to is a property of the file being walked, and passing it
     // in is what keeps that decision next to the code that opened the file.
-    auto const step_over_file = [&](auto& map, auto const& record_deletion) {
+    // `admits` says which pending keys this file could hold. A key it cannot is
+    // kept owed and not looked for: an erase in another shard's file would find
+    // nothing, by construction.
+    auto const step_over_file = [&](auto& map, auto const& admits, auto const& record_deletion) {
         size_t keep = 0;
         size_t i = 0;
         bool current_applied = false;
@@ -1375,7 +1452,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
             current_applied = false;
             auto const idx = pending[i];
 
-            if (map.erase(requests[idx].key) == 0) {
+            if ( ! admits(idx) || map.erase(requests[idx].key) == 0) {
                 pending[keep++] = idx;
                 continue;
             }
@@ -1417,7 +1494,9 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
 
             auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
             (void) cache_hit;
-            step_over_file(map, [&]([[maybe_unused]] uint32_t height) {
+            // Reference mode has one container and no shards: every key is a
+            // candidate for every file.
+            step_over_file(map, [](size_t) { return true; }, [&]([[maybe_unused]] uint32_t height) {
                 note_dirty(reference_sentinel_index, version);
                 if (auto* meta = reference_catalog_.find_metadata(version)) meta->update_on_delete();
                 failpoints::reference_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
@@ -1440,18 +1519,23 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     };
 
     auto const erase_in_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>,
-                                                     size_t version) {
+                                                     size_t slot, size_t version) {
+        // Nobody pending could be in this file, so it is not opened - and a file
+        // that will not open but could not have held any of these keys does not
+        // make the batch incomplete.
+        if (pending_eligible_in(pending, key_shards, slot) == 0) return;
         try {
             if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
 
-            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
+            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(slot, version);
             (void) cache_hit;
-            step_over_file(map, [&]([[maybe_unused]] uint32_t height) {
-                note_dirty(Index, version);
-                update_metadata_on_delete(Index, version);
+            auto const admits = [&](size_t idx) { return request_may_be_in(key_shards, idx, slot); };
+            step_over_file(map, admits, [&]([[maybe_unused]] uint32_t height) {
+                note_dirty(slot, version);
+                update_metadata_on_delete(slot, version);
                 failpoints::full_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 // Restored with the rest of the historical path. Dropping these
@@ -1462,10 +1546,10 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 //
                 // deferred_deletes is deliberately not among them: it counted how
                 // much was sitting in the queue, and there is no queue to sit in.
-                auto const depth = static_cast<uint32_t>(current_versions_[Index] - version);
+                auto const depth = static_cast<uint32_t>(current_versions_[slot] - version);
                 ++deferred_stats_.deletions_by_depth[depth];
-                --container_stats_[Index].current_size;
-                ++container_stats_[Index].total_deletes;
+                --container_stats_[slot].current_size;
+                ++container_stats_[slot].total_deletes;
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[Index];
 #endif
             });
@@ -1480,23 +1564,29 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
         }
     };
 
-    auto const walk = [&](size_t container_index, size_t version) {
-        if (container_index == reference_sentinel_index) {
+    auto const walk = [&](size_t slot, size_t version) {
+        if (slot == reference_sentinel_index) {
             erase_in_reference_file(version);
             return;
         }
-        switch (container_index) {
-            case 0: erase_in_full_file(std::integral_constant<size_t, 0>{}, version); break;
-            case 1: erase_in_full_file(std::integral_constant<size_t, 1>{}, version); break;
-            case 2: erase_in_full_file(std::integral_constant<size_t, 2>{}, version); break;
-            case 3: erase_in_full_file(std::integral_constant<size_t, 3>{}, version); break;
-            case 4: erase_in_full_file(std::integral_constant<size_t, 4>{}, version); break;
+        if (slot >= detail::slot_count) {
+            log::error("Deletion batch asked for slot {}, which does not exist. "
+                       "The batch is incomplete.", slot);
+            complete = false;
+            return;
+        }
+        switch (detail::class_of_slot(slot)) {
+            case 0: erase_in_full_file(std::integral_constant<size_t, 0>{}, slot, version); break;
+            case 1: erase_in_full_file(std::integral_constant<size_t, 1>{}, slot, version); break;
+            case 2: erase_in_full_file(std::integral_constant<size_t, 2>{}, slot, version); break;
+            case 3: erase_in_full_file(std::integral_constant<size_t, 3>{}, slot, version); break;
+            case 4: erase_in_full_file(std::integral_constant<size_t, 4>{}, slot, version); break;
             default:
                 // Not a container this build has. Silently walking it as index 0
                 // is how the sentinel came to update the wrong catalogue, so an
                 // index nobody recognises stops the batch instead.
-                log::error("Deletion batch asked for container {}, which does not exist. "
-                           "The batch is incomplete.", container_index);
+                log::error("Deletion batch asked for class {}, which does not exist. "
+                           "The batch is incomplete.", detail::class_of_slot(slot));
                 complete = false;
                 break;
         }
@@ -1541,28 +1631,35 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 failure = error_code::catalog_unreadable;
             }
         } else {
-            std::array<std::set<size_t>, container_count> seen;
+            // By slot: the cached files are named by slot, the catalogues are per
+            // slot, and walk() takes one. A loop rather than a fold over the
+            // classes, because walk() already dispatches on the class itself.
+            std::array<std::set<size_t>, detail::slot_count> seen;
             for (auto const& [ci, version] : cached_files) {
-                if (ci < container_count) seen[ci].insert(version);
+                if (ci < detail::slot_count) seen[ci].insert(version);
             }
-            for_each_index<container_count>([&](auto I) {
-                if (pending.empty()) return;
+            for (size_t slot = 0; slot != detail::slot_count; ++slot) {
+                if (pending.empty()) break;
+                // A shard nobody pending belongs to is not walked, and so neither
+                // its catalogue nor its files can stop a batch that never needed
+                // them.
+                if (pending_eligible_in(pending, key_shards, slot) == 0) continue;
                 try {
                     if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                         throw std::runtime_error("failpoint: catalogue refused to be listed");
                     }
-                    for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
-                        if (pending.empty()) break;
-                        if (seen[I.value].contains(v)) continue;
-                        walk(I.value, v);
+                    for (auto const v : catalogs_[slot].below(current_versions_[slot])) {
+                        if (pending_eligible_in(pending, key_shards, slot) == 0) break;
+                        if (seen[slot].contains(v)) continue;
+                        walk(slot, v);
                     }
                 } catch (std::exception const& e) {
                     log::error("Could not enumerate versions of container {}: {}. The batch is incomplete.",
-                               I.value, e.what());
+                               slot, e.what());
                     complete = false;
                     failure = error_code::catalog_unreadable;
                 }
-            });
+            }
         }
     }
 
@@ -1618,11 +1715,11 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
 // between the two would leave the target and its sources all canonical with
 // nothing recording that the sources are superseded.
 
-fs::path database_impl::data_path(size_t index, size_t version) const {
-    if (index == reference_sentinel_index) {
+fs::path database_impl::data_path(size_t slot, size_t version) const {
+    if (slot == reference_sentinel_index) {
         return db_path_ / fmt::format(reference_data_file_format, version);
     }
-    return db_path_ / fmt::format(data_file_format, index, version);
+    return db_path_ / detail::container_file_name(slot, version);
 }
 
 fs::path database_impl::building_path(size_t index, size_t version) const {
@@ -1631,18 +1728,18 @@ fs::path database_impl::building_path(size_t index, size_t version) const {
     return p;
 }
 
-fs::path database_impl::sidecar_path(size_t index, size_t version) const {
-    if (index == reference_sentinel_index) {
+fs::path database_impl::sidecar_path(size_t slot, size_t version) const {
+    if (slot == reference_sentinel_index) {
         return db_path_ / fmt::format("compact_v{:05}.merge", version);
     }
-    return db_path_ / fmt::format("cont_{}_v{:05}.merge", index, version);
+    return db_path_ / detail::sidecar_file_name(slot, version);
 }
 
-fs::path database_impl::metadata_path(size_t index, size_t version) const {
-    if (index == reference_sentinel_index) {
+fs::path database_impl::metadata_path(size_t slot, size_t version) const {
+    if (slot == reference_sentinel_index) {
         return db_path_ / fmt::format("meta_compact_v{:05}.dat", version);
     }
-    return db_path_ / fmt::format("meta_{}_v{:05}.dat", index, version);
+    return db_path_ / detail::metadata_file_name(slot, version);
 }
 
 result<> database_impl::directory_barrier(failpoints::dir_barrier stage) const {
@@ -1770,8 +1867,13 @@ result<> database_impl::recover_pending_merges() {
     if (mode_ == storage_mode::reference) {
         scopes.push_back({reference_sentinel_index, "compact_v"});
     } else {
-        for (size_t i = 0; i < container_count; ++i) {
-            scopes.push_back({i, fmt::format("cont_{}_v", i)});
+        // Every slot, not every class: a shard keeps its own versions and so
+        // its own pending merges. The prefixes are disjoint by construction —
+        // an unsharded build writes "cont_0_v" and a sharded one "cont_0s0_v",
+        // and neither is a prefix of the other — so a file written under one
+        // shard count is never recovered as though it belonged to another.
+        for (size_t i = 0; i < detail::slot_count; ++i) {
+            scopes.push_back({i, detail::container_prefix(i)});
         }
     }
 
@@ -1831,16 +1933,16 @@ result<> database_impl::recover_pending_merges() {
 
 // The six things that differ between the storage modes, and nothing else does.
 template <size_t Index>
-size_t full_merge_policy<Index>::index() const { return Index; }
+size_t full_merge_policy<Index>::index() const { return slot; }
 template <size_t Index>
-size_t full_merge_policy<Index>::file_size() const { return db.capacity_[Index].file_size; }
+size_t full_merge_policy<Index>::file_size() const { return db.capacity_[slot].file_size; }
 template <size_t Index>
-size_t full_merge_policy<Index>::min_buckets() const { return db.capacity_for(Index); }
+size_t full_merge_policy<Index>::min_buckets() const { return db.capacity_for(slot); }
 template <size_t Index>
-version_catalog& full_merge_policy<Index>::catalogue() const { return db.catalogs_[Index]; }
+version_catalog& full_merge_policy<Index>::catalogue() const { return db.catalogs_[slot]; }
 template <size_t Index>
 void full_merge_policy<Index>::save_metadata(size_t version) const {
-    db.save_metadata_to_disk(Index, version);
+    db.save_metadata_to_disk(slot, version);
 }
 template <size_t Index>
 std::string full_merge_policy<Index>::describe(size_t version) const {
@@ -2296,24 +2398,24 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
  *
  * Its result is part of the operation's, never swallowed. Compaction closes the
  * active container before it starts, so a failure to reopen leaves
- * containers_[Index] null and the next operation dereferencing it — which is
+ * containers_[slot] null and the next operation dereferencing it — which is
  * why this both reports and latches: the instance has nothing to serve from
  * until it is closed and reopened.
  */
 template<size_t Index>
-result<> database_impl::reopen_active_container() {
-    auto const active = catalogs_[Index].active();
+result<> database_impl::reopen_active_container(size_t slot) {
+    auto const active = catalogs_[slot].active();
     try {
         if (failpoints::fail_container_open.load(std::memory_order_relaxed)) {
             throw std::runtime_error("failpoint");
         }
         // Compaction closed a file that is still there, so this reopens an
         // existing version; it never creates one.
-        if (auto const opened = open_existing_container<Index>(active); ! opened) {
+        if (auto const opened = open_existing_container<Index>(slot, active); ! opened) {
             cleanup_pending_ = true;
             return std::unexpected(opened.error());
         }
-        catalogs_[Index].add(active);
+        catalogs_[slot].add(active);
         return {};
     } catch (std::exception const& e) {
         log::error("compaction: container {} could not be reopened at v{}: {}", Index, active, e.what());
@@ -2323,10 +2425,10 @@ result<> database_impl::reopen_active_container() {
 }
 
 template<size_t Index>
-result<> database_impl::compact_container() {
-    log::debug("Starting compaction for container {}...", Index);
+result<> database_impl::compact_container(size_t slot) {
+    log::debug("Starting compaction for class {} shard {}...", Index, detail::shard_of_slot(slot));
 
-    close_container<Index>();
+    close_container<Index>(slot);
 
     // Compaction closes the active container before it starts, so every exit has
     // to put one back — including the exit nobody writes, taken by a throw. A
@@ -2336,14 +2438,14 @@ result<> database_impl::compact_container() {
     // reopen's result is part of what comes back.
     auto outcome = [&]() -> result<> {
         try {
-            return merge_groups(full_merge_policy<Index>{*this});
+            return merge_groups(full_merge_policy<Index>{*this, slot});
         } catch (std::exception const& e) {
             log::error("compaction: container {} failed: {}", Index, e.what());
             return std::unexpected(error_code::file_open_failed);
         }
     }();
 
-    auto const reopened = reopen_active_container<Index>();
+    auto const reopened = reopen_active_container<Index>(slot);
 
     // A failure inside the merge is the more informative one, so it wins; but a
     // failed reopen is never silent, and it has already latched the instance.
@@ -2402,39 +2504,45 @@ result<> database_impl::for_each_key_impl(void(*cb)(void*, raw_outpoint const&),
     // the same class of mistake as reading an unreadable directory as empty.
     result<> outcome;
     for_each_index<container_count>([&](auto I) {
-        if ( ! outcome.has_value()) return;
-        // Current version (active container)
-        auto const& map = container<I>();
-        for (auto const& [key, _] : map) {
-            cb(ctx, key);
-        }
-
-        // Previous versions
-        for (auto const v : catalogs_[I].below(current_versions_[I])) {
-            auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
-
-            auto opened = open_existing_segment(file_name);
-            if ( ! opened) {
-                outcome = std::unexpected(opened.error());
-                return;
-            }
-            auto const found = find_single_named<utxo_map<container_sizes[I]>>(
-                **opened, map_object_name, file_name);
-            if ( ! found) {
-                outcome = std::unexpected(found.error());
-                return;
+        // Every active container of this class and its history: one per shard
+        // where the class is split, one otherwise. With shard_count == 1 this is
+        // the loop it always was, executed once.
+        for (uint32_t sh = 0; sh != detail::shards_in_class(I.value); ++sh) {
+            auto const slot = detail::slot_of(I.value, sh);
+            if ( ! outcome.has_value()) return;
+            // Current version (active container)
+            auto const& map = container<I>(slot);
+            for (auto const& [key, _] : map) {
+                cb(ctx, key);
             }
 
-            // The callback is the caller's code and may raise; nothing else in
-            // here can any more.
-            try {
-                for (auto const& [key, _] : **found) {
-                    cb(ctx, key);
+            // Previous versions
+            for (auto const v : catalogs_[slot].below(current_versions_[slot])) {
+                auto file_name = db_path_ / detail::container_file_name(slot, v);
+
+                auto opened = open_existing_segment(file_name);
+                if ( ! opened) {
+                    outcome = std::unexpected(opened.error());
+                    return;
                 }
-            } catch (std::exception const& e) {
-                log::error("for_each_key: the callback raised over container {} v{}: {}", I.value, v, e.what());
-                outcome = std::unexpected(error_code::file_open_failed);
-                return;
+                auto const found = find_single_named<utxo_map<container_sizes[I]>>(
+                    **opened, map_object_name, file_name);
+                if ( ! found) {
+                    outcome = std::unexpected(found.error());
+                    return;
+                }
+
+                // The callback is the caller's code and may raise; nothing else in
+                // here can any more.
+                try {
+                    for (auto const& [key, _] : **found) {
+                        cb(ctx, key);
+                    }
+                } catch (std::exception const& e) {
+                    log::error("for_each_key: the callback raised over container {} v{}: {}", I.value, v, e.what());
+                    outcome = std::unexpected(error_code::file_open_failed);
+                    return;
+                }
             }
         }
     });
@@ -2450,39 +2558,45 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
     // See for_each_key_impl(): a partial scan is never reported as a whole one.
     result<> outcome;
     for_each_index<container_count>([&](auto I) {
-        if ( ! outcome.has_value()) return;
-        // Current version (active container)
-        auto const& map = container<I>();
-        for (auto const& [key, val] : map) {
-            cb(ctx, key, val.block_height, val.get_data());
-        }
-
-        // Previous versions
-        for (auto const v : catalogs_[I].below(current_versions_[I])) {
-            auto file_name = db_path_ / fmt::format(data_file_format, I.value, v);
-
-            auto opened = open_existing_segment(file_name);
-            if ( ! opened) {
-                outcome = std::unexpected(opened.error());
-                return;
-            }
-            auto const found = find_single_named<utxo_map<container_sizes[I]>>(
-                **opened, map_object_name, file_name);
-            if ( ! found) {
-                outcome = std::unexpected(found.error());
-                return;
+        // Every active container of this class and its history: one per shard
+        // where the class is split, one otherwise. With shard_count == 1 this is
+        // the loop it always was, executed once.
+        for (uint32_t sh = 0; sh != detail::shards_in_class(I.value); ++sh) {
+            auto const slot = detail::slot_of(I.value, sh);
+            if ( ! outcome.has_value()) return;
+            // Current version (active container)
+            auto const& map = container<I>(slot);
+            for (auto const& [key, val] : map) {
+                cb(ctx, key, val.block_height, val.get_data());
             }
 
-            // The callback is the caller's code and may raise; nothing else in
-            // here can any more.
-            try {
-                for (auto const& [key, val] : **found) {
-                    cb(ctx, key, val.block_height, val.get_data());
+            // Previous versions
+            for (auto const v : catalogs_[slot].below(current_versions_[slot])) {
+                auto file_name = db_path_ / detail::container_file_name(slot, v);
+
+                auto opened = open_existing_segment(file_name);
+                if ( ! opened) {
+                    outcome = std::unexpected(opened.error());
+                    return;
                 }
-            } catch (std::exception const& e) {
-                log::error("for_each_entry: the callback raised over container {} v{}: {}", I.value, v, e.what());
-                outcome = std::unexpected(error_code::file_open_failed);
-                return;
+                auto const found = find_single_named<utxo_map<container_sizes[I]>>(
+                    **opened, map_object_name, file_name);
+                if ( ! found) {
+                    outcome = std::unexpected(found.error());
+                    return;
+                }
+
+                // The callback is the caller's code and may raise; nothing else in
+                // here can any more.
+                try {
+                    for (auto const& [key, val] : **found) {
+                        cb(ctx, key, val.block_height, val.get_data());
+                    }
+                } catch (std::exception const& e) {
+                    log::error("for_each_entry: the callback raised over container {} v{}: {}", I.value, v, e.what());
+                    outcome = std::unexpected(error_code::file_open_failed);
+                    return;
+                }
             }
         }
     });
@@ -2546,16 +2660,17 @@ result<> database_impl::sync() {
         }
     } else {
         result<> outcome;
-        for_each_index<container_count>([&](auto I) {
-            if ( ! outcome.has_value()) return;
-            if ( ! segments_[I]) return;
+        // Over slots: a durability barrier that skipped a shard would report
+        // the database as flushed while one of its containers was not.
+        for (size_t slot = 0; slot != detail::slot_count && outcome.has_value(); ++slot) {
+            if ( ! segments_[slot]) continue;
 
-            outcome = barrier(sync_mapped_region(segments_[I]->get_address(),
-                                                 segments_[I]->get_size()));
-            if ( ! outcome.has_value()) return;
+            outcome = barrier(sync_mapped_region(segments_[slot]->get_address(),
+                                                 segments_[slot]->get_size()));
+            if ( ! outcome.has_value()) break;
 
-            outcome = barrier(sync_file(data_path(I, current_versions_[I])));
-        });
+            outcome = barrier(sync_file(data_path(slot, current_versions_[slot])));
+        }
         if ( ! outcome.has_value()) return outcome;
     }
 
@@ -2605,7 +2720,12 @@ result<> database_impl::compact_all() {
             // database after a condition the owner is going to treat as fatal,
             // and destroy more of the evidence of how it got that way.
             if ( ! outcome) return;
-            outcome = compact_container<I>();
+            // One shard at a time, serially: the transient peak of a compaction
+            // is a whole target file, so two at once would give back the very
+            // footprint sharding is meant to reduce.
+            for (uint32_t sh = 0; sh != detail::shards_in_class(I.value) && outcome; ++sh) {
+                outcome = compact_container<I>(detail::slot_of(I.value, sh));
+            }
         });
     }
 
@@ -2624,32 +2744,73 @@ result<> database_impl::compact_all() {
 // database_impl - Statistics
 // =============================================================================
 
+namespace {
+
+/// Fold one shard's counters into the class they belong to.
+void accumulate_container_stats(container_stats& into, container_stats const& from) {
+    into.total_inserts += from.total_inserts;
+    into.total_deletes += from.total_deletes;
+    into.current_size += from.current_size;
+    into.failed_deletes += from.failed_deletes;
+    into.rehash_count += from.rehash_count;
+    for (auto const& [size, count] : from.value_size_distribution) {
+        into.value_size_distribution[size] += count;
+    }
+}
+
+void accumulate_rotation_causes(rotation_causes& into, rotation_causes const& from) {
+    into.preventive += from.preventive;
+    into.capacity_exception += from.capacity_exception;
+    into.failed += from.failed;
+    into.unexpected_post_exception += from.unexpected_post_exception;
+}
+
+} // namespace
+
 void database_impl::update_fragmentation_stats() {
 #if UTXOZ_STATISTICS_LEVEL >= 1
+    // The report has one entry per class; the segments are per slot. A sharded
+    // class sums the bytes of its shards and takes the fill ratio of the whole,
+    // which is what a single-shard class already reported.
     for_each_index<container_count>([&](auto I) {
-        if (segments_[I]) {
+        size_t class_total = 0;
+        size_t class_used = 0;
+        size_t class_ideal = 0;
+        bool any_open = false;
+        for (uint32_t sh = 0; sh != detail::shards_in_class(I.value); ++sh) {
+            size_t const slot = detail::slot_of(I.value, sh);
+            if (segments_[slot]) {
+                any_open = true;
             try {
                 // From the segment that is open, not from the policy. These
                 // describe a file; the policy describes what a new one is created
                 // with, and the two are only the same number by coincidence — a
                 // coincidence that ends the next time the policy moves. Asking the
                 // segment also means `total - free` cannot underflow.
-                size_t const total_size = segments_[I]->get_size();
-                size_t const free_memory = segments_[I]->get_free_memory();
+                size_t const total_size = segments_[slot]->get_size();
+                size_t const free_memory = segments_[slot]->get_free_memory();
                 size_t const used_memory = total_size >= free_memory
                                          ? total_size - free_memory : 0;
 
-                fragmentation_stats_.fill_ratios[I] = double(used_memory) / double(total_size);
+                class_total += total_size;
+                class_used += used_memory;
 
-                auto& map = container<I>();
-                size_t ideal_size = map.size() * sizeof(typename utxo_map<container_sizes[I]>::value_type);
-                fragmentation_stats_.wasted_space[I] =
-                    used_memory > ideal_size ? used_memory - ideal_size : 0;
+                auto& map = container<I>(slot);
+                class_ideal += map.size() * sizeof(typename utxo_map<container_sizes[I]>::value_type);
             } catch (...) {
+                // One shard that cannot be measured makes the class's figure a
+                // number nobody can act on, so the class reports nothing rather
+                // than a total missing an unknown part of itself.
                 fragmentation_stats_.fill_ratios[I] = 0.0;
                 fragmentation_stats_.wasted_space[I] = 0;
+                return;
+            }
             }
         }
+        if ( ! any_open || class_total == 0) return;
+        fragmentation_stats_.fill_ratios[I] = double(class_used) / double(class_total);
+        fragmentation_stats_.wasted_space[I] =
+            class_used > class_ideal ? class_used - class_ideal : 0;
     });
 #endif
 }
@@ -2664,7 +2825,7 @@ size_t database_impl::estimate_memory_usage(size_t index) const {
     }
 
     for (auto const v : catalogs_[index].below(current_versions_[index])) {
-        auto file_name = db_path_ / fmt::format(data_file_format, index, v);
+        auto file_name = db_path_ / detail::container_file_name(index, v);
         if (fs::exists(file_name)) {
             total += fs::file_size(file_name);
         }
@@ -2710,8 +2871,18 @@ database_statistics database_impl::get_statistics() {
         summary.active_maps_probed = stats.lookups.lookups_received;
         stats.lookups.classes.push_back(summary);
     } else {
+        // One entry per class, summed over that class's shards. A lookup is
+        // charged to the class it searched; which shard held the answer is a
+        // detail of where the class keeps its entries, not a separate class.
         for (size_t index = 0; index < container_count; ++index) {
-            auto summary = lookup_stats_[index].get_summary();
+            class_lookup_summary summary;
+            uint64_t probe_total = 0;
+            uint64_t distance_total = 0;
+            for (uint32_t sh = 0; sh != detail::shards_in_class(index); ++sh) {
+                lookup_stats_[detail::slot_of(index, sh)]
+                    .accumulate_into(summary, probe_total, distance_total);
+            }
+            lookup_stats::finish_summary(summary, probe_total, distance_total);
             summary.container_class = index;
             stats.lookups.classes.push_back(summary);
         }
@@ -2742,12 +2913,24 @@ database_statistics database_impl::get_statistics() {
             reference_segment_ ? reference_segment_->get_size() : reference_active_file_size_;
     } else {
         for (size_t i = 0; i < container_count; ++i) {
-            stats.containers[i] = container_stats_[i];
-            stats.total_inserts += container_stats_[i].total_inserts;
-            stats.total_deletes += container_stats_[i].total_deletes;
-            stats.rotations_per_container[i] = current_versions_[i];
-            stats.rotations_by_cause[i] = rotation_causes_[i];
-            stats.memory_usage_per_container[i] = estimate_memory_usage(i);
+            auto& into = stats.containers[i];
+            into = {};
+            stats.rotations_per_container[i] = 0;
+            stats.rotations_by_cause[i] = {};
+            stats.memory_usage_per_container[i] = 0;
+
+            for (uint32_t sh = 0; sh != detail::shards_in_class(i); ++sh) {
+                size_t const slot = detail::slot_of(i, sh);
+                accumulate_container_stats(into, container_stats_[slot]);
+                stats.total_inserts += container_stats_[slot].total_inserts;
+                stats.total_deletes += container_stats_[slot].total_deletes;
+                // Rotations are per container, so a class that rotated its
+                // shards three times each has rotated nine times. Summing is
+                // what makes this comparable with the file count beside it.
+                stats.rotations_per_container[i] += current_versions_[slot];
+                accumulate_rotation_causes(stats.rotations_by_cause[i], rotation_causes_[slot]);
+                stats.memory_usage_per_container[i] += estimate_memory_usage(slot);
+            }
         }
     }
 
@@ -2899,24 +3082,38 @@ sizing_report database_impl::get_sizing_report() const {
             ? double(info.total_wasted_bytes) / double(info.historical_inserts)
             : 0.0;
     } else {
+        // This report is per class. The state behind it is per slot, so a
+        // sharded class is the sum of its shards: counting one of them would
+        // report a fraction of the database as though it were all of it.
         for (size_t i = 0; i < container_count; ++i) {
             auto& info = report.containers[i];
             info.container_size = container_sizes[i];
             // The setting, deliberately: this field is named for what a new
             // segment is created with. What the open one measures is reported by
-            // the fragmentation figures beside it.
-            info.file_size_setting = capacity_[i].file_size;
-            info.file_count = catalogs_[i].size();
-            info.current_entries = container_stats_[i].current_size;
-            info.historical_inserts = container_stats_[i].total_inserts;
-            info.historical_deletes = container_stats_[i].total_deletes;
+            // the fragmentation figures beside it. Every shard of a class is
+            // created with the same setting, so this is that one setting and not
+            // a sum — adding it up would name a size no file has.
+            info.file_size_setting = capacity_[detail::slot_of(i, 0)].file_size;
+            info.file_count = 0;
+            info.current_entries = 0;
+            info.historical_inserts = 0;
+            info.historical_deletes = 0;
             info.total_wasted_bytes = 0;
 
-            for (auto const& [value_size, count] : container_stats_[i].value_size_distribution) {
-                if (container_sizes[i] > value_size) {
-                    info.total_wasted_bytes += (container_sizes[i] - value_size) * count;
+            for (uint32_t sh = 0; sh < detail::shards_in_class(i); ++sh) {
+                size_t const slot = detail::slot_of(i, sh);
+                info.file_count += catalogs_[slot].size();
+                info.current_entries += container_stats_[slot].current_size;
+                info.historical_inserts += container_stats_[slot].total_inserts;
+                info.historical_deletes += container_stats_[slot].total_deletes;
+
+                for (auto const& [value_size, count] :
+                         container_stats_[slot].value_size_distribution) {
+                    if (container_sizes[i] > value_size) {
+                        info.total_wasted_bytes += (container_sizes[i] - value_size) * count;
+                    }
+                    report.global_value_size_histogram[value_size] += count;
                 }
-                report.global_value_size_histogram[value_size] += count;
             }
 
             info.avg_waste_per_entry = info.historical_inserts > 0
@@ -3543,13 +3740,16 @@ std::optional<full_find_result> database_impl::full_find(raw_outpoint const& key
 
     for_each_index<container_count>([&](auto I) {
         if (!result) {
-            auto& map = container<I>();
+            // One shard, never all of them: the key decides which, so a class
+            // that is split costs the same single probe it always did.
+            auto const slot = detail::slot_for_key(I.value, key);
+            auto& map = container<I>(slot);
             if (auto it = map.find(key); it != map.end()) {
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 probe_stats_.record_answered(height, it->second.block_height);
 #endif
 #if UTXOZ_STATISTICS_LEVEL >= 2
-                lookup_stats_[I.value].record_answered_from_active();
+                lookup_stats_[slot].record_answered_from_active();
 #endif
                 auto data = it->second.get_data();
                 result = full_find_result{bytes(data.begin(), data.end()), it->second.block_height};
@@ -3587,6 +3787,13 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     // container for them to mix in (#116).
     auto pending = working_set_of<lookup_request>(requests);
     log::debug("Resolving {} full lookups ({} distinct)...", requests.size(), pending.size());
+
+    // Where each key can be. Inside the sharded class a key lives in the one
+    // shard its hash names, so a file of any other shard is skipped for it: not
+    // searched, not counted, and not opened at all when nobody pending could be
+    // in it. Every class stays a candidate - the request does not say which
+    // class a key is in - so this rules out shards, never classes.
+    auto const key_shards = key_shards_of<lookup_request>(requests);
 
     // A resolution either covers everything it needed to, or it says so.
     //
@@ -3650,13 +3857,26 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
         uint64_t resolved = 0;
         uint64_t version_distance_total = 0;
 #if UTXOZ_STATISTICS_LEVEL >= 2
-        /// How many generation files this resolution has searched so far, across
-        /// every class. A key answered by the nth file cost n file probes, which
-        /// is what `probe_ordinal` means: the cost, not the version number.
-        uint64_t files_probed = 0;
-        std::array<class_tally, container_count> per_class{};
+        /// How many files each request has been searched in so far, by request
+        /// index. A key answered in the nth file it was searched in cost n file
+        /// probes, which is what `probe_ordinal` means: the key's own cost, not
+        /// the version number.
+        ///
+        /// Per request, not one count for the batch. With routing, a file opened
+        /// for another shard's keys is not searched for this one, so a batch-wide
+        /// count of files charged every key for files it never met. Sized to the
+        /// batch, like `pending`, and only at this level.
+        std::vector<uint32_t> searches_by_request;
+        // By slot, not by class. lookup_stats_ is indexed by slot, and a tally
+        // indexed by class published into it put class 1's history into shard 1
+        // of class 0 as soon as there was more than one shard. The report sums a
+        // class's shards back together; this only has to land on the right one.
+        std::array<class_tally, detail::slot_count> per_slot{};
 #endif
     } tally;
+#if UTXOZ_STATISTICS_LEVEL >= 2
+    tally.searches_by_request.assign(requests.size(), 0);
+#endif
 #endif
 
     bool complete = true;
@@ -3665,27 +3885,25 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
     // places, so the cause is carried rather than flattened.
     error_code failure = error_code::version_unreadable;
 
-    auto probe_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>, size_t version) {
+    auto probe_full_file = [&]<size_t Index>(std::integral_constant<size_t, Index>, size_t slot, size_t version) {
+        // Nobody pending could be in this file, so it is not opened. That is not
+        // only cheaper: a file that cannot be read but could not have held any
+        // of these keys is not a reason to call the resolution incomplete.
+        auto const eligible = pending_eligible_in(pending, key_shards, slot);
+        if (eligible == 0) return;
         try {
             if (failpoints::fail_historical_open_version.load(std::memory_order_relaxed)
                     == static_cast<uint64_t>(version)) {
                 throw std::runtime_error("failpoint: version file refused to open");
             }
-            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(Index, version);
+            auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(slot, version);
 
 #if UTXOZ_STATISTICS_LEVEL >= 1
             cache_hit ? ++tally.cache_hits : ++tally.cache_misses;
 #if UTXOZ_STATISTICS_LEVEL >= 2
-            ++tally.files_probed;
-            auto& mine = tally.per_class[Index];
+            auto& mine = tally.per_slot[slot];
             ++mine.files_opened;
             if (cache_hit) ++mine.cache_hits;
-            // Every key still pending is about to be looked for in this file, so
-            // this is the per-key figure: a thousand keys across three files is
-            // three thousand probes, and a key nobody finds was probed by all of
-            // them. Added once per file rather than once per key, which is the
-            // same number without an atomic in the inner loop.
-            mine.generations_probed += pending.size();
 #endif
 #else
             (void) cache_hit;
@@ -3694,9 +3912,24 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
             // Compact in place: what is not found is kept, in order, and the
             // found ones fall off the end. One pass, no allocation, and the
             // caller's span is never written to.
+            // The per-key figure, counted where the work is done: a thousand keys
+            // across three files is three thousand probes, and a key nobody finds
+            // was probed by every file of its own shard. A key of another shard is
+            // neither looked for nor charged. Counted as searches made rather than
+            // as keys eligible, so the figure cannot claim less work than the loop
+            // actually did.
+            [[maybe_unused]] uint64_t searched = 0;
             size_t keep = 0;
             for (size_t i = 0; i < pending.size(); ++i) {
                 auto const idx = pending[i];
+                if ( ! request_may_be_in(key_shards, idx, slot)) {
+                    pending[keep++] = idx;
+                    continue;
+                }
+#if UTXOZ_STATISTICS_LEVEL >= 2
+                ++searched;
+                ++tally.searches_by_request[idx];
+#endif
                 auto map_it = map.find(requests[idx].key);
                 if (map_it == map.end()) {
                     pending[keep++] = idx;
@@ -3705,23 +3938,26 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 ++tally.resolved;
                 tally.version_distance_total +=
-                    static_cast<uint64_t>(current_versions_[Index] - version);
+                    static_cast<uint64_t>(current_versions_[slot] - version);
 #endif
 #if UTXOZ_STATISTICS_LEVEL >= 2
-                // Two different numbers, which used to be one. `files_probed` is
+                // Two different numbers, which used to be one. The ordinal is
                 // how many files this key was searched in — its cost. The version
                 // distance is how far back the answering generation sits, which
                 // is not the same: compaction leaves gaps in the numbering, and
                 // the cache is searched before the catalogue, so neither the
                 // order nor the arithmetic of the versions describes the search.
-                tally.per_class[Index].answered(
-                    tally.files_probed,
-                    static_cast<uint64_t>(current_versions_[Index] - version));
+                tally.per_slot[slot].answered(
+                    tally.searches_by_request[idx],
+                    static_cast<uint64_t>(current_versions_[slot] - version));
 #endif
                 auto data = map_it->second.get_data();
                 resolved.found.emplace(requests[idx].key,
                     full_find_result{bytes(data.begin(), data.end()), map_it->second.block_height});
             }
+#if UTXOZ_STATISTICS_LEVEL >= 2
+            tally.per_slot[slot].generations_probed += searched;
+#endif
             pending.resize(keep);
         } catch (std::exception const& e) {
             // Not recoverable by carrying on: this file might hold any of the
@@ -3740,25 +3976,26 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
             return a.second > b.second;
         });
 
-        for (auto const& [container_index, version] : cached_files) {
+        for (auto const& [slot, version] : cached_files) {
             if (pending.empty()) break;
-            if (container_index == reference_sentinel_index) continue;
-            switch (container_index) {
-                case 0: probe_full_file(std::integral_constant<size_t, 0>{}, version); break;
-                case 1: probe_full_file(std::integral_constant<size_t, 1>{}, version); break;
-                case 2: probe_full_file(std::integral_constant<size_t, 2>{}, version); break;
-                case 3: probe_full_file(std::integral_constant<size_t, 3>{}, version); break;
-                case 4: probe_full_file(std::integral_constant<size_t, 4>{}, version); break;
+            if (slot == reference_sentinel_index) continue;
+            if (slot >= detail::slot_count) continue;
+            switch (detail::class_of_slot(slot)) {
+                case 0: probe_full_file(std::integral_constant<size_t, 0>{}, slot, version); break;
+                case 1: probe_full_file(std::integral_constant<size_t, 1>{}, slot, version); break;
+                case 2: probe_full_file(std::integral_constant<size_t, 2>{}, slot, version); break;
+                case 3: probe_full_file(std::integral_constant<size_t, 3>{}, slot, version); break;
+                case 4: probe_full_file(std::integral_constant<size_t, 4>{}, slot, version); break;
             }
         }
     }
 
     // Phase 2: remaining files
     if (!pending.empty()) {
-        std::array<std::set<size_t>, container_count> processed_versions;
-        for (auto const& [container_index, version] : cached_files) {
-            if (container_index < container_count) {
-                processed_versions[container_index].insert(version);
+        std::array<std::set<size_t>, detail::slot_count> processed_versions;
+        for (auto const& [slot, version] : cached_files) {
+            if (slot < detail::slot_count) {
+                processed_versions[slot].insert(version);
             }
         }
 
@@ -3771,11 +4008,20 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
             if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                 throw std::runtime_error("failpoint: catalogue refused to be listed");
             }
-            for (auto const v : catalogs_[I.value].below(current_versions_[I.value])) {
-                if (pending.empty()) break;
-                if (processed_versions[I.value].contains(v)) continue;
+            // Each shard of this class keeps its own history, and a key can only
+            // be in the shard its own hash names. Walking the others would be
+            // work with no possible result.
+            //
+            // So each shard is walked only while some pending key could be in it,
+            // and inside probe_full_file each key is looked for only in its own.
+            for (uint32_t sh = 0; sh != detail::shards_in_class(I.value); ++sh) {
+                auto const slot = detail::slot_of(I.value, sh);
+                for (auto const v : catalogs_[slot].below(current_versions_[slot])) {
+                    if (pending_eligible_in(pending, key_shards, slot) == 0) break;
+                    if (processed_versions[slot].contains(v)) continue;
 
-                probe_full_file(I, v);
+                    probe_full_file(I, slot, v);
+                }
             }
             } catch (std::exception const& e) {
                 // Not knowing which files exist is its own failure, and there is
@@ -3812,14 +4058,14 @@ result<full_resolution> database_impl::full_resolve(std::span<lookup_request con
         resolution_stats_.record_resolved_batch(tally.resolved, tally.version_distance_total);
     }
 #if UTXOZ_STATISTICS_LEVEL >= 2
-    for (size_t index = 0; index < container_count; ++index) {
-        auto const& mine = tally.per_class[index];
-        // A class this sweep never touched has nothing to publish. Skipping it
+    for (size_t slot = 0; slot < detail::slot_count; ++slot) {
+        auto const& mine = tally.per_slot[slot];
+        // A slot this sweep never touched has nothing to publish. Skipping it
         // is not only tidiness: every one of these is an atomic increment, and a
-        // sweep that visited one class was otherwise paying for five.
+        // sweep that visited one slot was otherwise paying for all of them.
         if (mine.files_opened == 0 && mine.resolved == 0) continue;
 
-        auto& published = lookup_stats_[index];
+        auto& published = lookup_stats_[slot];
         published.record_file_opened(mine.files_opened, mine.cache_hits);
         published.record_generations_probed(mine.generations_probed);
         if (mine.resolved > 0) {
@@ -4296,53 +4542,59 @@ result<> database_impl::reference_for_each_entry_typed(
 // =============================================================================
 // Explicit template instantiations
 // =============================================================================
+//
+// Every one of these now takes the slot it acts on as its first argument. The
+// class still comes in as the template parameter, because it fixes the map type;
+// the slot picks which of that class's shards is meant. At N=1 the two coincide:
+// slot i is class i, and these instantiations cover the same calls they did
+// before sharding existed.
 
-template result<> database_impl::open_existing_container<0>(size_t);
-template result<> database_impl::open_existing_container<1>(size_t);
-template result<> database_impl::open_existing_container<2>(size_t);
-template result<> database_impl::open_existing_container<3>(size_t);
-template result<> database_impl::open_existing_container<4>(size_t);
-template result<> database_impl::create_container<0>(size_t);
-template result<> database_impl::create_container<1>(size_t);
-template result<> database_impl::create_container<2>(size_t);
-template result<> database_impl::create_container<3>(size_t);
-template result<> database_impl::create_container<4>(size_t);
+template result<> database_impl::open_existing_container<0>(size_t, size_t);
+template result<> database_impl::open_existing_container<1>(size_t, size_t);
+template result<> database_impl::open_existing_container<2>(size_t, size_t);
+template result<> database_impl::open_existing_container<3>(size_t, size_t);
+template result<> database_impl::open_existing_container<4>(size_t, size_t);
+template result<> database_impl::create_container<0>(size_t, size_t);
+template result<> database_impl::create_container<1>(size_t, size_t);
+template result<> database_impl::create_container<2>(size_t, size_t);
+template result<> database_impl::create_container<3>(size_t, size_t);
+template result<> database_impl::create_container<4>(size_t, size_t);
 
 // The const accessor, because src/census.cpp reads the active maps from another
 // translation unit. The non-const one is used only here and needs no instance.
-template utxo_map<container_sizes[0]> const& database_impl::container<0>() const;
-template utxo_map<container_sizes[1]> const& database_impl::container<1>() const;
-template utxo_map<container_sizes[2]> const& database_impl::container<2>() const;
-template utxo_map<container_sizes[3]> const& database_impl::container<3>() const;
-template utxo_map<container_sizes[4]> const& database_impl::container<4>() const;
+template utxo_map<container_sizes[0]> const& database_impl::container<0>(size_t) const;
+template utxo_map<container_sizes[1]> const& database_impl::container<1>(size_t) const;
+template utxo_map<container_sizes[2]> const& database_impl::container<2>(size_t) const;
+template utxo_map<container_sizes[3]> const& database_impl::container<3>(size_t) const;
+template utxo_map<container_sizes[4]> const& database_impl::container<4>(size_t) const;
 
-template void database_impl::close_container<0>();
-template void database_impl::close_container<1>();
-template void database_impl::close_container<2>();
-template void database_impl::close_container<3>();
-template void database_impl::close_container<4>();
+template void database_impl::close_container<0>(size_t);
+template void database_impl::close_container<1>(size_t);
+template void database_impl::close_container<2>(size_t);
+template void database_impl::close_container<3>(size_t);
+template void database_impl::close_container<4>(size_t);
 
-template void database_impl::new_version<0>();
-template void database_impl::new_version<1>();
-template void database_impl::new_version<2>();
-template void database_impl::new_version<3>();
-template void database_impl::new_version<4>();
+template void database_impl::new_version<0>(size_t);
+template void database_impl::new_version<1>(size_t);
+template void database_impl::new_version<2>(size_t);
+template void database_impl::new_version<3>(size_t);
+template void database_impl::new_version<4>(size_t);
 
-template result<> database_impl::compact_container<0>();
-template result<> database_impl::compact_container<1>();
-template result<> database_impl::compact_container<2>();
-template result<> database_impl::compact_container<3>();
-template result<> database_impl::compact_container<4>();
+template result<> database_impl::compact_container<0>(size_t);
+template result<> database_impl::compact_container<1>(size_t);
+template result<> database_impl::compact_container<2>(size_t);
+template result<> database_impl::compact_container<3>(size_t);
+template result<> database_impl::compact_container<4>(size_t);
 
-template result<bool> database_impl::insert_in_index<0>(raw_outpoint const&, output_data_span, uint32_t);
-template result<> database_impl::rotate_for<0>(rotation_cause);
-template result<bool> database_impl::insert_in_index<1>(raw_outpoint const&, output_data_span, uint32_t);
-template result<> database_impl::rotate_for<1>(rotation_cause);
-template result<bool> database_impl::insert_in_index<2>(raw_outpoint const&, output_data_span, uint32_t);
-template result<> database_impl::rotate_for<2>(rotation_cause);
-template result<bool> database_impl::insert_in_index<3>(raw_outpoint const&, output_data_span, uint32_t);
-template result<> database_impl::rotate_for<3>(rotation_cause);
-template result<bool> database_impl::insert_in_index<4>(raw_outpoint const&, output_data_span, uint32_t);
-template result<> database_impl::rotate_for<4>(rotation_cause);
+template result<bool> database_impl::insert_in_index<0>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<> database_impl::rotate_for<0>(size_t, rotation_cause);
+template result<bool> database_impl::insert_in_index<1>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<> database_impl::rotate_for<1>(size_t, rotation_cause);
+template result<bool> database_impl::insert_in_index<2>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<> database_impl::rotate_for<2>(size_t, rotation_cause);
+template result<bool> database_impl::insert_in_index<3>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<> database_impl::rotate_for<3>(size_t, rotation_cause);
+template result<bool> database_impl::insert_in_index<4>(size_t, raw_outpoint const&, output_data_span, uint32_t);
+template result<> database_impl::rotate_for<4>(size_t, rotation_cause);
 
 } // namespace utxoz::detail

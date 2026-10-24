@@ -97,7 +97,8 @@ void usage(std::FILE* to) {
         "\n"
         "usage: utxoz_verify_unique [options] <database-directory>\n"
         "\n"
-        "exit: 0 unique, 2 duplicates found, 1 could not be verified\n"
+        "exit: 0 unique and every entry in its own shard, 2 a duplicate or a\n"
+        "      misplaced entry was found, 1 could not be verified\n"
         "\n"
         "options:\n"
         "  --json                  machine-readable (default)\n"
@@ -167,7 +168,12 @@ int run(fs::path const& dir, utxoz::verify_options const& options, bool as_json)
     // caller reading the status would act on a document it never fully received.
     bool const written = std::fwrite(out.data(), 1, out.size(), stdout) == out.size()
         && std::fflush(stdout) == 0;
-    bool const unique = report->unique;
+    // Both verdicts, because both make the store unusable and neither implies the
+    // other: a misplaced entry is unreachable — a lookup computes the shard and
+    // searches there — so a store that is free of duplicates and misfiled is not
+    // a store that verified. With one shard placement is always correct, so this
+    // is the status the tool always returned for the shipped geometry.
+    bool const unique = report->unique && report->placement_correct;
     db.close();
     if ( ! written) {
         std::fputs("verify: the report could not be written in full, so the verdict is "

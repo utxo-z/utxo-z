@@ -452,7 +452,6 @@ result<census_report> database_impl::census(census_options const& options) const
             cls.payload_capacity = container_capacities[Index];
             cls.value_size = sizeof(utxo_value<Size>);
             cls.pair_size = sizeof(typename utxo_map<Size>::value_type);
-            cls.active_generation = current_versions_[Index];
             cls.unused_payload_capacity = {0, metric_status::measured,
                                            "summed over the generations of this class"};
             cls.unattributed_allocated_bytes = {0, metric_status::measured,
@@ -464,47 +463,70 @@ result<census_report> database_impl::census(census_options const& options) const
 
             std::vector<uint64_t> histogram(cls.payload_capacity + 1, 0);
 
-            for (auto const version : catalogs_[Index].versions()) {
-                generation_census gen;
-                gen.generation = version;
-                gen.active = (version == current_versions_[Index]);
-                auto const path = data_path(Index, version);
-                if (auto ok = file_facts(path, gen); ! ok) { failure = ok.error(); return; }
+            // Each shard is a container of its own, with its own catalogue and
+            // its own active generation, so the walk is per slot. The class-level
+            // figures are sums over its shards; `shards_detail` keeps them apart.
+            cls.shards = detail::shards_in_class(Index);
+            for (uint32_t shard = 0; shard < cls.shards; ++shard) {
+                size_t const slot = detail::slot_of(Index, shard);
+                shard_census sh;
+                sh.shard = shard;
+                sh.active_generation = current_versions_[slot];
+                cls.active_generation = std::max(cls.active_generation, sh.active_generation);
 
-                if (gen.active && segments_[Index]) {
-                    auto ok = accumulate_full<Size>(Index, container<Index>(), gen, histogram);
-                    if ( ! ok) { failure = ok.error(); return; }
-                    gen.segment_size_bytes = segments_[Index]->get_size();
-                    gen.segment_free_bytes = segments_[Index]->get_free_memory();
-                } else {
-                    auto opened = open_existing_segment(path);
-                    if ( ! opened) { failure = opened.error(); return; }
-                    // As above: mapped is not the same as ours, and a census that
-                    // counted a misplaced file would report a database that does
-                    // not exist.
-                    if (auto stamped = validate_stamp(
-                            **opened, path,
-                            expected_identity(uint32_t(Index), version)); ! stamped) {
-                        failure = stamped.error(); return;
+                for (auto const version : catalogs_[slot].versions()) {
+                    generation_census gen;
+                    gen.generation = version;
+                    gen.shard = shard;
+                    gen.active = (version == current_versions_[slot]);
+                    auto const path = data_path(slot, version);
+                    if (auto ok = file_facts(path, gen); ! ok) { failure = ok.error(); return; }
+
+                    if (gen.active && segments_[slot]) {
+                        auto ok = accumulate_full<Size>(Index, container<Index>(slot), gen, histogram);
+                        if ( ! ok) { failure = ok.error(); return; }
+                        gen.segment_size_bytes = segments_[slot]->get_size();
+                        gen.segment_free_bytes = segments_[slot]->get_free_memory();
+                    } else {
+                        auto opened = open_existing_segment(path);
+                        if ( ! opened) { failure = opened.error(); return; }
+                        // As above: mapped is not the same as ours, and a census that
+                        // counted a misplaced file would report a database that does
+                        // not exist.
+                        if (auto stamped = validate_stamp(
+                                **opened, path,
+                                expected_identity(uint32_t(slot), version)); ! stamped) {
+                            failure = stamped.error(); return;
+                        }
+                        auto found = find_single_named<utxo_map<Size>>(**opened, map_object_name, path);
+                        if ( ! found) { failure = found.error(); return; }
+                        auto ok = accumulate_full<Size>(Index, **found, gen, histogram);
+                        if ( ! ok) { failure = ok.error(); return; }
+                        gen.segment_size_bytes = (*opened)->get_size();
+                        gen.segment_free_bytes = (*opened)->get_free_memory();
                     }
-                    auto found = find_single_named<utxo_map<Size>>(**opened, map_object_name, path);
-                    if ( ! found) { failure = found.error(); return; }
-                    auto ok = accumulate_full<Size>(Index, **found, gen, histogram);
-                    if ( ! ok) { failure = ok.error(); return; }
-                    gen.segment_size_bytes = (*opened)->get_size();
-                    gen.segment_free_bytes = (*opened)->get_free_memory();
+
+                    if (auto ok = finish_generation(gen, cls.pair_size); ! ok) {
+                        failure = ok.error(); return;
+                    }
+                    ++report.files_examined;
+                    ++cls.generations;
+                    ++sh.generations;
+                    if ( ! checked_add(report.entries_examined, gen.entries)
+                            || ! fold_into_class(cls, gen)) {
+                        failure = error_code::entry_corrupt; return;
+                    }
+                    if ( ! checked_add(sh.entries, gen.entries)
+                            || ! checked_add(sh.logical_file_bytes, gen.logical_file_bytes)) {
+                        failure = error_code::entry_corrupt; return;
+                    }
+                    if (options.per_generation_detail) cls.generations_detail.push_back(gen);
                 }
 
-                if (auto ok = finish_generation(gen, cls.pair_size); ! ok) {
-                    failure = ok.error(); return;
-                }
-                ++report.files_examined;
-                ++cls.generations;
-                if ( ! checked_add(report.entries_examined, gen.entries)
-                        || ! fold_into_class(cls, gen)) {
-                    failure = error_code::entry_corrupt; return;
-                }
-                if (options.per_generation_detail) cls.generations_detail.push_back(gen);
+
+                // Only when the class actually has shards, so that a build with
+                // one shard reports exactly the fields it reported before.
+                if (cls.shards > 1) cls.shards_detail.push_back(sh);
             }
 
             cls.payload_histogram = compact_histogram(histogram);
@@ -657,13 +679,27 @@ std::string to_json(census_report const& r) {
         for (size_t g = 0; g < c.generations_detail.size(); ++g) {
             auto const& d = c.generations_detail[g];
             out += fmt::format(
-                "\n      {{\"generation\": {}, \"active\": {}, \"entries\": {}, "
+                "\n      {{{}\"generation\": {}, \"active\": {}, \"entries\": {}, "
                 "\"bucket_count\": {}, \"load_factor\": {:.6f}, \"model_inconsistent\": {}, {}}}{}",
+                c.shards > 1 ? fmt::format(R"("shard": {}, )", d.shard) : std::string{},
                 d.generation, d.active ? "true" : "false", d.entries, d.bucket_count,
                 d.load_factor(), d.model_inconsistent ? "true" : "false", json_bytes(d),
                 g + 1 < c.generations_detail.size() ? "," : "");
         }
-        out += "]}";
+        out += "]";
+        if (c.shards > 1) {
+            out += fmt::format(",\n     \"shards\": {},\n     \"shards_detail\": [", c.shards);
+            for (size_t k = 0; k < c.shards_detail.size(); ++k) {
+                auto const& sh = c.shards_detail[k];
+                out += fmt::format(
+                    "\n      {{\"shard\": {}, \"entries\": {}, \"generations\": {}, "
+                    "\"active_generation\": {}, \"logical_file_bytes\": {}}}{}",
+                    sh.shard, sh.entries, sh.generations, sh.active_generation,
+                    sh.logical_file_bytes, k + 1 < c.shards_detail.size() ? "," : "");
+            }
+            out += "]";
+        }
+        out += "}";
         out += (i + 1 < r.classes.size()) ? ",\n" : "\n";
     }
     out += "  ]\n}\n";
@@ -732,10 +768,18 @@ std::string to_text(census_report const& r) {
         }
 
         for (auto const& g : c.generations_detail) {
-            out += fmt::format("  generation {}{}  entries {}  buckets {}  load {:.4f}{}\n",
+            out += fmt::format("  {}generation {}{}  entries {}  buckets {}  load {:.4f}{}\n",
+                               c.shards > 1 ? fmt::format("shard {}  ", g.shard) : std::string{},
                                g.generation, g.active ? " (active)" : "", g.entries,
                                g.bucket_count, g.load_factor(),
                                g.model_inconsistent ? "  MODEL INCONSISTENT" : "");
+        }
+        // Printed only where there is something to say: a class with one shard
+        // reports exactly the lines it reported before shards existed.
+        for (auto const& sh : c.shards_detail) {
+            out += fmt::format("  shard {}: entries {}  generations {}  active v{}  logical file size {}\n",
+                               sh.shard, sh.entries, sh.generations, sh.active_generation,
+                               sh.logical_file_bytes);
         }
         out += "\n";
     }

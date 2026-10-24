@@ -210,6 +210,37 @@ class_lookup_summary lookup_stats::get_summary() const noexcept {
     return out;
 }
 
+void lookup_stats::accumulate_into(class_lookup_summary& out, uint64_t& probe_total,
+                                   uint64_t& distance_total) const noexcept {
+    // active_maps_probed is filled in by the caller, as in get_summary().
+    out.answered_from_active += counters_.sum(f_answered_from_active);
+    out.resolved_historical += counters_.sum(f_resolved_historical);
+    out.generations_probed += counters_.sum(f_generations_probed);
+    out.files_opened += counters_.sum(f_files_opened);
+    out.cache_hits += counters_.sum(f_cache_hits);
+
+    probe_total += counters_.sum(f_probe_ordinal_total);
+    distance_total += counters_.sum(f_version_distance_total);
+
+    for (size_t i = 0; i < bucket_count; ++i) {
+        out.probe_ordinal_histogram[i] += counters_.sum(f_ordinal_bucket + i);
+        out.version_distance_histogram[i] += counters_.sum(f_distance_bucket + i);
+    }
+}
+
+void lookup_stats::finish_summary(class_lookup_summary& out, uint64_t probe_total,
+                                  uint64_t distance_total) noexcept {
+    // The same clamp get_summary() applies, and for the same reason: the fields
+    // are read one at a time while a writer may be between two of them.
+    if (out.cache_hits > out.files_opened) out.cache_hits = out.files_opened;
+
+    if (out.resolved_historical > 0) {
+        auto const answered = double(out.resolved_historical);
+        out.avg_probe_ordinal = double(probe_total) / answered;
+        out.avg_version_distance = double(distance_total) / answered;
+    }
+}
+
 #endif // UTXOZ_STATISTICS_LEVEL >= 2
 
 } // namespace utxoz

@@ -45,6 +45,8 @@
 #include <utxoz/database.hpp>
 #include <utxoz/utils.hpp>
 
+#include "shard_paths.hpp"
+
 namespace {
 
 inline std::atomic<uint64_t> rotation_test_counter{0};
@@ -117,12 +119,7 @@ size_t rotations_of(utxoz::full_db& db, size_t container) {
 
 /// Number of on-disk version files of a container.
 size_t count_data_files(std::string const& path, size_t container) {
-    auto const prefix = fmt::format("cont_{}_v", container);
-    size_t n = 0;
-    for (auto const& entry : std::filesystem::directory_iterator(path)) {
-        if (entry.path().filename().string().rfind(prefix, 0) == 0) ++n;
-    }
-    return n;
+    return utxoz::testing::count_class_files(path, container);
 }
 
 /**
@@ -132,13 +129,30 @@ size_t count_data_files(std::string const& path, size_t container) {
  * @return live entry count at the moment container 0 rotated, or 0 if it never
  *         rotated within max_batches.
  */
+/// Fills until **every** container of the 48-byte class has rotated.
+///
+/// Not "until class 0 rotates". The class's rotation count is the sum over its
+/// containers, so it reaches one as soon as any of them rotates — and every
+/// caller here goes on to require that keys inserted before the call are no
+/// longer in an active map. With sixteen containers that is false for fifteen
+/// out of sixteen of them.
+///
+/// Waiting for all of them rather than for one named key's container is both
+/// simpler and what the callers mean, and it costs the same: filling every
+/// container to its threshold takes the entries the class holds, which is the
+/// number one container took when the class was one container.
+///
+/// `dir` is where the files are; the depth of a container is read from there
+/// because the statistics cannot tell the containers of a class apart.
 size_t fill_until_container0_rotates(utxoz::full_db& db,
+                                     std::string const& dir,
                                      std::mt19937_64& rng,
                                      uint32_t& height,
                                      size_t batch_size,
                                      size_t max_batches,
                                      size_profile profile,
                                      bool spend_as_we_go) {
+    auto const depth_at_start = utxoz::testing::generations_reached(dir, 0);
     std::vector<utxoz::raw_outpoint> spendable;
     std::vector<utxoz::raw_outpoint> created;
 
@@ -167,7 +181,7 @@ size_t fill_until_container0_rotates(utxoz::full_db& db,
 
         ++height;
 
-        if (rotations_of(db, 0) >= 1) {
+        if (utxoz::testing::generations_reached(dir, 0) > depth_at_start) {
             return db.size();
         }
     }
@@ -208,7 +222,7 @@ TEST_CASE("find(): before rotation resolves inline, after rotation it defers",
 
         uint32_t height = 2;
         auto const entries_at_rotation = fill_until_container0_rotates(
-            db, rng, height, /*batch_size=*/5'000, /*max_batches=*/400,
+            db, path, rng, height, /*batch_size=*/5'000, /*max_batches=*/400,
             size_profile::wide, /*spend_as_we_go=*/true);
 
         INFO("live entries at container-0 rotation: " << entries_at_rotation);
@@ -274,10 +288,15 @@ TEST_CASE("find(): one resolve() answers unresolved keys from every container",
             }
             ++height;
 
-            auto const stats = db.get_statistics();
+            // Each witness has to end up behind a rotation of the container it
+            // actually lives in. A class's rotation count is the sum over its
+            // shards, so it reaches one as soon as any shard rotates — and a
+            // witness in one of the others would still be in the active map,
+            // where find() answers and the test means it not to.
             bool all_rotated = true;
             for (size_t i = 0; i < utxoz::container_count; ++i) {
-                if (stats.rotations_per_container[i] < 1) all_rotated = false;
+                auto const sh = utxoz::testing::shard_for(i, witnesses[i]);
+                if (utxoz::testing::generations_in_shard(path, i, sh) < 2) all_rotated = false;
             }
             if (all_rotated) break;
         }
@@ -364,7 +383,7 @@ TEST_CASE("apply_deletes(): reaches keys the active version no longer holds",
 
         uint32_t height = 2;
         auto const entries_at_rotation = fill_until_container0_rotates(
-            db, rng, height, /*batch_size=*/5'000, /*max_batches=*/400,
+            db, path, rng, height, /*batch_size=*/5'000, /*max_batches=*/400,
             size_profile::wide, /*spend_as_we_go=*/false);
         REQUIRE(entries_at_rotation > 0);
 
@@ -420,7 +439,7 @@ TEST_CASE("lookups must be processed before deletions within a batch",
         REQUIRE(db.insert(key, value, 1).value());
 
         uint32_t height = 2;
-        REQUIRE(fill_until_container0_rotates(db, rng, height, 5'000, 400,
+        REQUIRE(fill_until_container0_rotates(db, path, rng, height, 5'000, 400,
                                               size_profile::wide, false) > 0);
 
         // Same batch: the key is read and spent. Both batches are the caller's
@@ -540,19 +559,31 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         uint32_t height = 1;
         constexpr size_t chunk = 1'000;
 
-        for (size_t c = 0; c < 2'000 && rotations_of(db, 0) < 3; ++c) {
-            size_t const version_before = rotations_of(db, 0);
+        // Rotations of one container, not of the class: with several shards the
+        // class's count is their sum, and a version index built from it would not
+        // name any container's generation. Every key below goes to that same
+        // container, so what is recorded is one history, chunk by chunk.
+        auto const versions_here = [&] {
+            return utxoz::testing::generations_in_shard(path, 0, 0) - 1;
+        };
+
+        for (size_t c = 0; c < 2'000 && versions_here() < 3; ++c) {
+            size_t const version_before = versions_here();
             std::vector<utxoz::raw_outpoint> chunk_keys;
             chunk_keys.reserve(chunk);
 
             for (size_t i = 0; i < chunk; ++i) {
-                auto const key = random_outpoint(rng, static_cast<uint32_t>(i % 4));
+                // Drawn until it belongs to the container this case is about.
+                utxoz::raw_outpoint key{};
+                do {
+                    key = random_outpoint(rng, static_cast<uint32_t>(i % 4));
+                } while (utxoz::testing::shard_for(0, key) != 0);
                 REQUIRE(db.insert(key, make_value(33, static_cast<uint8_t>(i)), height).has_value());
                 chunk_keys.push_back(key);
             }
             ++height;
 
-            size_t const version_after = rotations_of(db, 0);
+            size_t const version_after = versions_here();
             if (version_before == version_after && version_after < by_version.size()) {
                 auto& dst = by_version[version_after];
                 dst.insert(dst.end(), chunk_keys.begin(), chunk_keys.end());
@@ -562,7 +593,7 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
         // so a change in test-mode file sizing fails here instead of running
         // past end() when the slices are taken.
         constexpr size_t survivors = 50;
-        REQUIRE(rotations_of(db, 0) == 3);
+        REQUIRE(versions_here() == 3);
         for (auto const& v : by_version) REQUIRE(v.size() >= survivors);
 
         auto const erase_all = [&](std::vector<utxoz::raw_outpoint> const& keys) {
@@ -574,10 +605,19 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
             CHECK(progress.erased.size() == keys.size());
         };
 
-        // Free most of version 1 so that compaction actually has work to do:
-        // files get drained, unlinked and renumbered.
+        // Free most of versions 1 and 2 so that compaction actually has work to
+        // do: files get drained, unlinked and renumbered.
+        //
+        // Two versions rather than one. Whether a merge is possible is a question
+        // about entries against the container's capacity, and that capacity is a
+        // shard's, not a class's. Draining a single version left a pair that only
+        // just failed to fit once the container was smaller — a threshold this
+        // case has no business sitting on, since what it means to exercise is the
+        // renumbering after a merge, not the guard that decides there is one.
         erase_all(std::vector<utxoz::raw_outpoint>(by_version[1].begin() + survivors,
                                                    by_version[1].end()));
+        erase_all(std::vector<utxoz::raw_outpoint>(by_version[2].begin() + survivors,
+                                                   by_version[2].end()));
 
         // Sample of keys that must remain reachable through the whole exercise.
         std::vector<utxoz::raw_outpoint> probes(by_version[0].begin(),
@@ -601,14 +641,18 @@ TEST_CASE("compact_all() keeps the deferred paths consistent",
 
         auto const size_before = db.size();
         REQUIRE(scan_count(db) == size_before);
-        auto const files_before = count_data_files(path, 0);
+        // The container this case built a history in. Counting the class would
+        // mix in its other containers, which hold one generation each and have
+        // nothing to merge, and their files would mask the merge that matters.
+        auto const files_before = utxoz::testing::generations_in_shard(path, 0, 0);
 
         REQUIRE(db.compact_all().has_value());
 
         // Compaction must have actually merged files, otherwise the test is not
         // exercising the renumbering it claims to.
-        INFO("container-0 files: " << files_before << " -> " << count_data_files(path, 0));
-        REQUIRE(count_data_files(path, 0) < files_before);
+        INFO("container files: " << files_before << " -> "
+             << utxoz::testing::generations_in_shard(path, 0, 0));
+        REQUIRE(utxoz::testing::generations_in_shard(path, 0, 0) < files_before);
 
         CHECK(db.size() == size_before);
         CHECK(scan_count(db) == size_before);
@@ -683,7 +727,7 @@ TEST_CASE("the deferred contract holds at production sizing (~6.6M live UTXOs)",
 
         uint32_t height = 2;
         auto const entries_at_rotation = fill_until_container0_rotates(
-            db, rng, height, /*batch_size=*/100'000, /*max_batches=*/400,
+            db, path, rng, height, /*batch_size=*/100'000, /*max_batches=*/400,
             size_profile::realistic, /*spend_as_we_go=*/true);
 
         INFO("live entries at container-0 rotation: " << entries_at_rotation);

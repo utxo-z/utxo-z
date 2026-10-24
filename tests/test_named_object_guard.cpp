@@ -48,6 +48,8 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 
 #include "detail/segment_open.hpp"
@@ -70,9 +72,10 @@ fs::path make_unique_path(std::string_view tag) {
 }
 
 utxoz::raw_outpoint outpoint_of(uint64_t n) {
-    utxoz::raw_outpoint key{};
-    std::memcpy(key.data(), &n, sizeof(n));
-    return key;
+    // Every byte varies, as a txid's do. Writing only the low eight and leaving
+    // the rest zero makes distinct keys that all share bytes 24..35 — the only
+    // ones shard_of() reads — so every one of them lands in shard zero.
+    return utxoz::testing::spread_key(n);
 }
 
 size_t count_files(fs::path const& dir, std::string_view prefix) {
@@ -226,7 +229,7 @@ struct two_versions {
 
         std::vector<uint8_t> const value(8, 0xAB);
         uint64_t next = 0;
-        while (count_files(dir, "cont_0_v") < 2) {
+        while (utxoz::testing::generations_reached(dir, 0) < 2) {
             REQUIRE(db.insert(outpoint_of(next++), value, 700000).has_value());
             REQUIRE(next < 2'000'000);   // terminate on rotation, not on patience
         }
@@ -234,7 +237,7 @@ struct two_versions {
         db.close();
     }
 
-    [[nodiscard]] fs::path historical() const { return dir / "cont_0_v00000.dat"; }
+    [[nodiscard]] fs::path historical() const { return dir / utxoz::testing::class_file(0, 0); }
 
     ~two_versions() {
         std::error_code ec;
@@ -394,7 +397,7 @@ TEST_CASE("compaction refuses a source whose map cannot be reached", "[guard][co
 
         std::vector<uint8_t> const value(8, 0x11);
         uint64_t next = 0;
-        while (count_files(dir, "cont_0_v") < 3) {
+        while (utxoz::testing::generations_reached(dir, 0) < 3) {
             REQUIRE(db.insert(outpoint_of(next++), value, 100).has_value());
             REQUIRE(next < 2'000'000);   // terminate on rotation, not on patience
         }
@@ -406,7 +409,7 @@ TEST_CASE("compaction refuses a source whose map cannot be reached", "[guard][co
 
     // As with the traversals: damaged after the open, since the open refuses
     // this state on its own now.
-    auto const source = dir / "cont_0_v00000.dat";
+    auto const source = dir / utxoz::testing::class_file(0, 0);
 
     auto const expected_error = GENERATE(utxoz::error_code::segment_stamp_missing,
                                          utxoz::error_code::version_unreadable);
@@ -438,7 +441,9 @@ TEST_CASE("compaction refuses a source whose map cannot be reached", "[guard][co
     CHECK(building == 0);
 
     // Every source is still where it was: a refusal is not a partial merge.
-    CHECK(count_files(dir, "cont_0_v") == 3);
+    // Depth, not a total: the class reached three generations when every one of
+    // its containers did. Counting files would give three times the shard count.
+    CHECK(utxoz::testing::generations_reached(dir, 0) == 3);
 
     // And the refusal latches nothing. Repair the source into a file this
     // database accepts and run compaction again: it has to get as far as

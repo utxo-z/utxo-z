@@ -42,9 +42,16 @@
 #include <iostream>
 #include <span>
 
+#include <utxoz/census.hpp>
 #include <utxoz/config.hpp>
 #include <utxoz/database.hpp>
 #include <utxoz/version.hpp>
+
+// A consumer of the package compiles with no define of its own and still sees the
+// production shard count. If it saw anything else it would compute other slots
+// than the library it links, so this is checked here, where a consumer stands.
+static_assert(utxoz::shard_count == 8, "the package must be the production shard count");
+static_assert( ! utxoz::experimental_build, "an experimental build must never be packaged");
 
 int main() {
     std::cout << "utxoz " << utxoz::version << '\n';
@@ -100,9 +107,16 @@ int main() {
             return EXIT_FAILURE;
         }
 
+        // The library agrees with the header: it writes geometry 4.
+        auto const census = db.census();
+        if ( ! census || census->geometry_id != 4) {
+            std::cout << "full_db: the packaged library does not write geometry 4\n";
+            return EXIT_FAILURE;
+        }
+
         db.close();
         std::filesystem::remove_all(path);
-        std::cout << "full_db: ok\n";
+        std::cout << "full_db: ok (8 shards, geometry 4)\n";
     }
 
     {

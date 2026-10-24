@@ -39,6 +39,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 
 #include "detail/database_lock.hpp"
@@ -312,7 +314,7 @@ TEST_CASE("the claim is taken before recovery runs", "[database][lock]") {
     // files, and two of them doing that at once over one directory is the
     // hazard the claim exists to prevent.
     {
-        std::ofstream ofs(fmt::format("{}/cont_0_v00007.dat.building", path), std::ios::binary);
+        std::ofstream ofs(fmt::format("{}/{}.building", path, utxoz::testing::class_file(0, 7)), std::ios::binary);
         ofs << "an unfinished build";
     }
 
@@ -329,7 +331,7 @@ TEST_CASE("the claim is taken before recovery runs", "[database][lock]") {
     // claim was taken *first*. Nothing observable from out here distinguishes
     // the two orders; the ordering is verified by reading configure(), and this
     // pins the half that is observable.
-    CHECK_FALSE(fs::exists(fmt::format("{}/cont_0_v00007.dat.building", path)));
+    CHECK_FALSE(fs::exists(fmt::format("{}/{}.building", path, utxoz::testing::class_file(0, 7))));
 
     db.close();
 }

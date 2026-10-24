@@ -54,6 +54,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 #include <utxoz/types.hpp>
 
@@ -153,7 +155,7 @@ struct temp_db {
 template <size_t Index>
 std::vector<std::vector<uint8_t>> stored_values(fs::path const& dir) {
     constexpr size_t Size = utxoz::container_sizes[Index];
-    auto const file = dir / fmt::format(utxoz::detail::data_file_format, Index, 0);
+    auto const file = dir / utxoz::testing::class_file(Index, 0);
     std::vector<std::vector<uint8_t>> out;
     if ( ! fs::exists(file)) return out;
 
@@ -304,7 +306,7 @@ TEST_CASE("two databases written the same way are byte-identical", "[value]") {
 
     size_t compared = 0;
     for (size_t index = 0; index < utxoz::container_sizes.size(); ++index) {
-        auto const name = fmt::format(utxoz::detail::data_file_format, index, 0);
+        auto const name = utxoz::testing::class_file(index, 0);
         INFO(name);
         REQUIRE(fs::exists(a.dir / name));
         REQUIRE(fs::exists(b.dir / name));

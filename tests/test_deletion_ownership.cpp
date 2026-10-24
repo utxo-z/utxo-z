@@ -48,6 +48,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "shard_paths.hpp"
+
 #include <utxoz/database.hpp>
 
 #include "detail/durability.hpp"
@@ -68,6 +70,16 @@ utxoz::raw_outpoint outpoint_of(uint64_t n, uint32_t index) {
     utxoz::raw_outpoint key{};
     std::memcpy(key.data(), &n, sizeof(n));
     key[20] = 0x3D;
+    // Bytes 24..31 vary with n as well. They are the ones shard_of() reads, and
+    // leaving them zero would send every key of this fixture to shard zero: the
+    // other containers would never rotate, and a fixture that means to hand the
+    // deletion paths a class with history would hand them one container with
+    // history and seven with none.
+    uint64_t mixed = n + 0x9E3779B97F4A7C15ULL;
+    mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBULL;
+    mixed ^= mixed >> 31;
+    std::memcpy(key.data() + 24, &mixed, sizeof(mixed));
     std::memcpy(key.data() + 32, &index, sizeof(index));
     return key;
 }
@@ -123,7 +135,17 @@ struct fixture {
 
 fixture build_full(std::string_view tag) {
     fixture f{make_unique_path(tag), {}, {}};
-    for (uint64_t i = 0; i < 8; ++i) f.historical.push_back(outpoint_of(1'000 + i, 0));
+    // All eight in one container. These are the keys the deletion walk works
+    // through, and the cases below count its progress — the third deletion, the
+    // fourth file — which are statements about one walk over one history. Spread
+    // over the class's containers they would be eight walks of one, and a
+    // failpoint aimed at the third deletion would land somewhere else entirely.
+    for (uint64_t i = 0, n = 1'000; f.historical.size() < 8; ++n) {
+        auto const key = outpoint_of(n, 0);
+        if (utxoz::testing::shard_for(0, key) != 0) continue;
+        f.historical.push_back(key);
+        ++i;
+    }
     for (uint64_t i = 0; i < 4; ++i) f.never_stored.push_back(outpoint_of(900'000'000ULL + i, 5));
 
     auto opened = utxoz::full_db::open_for_testing(f.path, true);
@@ -137,14 +159,19 @@ fixture build_full(std::string_view tag) {
 
     uint64_t n = 10'000;
     uint32_t height = 2;
+    // Three generations in every one of the class's containers, so each of them
+    // has something to merge. The class's rotation count is the sum over its
+    // shards, so it reaches two as soon as two *different* shards have rotated
+    // once — leaving every container with a single generation and compaction
+    // with nothing to do, which is not the state these cases are built for.
     for (int round = 0; round < 400; ++round) {
-        if (db.get_statistics().rotations_per_container[0] >= 2) break;
+        if (utxoz::testing::generations_in_shard(f.path, 0, 0) >= 3) break;
         for (int i = 0; i < 5'000; ++i, ++n) {
             (void) db.insert(outpoint_of(n, 0), utxoz::output_data_span{value_of(33, 7)}, height);
         }
         ++height;
     }
-    REQUIRE(db.get_statistics().rotations_per_container[0] >= 2);
+    REQUIRE(utxoz::testing::generations_in_shard(f.path, 0, 0) >= 3);
     db.close();
     return f;
 }
