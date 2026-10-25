@@ -17,7 +17,9 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -40,6 +42,11 @@
 #include <utxoz/logging.hpp>
 #include <utxoz/statistics.hpp>
 #include <utxoz/types.hpp>
+
+#if defined(UTXOZ_LOG_SPDLOG)
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/callback_sink.h>
+#endif
 
 #include "../shard_paths.hpp"
 
@@ -161,15 +168,63 @@ struct figures {
     bool operator==(figures const&) const = default;
 };
 
+#if defined(UTXOZ_LOG_CUSTOM) || defined(UTXOZ_LOG_SPDLOG)
+// Install only while the database is quiescent, before starting workers, and
+// restore only after they have joined. This is test observation, not DB locking.
+struct scoped_log_capture {
+#if defined(UTXOZ_LOG_CUSTOM)
+    log_callback_t previous = get_log_callback();
+    explicit scoped_log_capture(std::function<void(std::string_view)> callback) {
+        set_log_callback([callback = std::move(callback)](log_level, std::string_view msg) {
+            callback(msg);
+        });
+    }
+    void reset() { if (active) { set_log_callback(std::move(previous)); active = false; } }
+#elif defined(UTXOZ_LOG_SPDLOG)
+    std::shared_ptr<spdlog::logger> previous = spdlog::default_logger();
+    std::shared_ptr<spdlog::logger> previous_named = spdlog::get("batch-capture");
+    explicit scoped_log_capture(std::function<void(std::string_view)> callback) {
+        auto sink = std::make_shared<spdlog::sinks::callback_sink_mt>(
+            [callback = std::move(callback)](spdlog::details::log_msg const& msg) {
+                callback({msg.payload.data(), msg.payload.size()});
+            });
+        auto logger = std::make_shared<spdlog::logger>("batch-capture", sink);
+        logger->set_level(spdlog::level::trace);
+        spdlog::set_default_logger(logger);
+    }
+    void reset() {
+        if (active) {
+            // set_default_logger does not unregister the old named logger.
+            // Remove our borrowed callback before any captured state dies.
+            spdlog::drop("batch-capture");
+            spdlog::set_default_logger(std::move(previous));
+            if (previous_named && previous_named != spdlog::default_logger())
+                spdlog::register_logger(std::move(previous_named));
+            active = false;
+        }
+    }
+#endif
+    ~scoped_log_capture() { reset(); }
+    scoped_log_capture(scoped_log_capture const&) = delete;
+    scoped_log_capture& operator=(scoped_log_capture const&) = delete;
+    bool active = true;
+};
+#endif
+
 inline std::vector<std::string> height_range_lines(full_db& db) {
     std::vector<std::string> lines;
+#if defined(UTXOZ_LOG_CUSTOM) || defined(UTXOZ_LOG_SPDLOG)
     std::mutex m;
-    set_log_callback([&](log_level, std::string_view msg) {
-        std::scoped_lock l(m);
+    scoped_log_capture capture([&](std::string_view msg) {
+        std::scoped_lock lock(m);
         lines.emplace_back(msg);
     });
     db.print_height_range_stats();
-    set_log_callback(nullptr);
+#else
+    // log=none has no observable log output. The other figures still compare
+    // stored contents, generations, shards, rotations and outcomes.
+    db.print_height_range_stats();
+#endif
     return lines;
 }
 

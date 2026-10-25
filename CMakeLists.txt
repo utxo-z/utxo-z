@@ -363,6 +363,12 @@ if(UTXOZ_BUILD_TESTS)
     # before choosing a file size, and nothing a database does depends on it.
     add_executable(utxoz_sizing tools/sizing.cpp)
     target_link_libraries(utxoz_sizing PRIVATE utxoz)
+    # These instruments include the internal logging header, unlike ordinary
+    # public-API consumers. Keep the backend dependency private to those users.
+    if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
+        target_link_libraries(utxoz_make_format_fixtures PRIVATE spdlog::spdlog_header_only)
+        target_link_libraries(utxoz_sizing PRIVATE spdlog::spdlog_header_only)
+    endif()
     target_include_directories(utxoz_sizing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_definitions(utxoz_sizing
         PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
