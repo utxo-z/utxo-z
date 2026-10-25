@@ -48,6 +48,28 @@ using utxoz::testing::spread_key;
 // Equivalence with the sequential inserts
 // =============================================================================
 
+TEST_CASE("batch height-range observations use the configured logging backend",
+          "[batch][logging]") {
+    temp_db t;
+    auto db = open_db(t.dir, true);
+#if defined(UTXOZ_LOG_SPDLOG)
+    auto const previous = spdlog::default_logger();
+    auto const previous_capture = spdlog::get("batch-capture");
+#endif
+    auto const lines = height_range_lines(db);
+#if defined(UTXOZ_LOG_CUSTOM) || defined(UTXOZ_LOG_SPDLOG)
+    REQUIRE(lines.size() == 1);
+    CHECK(lines.front().find("No height range statistics collected.") != std::string::npos);
+#else
+    CHECK(lines.empty());
+#endif
+#if defined(UTXOZ_LOG_SPDLOG)
+    CHECK(spdlog::default_logger() == previous);
+    CHECK(spdlog::get("batch-capture") == previous_capture);
+#endif
+    db.close();
+}
+
 TEST_CASE("a batch stores what the same inserts in order store, for every worker count",
           "[batch]") {
     failpoints::scoped_reset const disarm;
@@ -83,6 +105,35 @@ TEST_CASE("a batch stores what the same inserts in order store, for every worker
         }
     }
 }
+
+#if defined(UTXOZ_LOG_SPDLOG)
+TEST_CASE("batch capture preserves an existing named logger", "[batch][logging]") {
+    struct restore_registry {
+        std::shared_ptr<spdlog::logger> previous = spdlog::default_logger();
+        std::shared_ptr<spdlog::logger> named = spdlog::get("batch-capture");
+        ~restore_registry() {
+            spdlog::drop("batch-capture");
+            spdlog::set_default_logger(std::move(previous));
+            if (named && named != spdlog::default_logger()) spdlog::register_logger(std::move(named));
+        }
+    } restore;
+    auto existing = std::make_shared<spdlog::logger>("batch-capture");
+    spdlog::drop("batch-capture");
+    SECTION("a named logger separate from the default") {
+        spdlog::register_logger(existing);
+    }
+    SECTION("the previous default has the capture's name") {
+        spdlog::set_default_logger(existing);
+    }
+    auto const previous = spdlog::default_logger();
+    {
+        scoped_log_capture capture([](std::string_view) {});
+        CHECK(spdlog::get("batch-capture") != existing);
+    }
+    CHECK(spdlog::default_logger() == previous);
+    CHECK(spdlog::get("batch-capture") == existing);
+}
+#endif
 
 TEST_CASE("duplicates in one slot keep the first, in order; one key in two classes is two entries",
           "[batch]") {
@@ -246,6 +297,9 @@ TEST_CASE("a call through a copy of the task after the batch returned runs nothi
 
 TEST_CASE("a task still running through a copy when the executor returns is waited for",
           "[batch][executor]") {
+#if !defined(UTXOZ_LOG_CUSTOM) && !defined(UTXOZ_LOG_SPDLOG)
+    SKIP("this control requires an observable logging backend to suspend the worker");
+#else
     failpoints::scoped_reset const disarm;
     // Only task 0 may log. The log is serialised, so a fallback task on the
     // calling thread that logged would queue behind the blocked line below and
@@ -271,7 +325,7 @@ TEST_CASE("a task still running through a copy when the executor returns is wait
     std::condition_variable cv;
     bool entered = false, released = false;
     static thread_local bool in_started_thread = false;
-    set_log_callback([&](log_level, std::string_view) {
+    scoped_log_capture capture([&](std::string_view) {
         if ( ! in_started_thread) return;
         std::unique_lock lock(m);
         if (entered) return;
@@ -279,7 +333,6 @@ TEST_CASE("a task still running through a copy when the executor returns is wait
         cv.notify_all();
         cv.wait(lock, [&] { return released; });
     });
-    struct unset { ~unset() { set_log_callback(nullptr); } } const unset_callback;
 
     temp_db t;
     auto db = open_db(t.dir, true);
@@ -308,9 +361,10 @@ TEST_CASE("a task still running through a copy when the executor returns is wait
     CHECK(r.tasks_run_inline == r.workers_used - 1);
     CHECK_FALSE(r.error.has_value());
     CHECK(r.inserted + r.duplicates == w.requests.size());
-    set_log_callback(nullptr);
+    capture.reset();
     CHECK(figures_of(db) == want);
     db.close();
+#endif
 }
 
 TEST_CASE("two threads calling every task race for it and each task runs once",

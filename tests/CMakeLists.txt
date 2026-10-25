@@ -199,4 +199,9 @@ target_include_directories(utxoz_batch_alloc_tests PRIVATE ${CMAKE_CURRENT_SOURC
 target_compile_definitions(utxoz_batch_alloc_tests
     PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
             BOOST_ALL_NO_LIB)
+if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
+    # Both binaries exercise internal logging and capture height-range output.
+    target_link_libraries(utxoz_tests PRIVATE spdlog::spdlog_header_only)
+    target_link_libraries(utxoz_batch_alloc_tests PRIVATE spdlog::spdlog_header_only)
+endif()
 catch_discover_tests(utxoz_batch_alloc_tests PROPERTIES TIMEOUT ${UTXOZ_TEST_TIMEOUT})
