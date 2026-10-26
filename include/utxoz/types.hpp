@@ -282,6 +282,19 @@ enum class error_code : uint8_t {
     /// each entry is internally consistent. This one says the file passed all of
     /// that and an entry inside it still cannot be true.
     entry_corrupt,
+    /// The directory holds files this store writes — generations, metadata,
+    /// merge records — and no config. A database writes its config before any
+    /// of them, so they belong to a database whose config is gone, and creating
+    /// a new one here would give the directory a second identity that refuses
+    /// the first one's files. Nothing was written. Restore the config, or open
+    /// with `remove_existing` to discard what is there.
+    config_missing,
+    /// Memory could not be allocated. This does not diagnose a damaged or
+    /// unreadable file. Operations returning progress may already have applied
+    /// part of a batch; use their reported done/owed partition rather than
+    /// assuming this error means nothing changed. Other operations can return
+    /// it before any mutation; see each operation's contract.
+    out_of_memory,
 };
 
 /**
