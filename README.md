@@ -1,5 +1,7 @@
 # UTXO-Z
 
+> **Beta Software**: UTXO-Z is beta software. Its implementation and API are subject to change as integration and testing in Bitcoin Cash nodes continue.
+
 High-performance UTXO database for Bitcoin Cash.
 
 UTXO-Z is a purpose-built storage engine designed for the specific access patterns of UTXO set management. It achieves **2.5x higher throughput** than LevelDB during blockchain synchronization and up to **45x faster lookups** for recent outputs.
