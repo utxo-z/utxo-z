@@ -98,7 +98,7 @@ class UtxozConan(ConanFile):
 
     def build_requirements(self):
         if self.options.with_tests:
-            self.test_requires("catch2/3.15.0")
+            self.test_requires("catch2/3.15.3")
 
         if self.options.with_tests or self.options.with_benchmarks:
             self.test_requires("nanobench/4.3.11")
