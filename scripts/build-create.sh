@@ -16,7 +16,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 VERSION="$1"
 LOG_BACKEND="${2:-custom}"
-STATISTICS="${3:-True}"
+STATISTICS="${3:-basic}"
 
 # Check for --bench flag in any position
 WITH_BENCHMARKS="False"
@@ -36,9 +36,9 @@ rm -rf conan.lock
 # Remove existing package from cache to force rebuild
 conan remove "utxoz/${VERSION}" -c 2>/dev/null || true
 
-conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --update
+conan lock create conanfile.py --version="${VERSION}" -s compiler.cppstd=23 -o log=${LOG_BACKEND} -o statistics_level=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --update
 
-conan lock create conanfile.py --version="${VERSION}" -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --lockfile=conan.lock --lockfile-out=build/conan.lock
-conan create conanfile.py --version "${VERSION}" --lockfile=build/conan.lock --build=missing -o log=${LOG_BACKEND} -o statistics=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS}
+conan lock create conanfile.py --version="${VERSION}" -s compiler.cppstd=23 -o log=${LOG_BACKEND} -o statistics_level=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS} --lockfile=conan.lock --lockfile-out=build/conan.lock
+conan create conanfile.py --version "${VERSION}" --lockfile=build/conan.lock --build=missing -s compiler.cppstd=23 -o log=${LOG_BACKEND} -o statistics_level=${STATISTICS} -o with_tests=True -o with_examples=False -o with_benchmarks=${WITH_BENCHMARKS}
 
 echo "Package utxoz/${VERSION} created successfully in local cache"

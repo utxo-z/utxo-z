@@ -1,6 +1,6 @@
 # UTXO-Z
 
-> **Alpha Software**: This is a preliminary alpha version of UTXO-Z. Its implementation is subject to change as it is being experimented with for the first time in Bitcoin Cash nodes. The API is also subject to change.
+> **Beta Software**: UTXO-Z is beta software. Its implementation and API are subject to change.
 
 High-performance UTXO database for Bitcoin Cash.
 
@@ -19,67 +19,6 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 - **Generational storage**: Recent outputs are faster to access
 - **Cache-optimized**: Open addressing hash tables for CPU cache efficiency
 
-See [Changes in 1.0](#changes-in-10) for what is new, and what it breaks.
-
-## Changes in 1.0
-
-1.0 is not released yet. This section describes what it contains.
-
-### Added in this change
-
-- **The 48-byte class is split into 8 shards, fixed.**
-  - A key's shard is a fixed function of its outpoint (`shard_of`, pinned by golden
-    vectors). Each shard is a container of its own, with its own files, map and
-    history, and it rotates on its own.
-  - The other four classes are unchanged, one container each.
-  - The shard count is a constant, `utxoz::shard_count == 8`, not a build or package
-    option. The former `UTXOZ_SHARD_COUNT` option is refused at configure and compile
-    time.
-  - Other counts exist only for tests and experiments, through
-    `UTXOZ_EXPERIMENTAL_SHARD_COUNT`, in builds that write a geometry no production
-    build accepts and that install nothing.
-- **`full_db::insert_batch()`.** One prepared phase of inserts, each request with its
-  own height, applied by a configurable number of workers. See
-  [Batched inserts](#batched-inserts).
-  - To every other caller it is one exclusive mutation, like `insert()`.
-  - Each container (each shard, each other class) has a single writer, and its
-    requests are applied in their original order.
-  - It is not atomic. Every request reports `inserted`, `duplicate`, `failed` or
-    `not_applied`, and only `not_applied` may be resent as is.
-  - It does not sync; a later `sync()` covers everything it rotated.
-  - Workers are limited to the containers the batch touches.
-- **On-disk format: geometry 4.** Every earlier database is refused, none is migrated,
-  and each has to be rebuilt from the chain. See
-  [Databases from before 1.0](#databases-from-before-10).
-- **Historical lookups and deletions** search a key only in its own shard's
-  generations.
-- **Per-shard reporting.**
-  - `utxoz_census` reports the 48-byte class shard by shard.
-  - `utxoz_verify_unique` also verifies that every entry is stored in the shard its key
-    belongs to.
-
-### Already merged since 0.10.0, and part of 1.0
-
-- **Format:**
-  - Every database records the format it was written under, in its config and in
-    every version file, and is refused if a build does not match.
-  - A version file whose map cannot be reached is refused.
-  - Compatibility fixtures certify that a build reads what an earlier one wrote.
-- **Container sizing:**
-  - The second class is 96 bytes.
-  - A container's capacity and its file size are one decision, made once.
-  - A tool answers how large a segment has to be.
-- **Rotation and failed inserts:** a container rotates before the map would grow, also
-  after the growth threshold has drifted under deletions, and what a failed insert left
-  behind is verified.
-- **Inspection:**
-  - The census counts what is stored, not what the process did.
-  - Lookups report how they were resolved, by class and by generation.
-  - `utxoz_verify_unique` checks that no outpoint is stored more than once.
-
-These already break the format of 0.10.0: a 0.10.0 database is refused with
-`migration_required`.
-
 ## Requirements
 
 - C++23 compiler (GCC 13+, Clang 17+)
@@ -94,10 +33,18 @@ Add to your `conanfile.py`:
 
 ```python
 def requirements(self):
-    self.requires("utxoz/0.3.0")
+    self.requires("utxoz/1.0.0")
+```
+
+Configure the package remote if it is not already present:
+
+```bash
+conan remote add kth https://packages.kth.cash/api/
 ```
 
 ### Building from source
+
+Build the current development sources into your local Conan cache:
 
 ```bash
 # Clone
@@ -105,7 +52,8 @@ git clone https://github.com/utxo-z/utxo-z.git
 cd utxo-z
 
 # Build and install to local Conan cache
-./scripts/build-create.sh 0.3.0
+conan profile detect  # Only if you do not already have a default profile
+./scripts/build-create.sh 0.0.0-dev
 ```
 
 ## Usage
@@ -328,9 +276,9 @@ rdb.for_each_entry([](utxoz::raw_outpoint const& key,
 UTXO-Z supports three logging backends configured at build time:
 
 ```bash
-./scripts/build-create.sh 0.3.0 custom   # Callback-based (default)
-./scripts/build-create.sh 0.3.0 spdlog   # spdlog integration
-./scripts/build-create.sh 0.3.0 none     # Disabled
+./scripts/build-create.sh 0.0.0-dev custom   # Callback-based (default)
+./scripts/build-create.sh 0.0.0-dev spdlog   # spdlog integration
+./scripts/build-create.sh 0.0.0-dev none     # Disabled
 ```
 
 #### Custom callback
