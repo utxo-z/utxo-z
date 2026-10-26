@@ -14,9 +14,11 @@
 #include <utxoz/utils.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <new>
 #include <thread>
 #include <fstream>
 #include <numeric>
@@ -105,6 +107,89 @@ inline size_t pending_eligible_in(std::vector<size_t> const& pending,
         for (auto const idx : pending) n += request_may_be_in(key_shards, idx, slot);
         return n;
     }
+}
+
+/// Which storage mode writes a file of this name, if either does.
+///
+/// The whole namespace the store writes into, not only the generations it would
+/// open: every slot and every generation, the metadata beside them, and the
+/// merge records and unfinished builds that recovery acts on. Recovery over a
+/// merge record that belongs to another database unlinks that database's files,
+/// so a record is as much a database being there as a generation is.
+///
+/// The sharded class is matched under every shard count a build can be made
+/// with, the unsharded spelling included. Those names mean a database of another
+/// geometry, which its config would have refused by name; with no config, the
+/// name is the only thing left to refuse it by.
+///
+/// Canonical names only, through the same parser the catalogue uses, so a file
+/// the catalogue would ignore is ignored here too.
+std::optional<storage_mode> reserved_mode_of(std::string const& name) {
+    static constexpr std::array<std::string_view, 4> data_suffixes{
+        ".dat", ".merge", ".dat.building", ".merge.tmp"};
+    static constexpr std::array<std::string_view, 2> metadata_suffixes{".dat", ".dat.tmp"};
+
+    auto const matches = [&](std::string const& data_prefix, std::string const& metadata_prefix) {
+        for (auto const suffix : data_suffixes) {
+            if (parse_canonical_version(name, data_prefix, suffix)) return true;
+        }
+        for (auto const suffix : metadata_suffixes) {
+            if (parse_canonical_version(name, metadata_prefix, suffix)) return true;
+        }
+        return false;
+    };
+
+    if (matches("compact_v", "meta_compact_v")) return storage_mode::reference;
+
+    for (size_t slot = 0; slot != slot_count; ++slot) {
+        if (matches(container_prefix(slot), metadata_prefix(slot))) return storage_mode::full;
+    }
+
+    // The largest shard count any build accepts, so every shard index any build
+    // can write is below it.
+    constexpr uint32_t widest = 32;
+    static_assert(valid_shard_count(widest) && ! valid_shard_count(widest * 2));
+
+    auto const cls = std::to_string(sharded_class);
+    if (matches("cont_" + cls + "_v", "meta_" + cls + "_v")) return storage_mode::full;
+    for (uint32_t shard = 0; shard != widest; ++shard) {
+        auto const tag = cls + "s" + std::to_string(shard) + "_v";
+        if (matches("cont_" + tag, "meta_" + tag)) return storage_mode::full;
+    }
+    return std::nullopt;
+}
+
+/// What a directory with no config already holds of either mode: the first such
+/// file found, per mode, or none.
+struct reserved_files {
+    std::optional<fs::path> full;
+    std::optional<fs::path> reference;
+};
+
+/// Every entry of `dir`, matched by name. Fail-closed the way enumerate_versions()
+/// is: a directory that cannot be walked is an error, never an empty answer, and
+/// the increment is checked where it happens.
+///
+/// By name, whatever the entry is. A zero-byte file, a directory or a dangling
+/// link under a reserved name is still not a fresh directory, and asking an
+/// entry's type would turn an unrelated dangling link into a failure to read.
+result<reserved_files> find_reserved_files(fs::path const& dir) {
+    std::error_code ec;
+    fs::directory_iterator it(dir, ec);
+    if (ec) return std::unexpected(error_code::catalog_unreadable);
+
+    reserved_files found;
+    auto const end = fs::directory_iterator{};
+    while (it != end) {
+        if (auto const mode = reserved_mode_of(path_display(it->path().filename()))) {
+            auto& first = *mode == storage_mode::full ? found.full : found.reference;
+            if ( ! first) first = it->path();
+        }
+
+        it.increment(ec);
+        if (ec) return std::unexpected(error_code::catalog_unreadable);
+    }
+    return found;
 }
 
 } // namespace
@@ -687,16 +772,33 @@ result<> database_impl::configure_internal(fs::path path, bool remove_existing,
         mode_ = config->mode;
         database_id_ = config->database_id;
     } else {
-        // No config file — check for pre-existing data files from the other mode
+        // No config. That makes this a creation only if nothing the store writes
+        // is here either: the config is written before any segment, so files
+        // without one are a database whose config is gone. Creating over them
+        // would mint a second identity, persist it, and leave the directory
+        // refusing its own files under a config that is not theirs.
+        //
+        // Decided before the identity is drawn and before anything is written,
+        // over every generation of every slot of both modes. Checking only the
+        // other mode's version zero, as this used to, missed same-mode data
+        // entirely, and other-mode data once its version zero had been
+        // compacted away.
         if (!remove_existing) {
-            auto const other_mode_file = mode == storage_mode::reference
-                ? db_path_ / detail::container_file_name(0, 0)
-                : db_path_ / fmt::format(reference_data_file_format, 0);
+            auto const found = find_reserved_files(db_path_);
+            if ( ! found) return std::unexpected(found.error());
 
-            auto const other_exists = path_exists(other_mode_file);
-            if ( ! other_exists) return std::unexpected(other_exists.error());
-            if (*other_exists) {
+            auto const& other = mode == storage_mode::reference ? found->full : found->reference;
+            auto const& same = mode == storage_mode::reference ? found->reference : found->full;
+            if (other) {
+                log::error("{}: there is no config, and {} belongs to a database of the "
+                           "other storage mode", path_display(db_path_), path_display(*other));
                 return std::unexpected(error_code::storage_mode_mismatch);
+            }
+            if (same) {
+                log::error("{}: there is no config, and {} belongs to a database; refusing "
+                           "to create a new one over it", path_display(db_path_),
+                           path_display(*same));
+                return std::unexpected(error_code::config_missing);
             }
         }
         mode_ = mode;
@@ -1643,6 +1745,32 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     progress.absent.reserve(pending.size());
     progress.unresolved.reserve(pending.size());
 
+#if UTXOZ_STATISTICS_LEVEL >= 1
+    // Room in the statistics the active phase records into, for the same reason.
+    // Phase 0 has no try around it, and its per-key bookkeeping used to insert
+    // into these maps with the key's erase between the two: a growth that failed
+    // before the erase threw away the report of every deletion already applied,
+    // and one that failed after it left the key gone, uncounted and unreported.
+    // Made here, a failure throws having changed nothing, as insert_batch does.
+    //
+    // One height range per key's height, which the historical walk records into
+    // too. An age is only known once the key is found, so room for one new age
+    // per key, which is the most a batch can add.
+    {
+        std::vector<uint32_t> ranges;
+        ranges.reserve(pending.size());
+        for (auto const idx : pending) {
+            ranges.push_back(requests[idx].height / height_range_stats::range_size);
+        }
+        std::ranges::sort(ranges);
+        ranges.erase(std::ranges::unique(ranges).begin(), ranges.end());
+        make_room(height_range_stats_.ranges, size_t(std::ranges::count_if(ranges, [&](uint32_t r) {
+            return ! height_range_stats_.ranges.contains(r);
+        })));
+        make_room(lifetime_stats_.age_distribution, pending.size());
+    }
+#endif
+
     // Everything that is still owed at the end, whatever the reason. Filled once,
     // at the end, from whatever survived — so a key can never be in two lists and
     // can never be missing from all three.
@@ -1661,8 +1789,35 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     // deletions applied, and the contract is to enumerate them rather than to
     // pretend they did not happen. What must never happen is calling the
     // remainder absent — a version that would not open could hold any of them.
-    bool complete = true;
-    error_code failure = error_code::version_unreadable;
+    //
+    // The first thing that stops the walk is the reason, and the walk stops
+    // there: no further file is opened, and nothing later can replace the cause
+    // with one of its own. A memory failure is its own cause, apart from a file
+    // that will not open or a catalogue that will not list — they send whoever
+    // reads it to different places.
+    std::optional<error_code> failure;
+    auto const stop = [&](error_code why) noexcept {
+        if ( ! failure) failure = why;
+    };
+
+    // What the historical phases below walk first, and what they then skip, are
+    // collected here, before anything is erased: both allocate, both sit outside
+    // the walk's own try, and neither can change before they are used, because
+    // the active phase erases from the active maps and opens no file.
+    auto cached_files = file_cache_->get_cached_files();
+    std::ranges::sort(cached_files, [](auto const& a, auto const& b) {
+        if (a.first != b.first) return a.first < b.first;
+        return a.second > b.second;
+    });
+    std::set<size_t> reference_seen;
+    std::array<std::set<size_t>, detail::slot_count> slot_seen;
+    for (auto const& [ci, version] : cached_files) {
+        if (ci == reference_sentinel_index) {
+            reference_seen.insert(version);
+        } else if (ci < detail::slot_count) {
+            slot_seen[ci].insert(version);
+        }
+    }
 
     // Phase 0: the active versions. This is what the old single-key erase() did
     // inline before queueing, and it is the common case: an output spent soon
@@ -1777,29 +1932,46 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 throw std::runtime_error("failpoint: version file refused to open");
             }
 
+            // What recording a deletion from this file needs, made before the
+            // file is opened: the record that it now owes a barrier, and room
+            // for its depth. Recording happens after an erase and must not
+            // allocate there; failing here leaves this file untouched and its
+            // keys owed. The height range was made room for with the batch.
+            auto dirty = make_dirty_entry(reference_sentinel_index, version);
+#if UTXOZ_STATISTICS_LEVEL >= 1
+            auto const depth = static_cast<uint32_t>(reference_current_version_ - version);
+            if ( ! deferred_stats_.deletions_by_depth.contains(depth)) {
+                make_room(deferred_stats_.deletions_by_depth, 1);
+            }
+#endif
+
             auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
             (void) cache_hit;
             // Reference mode has one container and no shards: every key is a
             // candidate for every file.
             step_over_file(map, [](size_t) { return true; }, [&]([[maybe_unused]] uint32_t height) {
-                note_dirty(reference_sentinel_index, version);
+                note_dirty(dirty);
                 if (auto* meta = reference_catalog_.find_metadata(version)) meta->update_on_delete();
                 failpoints::reference_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
 #if UTXOZ_STATISTICS_LEVEL >= 1
                 // The same counters the queue-draining path kept. Reference mode
                 // reports through container 0's slot, as it does everywhere else.
-                auto const depth =
-                    static_cast<uint32_t>(reference_current_version_ - version);
                 ++deferred_stats_.deletions_by_depth[depth];
                 --container_stats_[0].current_size;
                 ++container_stats_[0].total_deletes;
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[0];
 #endif
             });
+        } catch (std::bad_alloc const&) {
+            // Before this file was touched, or after an erase that is already
+            // recorded: nothing between the two allocates.
+            log::error("Ran out of memory applying deletions in reference v{}. "
+                       "The batch is incomplete.", version);
+            stop(error_code::out_of_memory);
         } catch (std::exception const& e) {
             log::error("Could not apply deletions in reference v{}: {}. The batch is incomplete.",
                        version, e.what());
-            complete = false;
+            stop(error_code::version_unreadable);
         }
     };
 
@@ -1815,11 +1987,23 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 throw std::runtime_error("failpoint: version file refused to open");
             }
 
+            // As in the reference walk: what recording a deletion from this file
+            // needs is made before the file is opened, and nothing after an
+            // erase allocates. The metadata record is only looked up there; an
+            // absent one stays absent, as it always has.
+            auto dirty = make_dirty_entry(slot, version);
+#if UTXOZ_STATISTICS_LEVEL >= 1
+            auto const depth = static_cast<uint32_t>(current_versions_[slot] - version);
+            if ( ! deferred_stats_.deletions_by_depth.contains(depth)) {
+                make_room(deferred_stats_.deletions_by_depth, 1);
+            }
+#endif
+
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(slot, version);
             (void) cache_hit;
             auto const admits = [&](size_t idx) { return request_may_be_in(key_shards, idx, slot); };
             step_over_file(map, admits, [&]([[maybe_unused]] uint32_t height) {
-                note_dirty(slot, version);
+                note_dirty(dirty);
                 update_metadata_on_delete(slot, version);
                 failpoints::full_metadata_deletes.fetch_add(1, std::memory_order_relaxed);
 #if UTXOZ_STATISTICS_LEVEL >= 1
@@ -1831,13 +2015,18 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 //
                 // deferred_deletes is deliberately not among them: it counted how
                 // much was sitting in the queue, and there is no queue to sit in.
-                auto const depth = static_cast<uint32_t>(current_versions_[slot] - version);
                 ++deferred_stats_.deletions_by_depth[depth];
                 --container_stats_[slot].current_size;
                 ++container_stats_[slot].total_deletes;
                 ++height_range_stats_.ranges[height / height_range_stats::range_size].deletes[Index];
 #endif
             });
+        } catch (std::bad_alloc const&) {
+            // As in the reference walk: before this file was touched, or after
+            // an erase that is already recorded.
+            log::error("Ran out of memory applying deletions in ({}, v{}). "
+                       "The batch is incomplete.", Index, version);
+            stop(error_code::out_of_memory);
         } catch (std::exception const& e) {
             // This file could hold any of the keys still pending, so none of them
             // can be called absent. What was already erased stays erased and stays
@@ -1845,7 +2034,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
             // in step_over_file is what makes it true even here.
             log::error("Could not apply deletions in ({}, v{}): {}. The batch is incomplete.",
                        Index, version, e.what());
-            complete = false;
+            stop(error_code::version_unreadable);
         }
     };
 
@@ -1857,7 +2046,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
         if (slot >= detail::slot_count) {
             log::error("Deletion batch asked for slot {}, which does not exist. "
                        "The batch is incomplete.", slot);
-            complete = false;
+            stop(error_code::version_unreadable);
             return;
         }
         switch (detail::class_of_slot(slot)) {
@@ -1872,20 +2061,15 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                 // index nobody recognises stops the batch instead.
                 log::error("Deletion batch asked for class {}, which does not exist. "
                            "The batch is incomplete.", detail::class_of_slot(slot));
-                complete = false;
+                stop(error_code::version_unreadable);
                 break;
         }
     };
 
     // Phase 1: cached files first — already mapped, so they cost nothing to visit.
-    auto cached_files = file_cache_->get_cached_files();
     if ( ! cached_files.empty()) {
-        std::ranges::sort(cached_files, [](auto const& a, auto const& b) {
-            if (a.first != b.first) return a.first < b.first;
-            return a.second > b.second;
-        });
         for (auto const& [container_index, version] : cached_files) {
-            if (pending.empty()) break;
+            if (pending.empty() || failure) break;
             if (mode_ == storage_mode::reference) {
                 if (container_index == reference_sentinel_index) walk(container_index, version);
             } else if (container_index != reference_sentinel_index) {
@@ -1895,36 +2079,32 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     }
 
     // Phase 2: every remaining version below the current one.
-    if ( ! pending.empty()) {
+    if ( ! pending.empty() && ! failure) {
         if (mode_ == storage_mode::reference) {
-            std::set<size_t> seen;
-            for (auto const& [ci, version] : cached_files) {
-                if (ci == reference_sentinel_index) seen.insert(version);
-            }
+            auto const& seen = reference_seen;
             try {
                 if (failpoints::fail_historical_catalog.load(std::memory_order_relaxed)) {
                     throw std::runtime_error("failpoint: catalogue refused to be listed");
                 }
                 for (auto const v : reference_catalog_.below(reference_current_version_)) {
-                    if (pending.empty()) break;
+                    if (pending.empty() || failure) break;
                     if (seen.contains(v)) continue;
                     walk(reference_sentinel_index, v);
                 }
+            } catch (std::bad_alloc const&) {
+                log::error("Ran out of memory listing reference versions. The batch is incomplete.");
+                stop(error_code::out_of_memory);
             } catch (std::exception const& e) {
                 log::error("Could not enumerate reference versions: {}. The batch is incomplete.", e.what());
-                complete = false;
-                failure = error_code::catalog_unreadable;
+                stop(error_code::catalog_unreadable);
             }
         } else {
             // By slot: the cached files are named by slot, the catalogues are per
             // slot, and walk() takes one. A loop rather than a fold over the
             // classes, because walk() already dispatches on the class itself.
-            std::array<std::set<size_t>, detail::slot_count> seen;
-            for (auto const& [ci, version] : cached_files) {
-                if (ci < detail::slot_count) seen[ci].insert(version);
-            }
+            auto const& seen = slot_seen;
             for (size_t slot = 0; slot != detail::slot_count; ++slot) {
-                if (pending.empty()) break;
+                if (pending.empty() || failure) break;
                 // A shard nobody pending belongs to is not walked, and so neither
                 // its catalogue nor its files can stop a batch that never needed
                 // them.
@@ -1934,26 +2114,29 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
                         throw std::runtime_error("failpoint: catalogue refused to be listed");
                     }
                     for (auto const v : catalogs_[slot].below(current_versions_[slot])) {
-                        if (pending_eligible_in(pending, key_shards, slot) == 0) break;
+                        if (failure || pending_eligible_in(pending, key_shards, slot) == 0) break;
                         if (seen[slot].contains(v)) continue;
                         walk(slot, v);
                     }
+                } catch (std::bad_alloc const&) {
+                    log::error("Ran out of memory listing versions of container {}. "
+                               "The batch is incomplete.", slot);
+                    stop(error_code::out_of_memory);
                 } catch (std::exception const& e) {
                     log::error("Could not enumerate versions of container {}: {}. The batch is incomplete.",
                                slot, e.what());
-                    complete = false;
-                    failure = error_code::catalog_unreadable;
+                    stop(error_code::catalog_unreadable);
                 }
             }
         }
     }
 
-    if ( ! complete) {
+    if (failure) {
         // Owed, not absent. Every one of these could be in the file that would
         // not open, and reporting them as absent is the mistake this design
         // exists to make impossible.
         classify_remainder(progress.unresolved);
-        progress.error = failure;
+        progress.error = *failure;
         log::error("Deletion batch incomplete: {} applied, {} still owed and none of them absent",
                    progress.erased.size(), progress.unresolved.size());
     } else {
@@ -1969,7 +2152,7 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
     // counted one would make the averages describe work that was never done.
     deferred_stats_.successfully_processed += progress.erased.size();
     deferred_stats_.failed_to_delete += progress.unresolved.size();
-    if (complete) ++deferred_stats_.processing_runs;
+    if ( ! failure) ++deferred_stats_.processing_runs;
 
     auto const end_time = std::chrono::steady_clock::now();
     deferred_stats_.total_processing_time +=

@@ -809,6 +809,14 @@ jobs:
         run: |
           conan create . --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ci/conan-cpp23 -s build_type=Release -o "utxoz/*:with_tests=False" -o "utxoz/*:with_examples=False" -o "utxoz/*:with_benchmarks=False"
 
+      # The step above never reads cmake/utxoz-config.cmake.in: a Conan build
+      # skips it and CMakeDeps writes its own. This one installs with plain CMake,
+      # for every log backend and as a shared library, and consumes the install
+      # through find_package(utxoz CONFIG REQUIRED) alone.
+      - name: 📦 The CMake package is consumable without Conan
+        run: |
+          ./ci/check_cmake_package.sh
+
   tools-without-tests:
     needs: [setup]
     runs-on: ubuntu-24.04

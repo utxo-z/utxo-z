@@ -2,14 +2,19 @@
 
 include(CMakeFindDependencyMacro)
 
-# Find dependencies
-find_dependency(Boost REQUIRED COMPONENTS system filesystem)
-find_dependency(fmt REQUIRED)
+# What the exported utxoz::utxoz links, so what has to be found before its
+# targets file can be used. Boost is headers only: the library links
+# Boost::headers and no compiled component, so it asks for none.
+find_dependency(Boost)
+find_dependency(fmt)
 
-# Include targets
-include("${CMAKE_CURRENT_LIST_DIR}/utxo-db-targets.cmake")
+# The spdlog backend links spdlog privately, which for a static library still
+# reaches the export, as $<LINK_ONLY:spdlog::spdlog_header_only>. A consumer
+# never asks for spdlog, so the package has to.
+if("@UTXOZ_LOG_BACKEND@" STREQUAL "spdlog")
+    find_dependency(spdlog)
+endif()
 
-# Set variables
-set(UTXO_DB_VERSION @PROJECT_VERSION@)
+include("${CMAKE_CURRENT_LIST_DIR}/utxoz-targets.cmake")
 
-check_required_components(utxo-db)
+check_required_components(utxoz)

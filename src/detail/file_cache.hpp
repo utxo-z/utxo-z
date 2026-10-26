@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <memory>
+#include <new>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
@@ -110,8 +111,12 @@ struct file_cache {
         // apply_deletes() are built to catch; the two calls below report it as a
         // value. Adapting here keeps that conversion in one place instead of at
         // every caller, and keeps this file's documented contract unchanged.
+        //
+        // Except for memory, which goes back to being what it was. Thrown as a
+        // runtime_error it would reach the caller as a file that will not open.
         auto opened = open_existing_segment(file_path);
         if ( ! opened) {
+            if (opened.error() == error_code::out_of_memory) throw std::bad_alloc();
             throw std::runtime_error("cannot open version file: " + path_display(file_path));
         }
         auto segment = std::move(*opened);
@@ -163,9 +168,11 @@ struct file_cache {
 
         auto file_path = make_file_path(reference_sentinel_index, version);
 
-        // See get_or_open_file(): the cache's contract is to throw.
+        // See get_or_open_file(): the cache's contract is to throw, and memory
+        // is thrown as memory.
         auto opened = open_existing_segment(file_path);
         if ( ! opened) {
+            if (opened.error() == error_code::out_of_memory) throw std::bad_alloc();
             throw std::runtime_error("cannot open version file: " + path_display(file_path));
         }
         auto segment = std::move(*opened);

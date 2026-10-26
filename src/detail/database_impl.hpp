@@ -401,6 +401,33 @@ private:
         dirty_versions_.emplace(container_index, version);
     }
 
+    /// The same record, made before the write it is for, for a path that must
+    /// not allocate between the write and recording it.
+    ///
+    /// note_dirty() allocates on every call, an entry already there included:
+    /// emplace builds its node before it looks. A deletion from a historical
+    /// file that called it after the erase, and failed to allocate, left the file
+    /// modified and off the register, and the next sync() returned success
+    /// without the barrier that file was owed. So the node is made here, before
+    /// the file is touched, and handed over afterwards without allocating.
+    using dirty_entry = std::set<std::pair<size_t, size_t>>::node_type;
+
+    [[nodiscard]]
+    static dirty_entry make_dirty_entry(size_t container_index, size_t version) {
+        std::set<std::pair<size_t, size_t>> one;
+        one.emplace(container_index, version);
+        return one.extract(one.begin());
+    }
+
+    /// Records a prepared entry, allocating nothing. The entry is consumed,
+    /// whether it was added or found already on record, so a second call for
+    /// the same file does nothing.
+    void note_dirty(dirty_entry& entry) {
+        if (entry.empty()) return;
+        std::scoped_lock const lock(dirty_mutex_);
+        dirty_versions_.insert(std::move(entry));
+    }
+
 public:
     /// Refuses every operation once a merge has published its target and could
     /// not retire everything it superseded. Until this instance is closed and

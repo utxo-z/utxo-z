@@ -366,6 +366,23 @@ struct db_base {
      * why progress is returned rather than an error: the applied part is
      * enumerated in `erased`, exactly, including on the failure path.
      *
+     * **Memory.** The batch is prepared before its first deletion: the three
+     * lists, the working set, and room in the statistics for every height range
+     * and age it can add. If that fails the call throws (`std::bad_alloc`)
+     * having changed nothing. From the first deletion on it does not throw.
+     *
+     * Reaching an older version still allocates — listing the versions, and
+     * for each file opening it and making ready what recording a deletion from
+     * it needs — always before that file is touched, and nothing allocates
+     * between an erase and its record. If memory runs out there the walk stops
+     * with `error` set to `out_of_memory`: what was erased until then is in
+     * `erased`, the rest is in `unresolved`, and nothing is reported `absent`.
+     *
+     * The walk stops at the first failure of any kind, and `error` is that
+     * failure: `version_unreadable` for a file that would not open,
+     * `catalog_unreadable` for versions that could not be listed,
+     * `out_of_memory` for memory. A later step does not replace it.
+     *
      * @param requests The caller's batch; borrowed for the duration of the call
      * @return What was applied, what is proven absent, and what is still owed
      */
@@ -558,6 +575,11 @@ struct full_db : db_base {
      * @param path Database directory path. See @ref utxoz_path_contract.
      * @param remove_existing If true, remove existing database files
      * @return full_db on success, error on failure
+     *
+     * Creates only where there is neither a config nor any file the store
+     * writes. Files with no config are refused, before anything is written:
+     * `storage_mode_mismatch` when they are reference-mode files, `config_missing`
+     * otherwise.
      */
     [[nodiscard]]
     static result<full_db> open(std::filesystem::path path, bool remove_existing = false);
@@ -835,6 +857,10 @@ struct reference_db : db_base {
      * @param path Database directory path. See @ref utxoz_path_contract.
      * @param remove_existing If true, remove existing database files
      * @return reference_db on success, error on failure
+     *
+     * Creates only where there is neither a config nor any file the store
+     * writes; see full_db::open(). Full-mode files with no config are
+     * `storage_mode_mismatch`, reference-mode ones `config_missing`.
      */
     [[nodiscard]]
     static result<reference_db> open(std::filesystem::path path, bool remove_existing = false);

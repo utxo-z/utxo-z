@@ -44,6 +44,7 @@ add_executable(utxoz_tests
     test_rung_exact.cpp
     test_insert_batch.cpp
     test_open_for_inspection.cpp
+    test_missing_config.cpp
 )
 
 target_link_libraries(utxoz_tests
@@ -205,3 +206,16 @@ if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
     target_link_libraries(utxoz_batch_alloc_tests PRIVATE spdlog::spdlog_header_only)
 endif()
 catch_discover_tests(utxoz_batch_alloc_tests PROPERTIES TIMEOUT ${UTXOZ_TEST_TIMEOUT})
+
+# apply_deletes under a failing allocation, at every allocation it makes. Its own
+# program for the same reason: it replaces operator new.
+add_executable(utxoz_delete_alloc_tests test_delete_allocation.cpp)
+target_link_libraries(utxoz_delete_alloc_tests PRIVATE utxoz::utxoz Catch2::Catch2WithMain)
+target_include_directories(utxoz_delete_alloc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(utxoz_delete_alloc_tests
+    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
+            BOOST_ALL_NO_LIB)
+if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
+    target_link_libraries(utxoz_delete_alloc_tests PRIVATE spdlog::spdlog_header_only)
+endif()
+catch_discover_tests(utxoz_delete_alloc_tests PROPERTIES TIMEOUT ${UTXOZ_TEST_TIMEOUT})

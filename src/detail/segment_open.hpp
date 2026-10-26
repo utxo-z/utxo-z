@@ -35,6 +35,7 @@
 #include <ranges>
 #include <filesystem>
 #include <memory>
+#include <new>
 #include <string>
 
 #include <boost/interprocess/managed_mapped_file.hpp>
@@ -128,6 +129,11 @@ inline result<std::unique_ptr<bip::managed_mapped_file>> open_existing_segment(f
         // mappings, not about tries.
         failpoints::segments_mapped.fetch_add(1, std::memory_order_relaxed);
         return mapped;
+    } catch (std::bad_alloc const&) {
+        // The heap, not the file: nothing here says the file is bad, and a
+        // caller told file_open_failed would go looking at it.
+        log::error("{}: ran out of memory opening it as a segment", path_display(path));
+        return std::unexpected(error_code::out_of_memory);
     } catch (std::exception const& e) {
         log::error("{}: will not open as a segment: {}", path_display(path), e.what());
         return std::unexpected(error_code::file_open_failed);
