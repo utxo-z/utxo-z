@@ -1,3 +1,27 @@
+# version 1.0.0
+
+## What's Changed
+* fix: refuse a version file whose named object cannot be reached by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/127
+* feat!: a database records what it was written under, and is refused if it does not match by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/128
+* test: certify that this build still reads what an earlier one wrote by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/130
+* feat!: the second container class is 96, and stops wasting the two bytes it always had by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/132
+* feat: an instrument that answers how large a segment has to be, instead of inheriting one by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/133
+* feat!: a container's capacity and its file size are one decision, made once by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/134
+* feat: count what is stored, instead of what this process happened to do by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/137
+* feat: measure how lookups are actually resolved, by class and by generation by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/138
+* feat: verify that no outpoint is stored more than once, and answer with a verdict by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/139
+* fix: rotate before Boost decides to grow, and verify what a failed insert left by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/140
+* test: name the repeated setup, and hold clear() to every seam by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/141
+* perf: compare a base and a candidate in one session, and stop asking a shared runner by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/142
+* feat!: shard the 48-byte class eight ways and write geometry 4 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/145
+* feat: insert prepared batches in parallel with per-request outcomes by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/146
+* bench: add sharding and batch-insert measurement tools by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/149
+* docs: describe sharding, batch inserts and format compatibility by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/150
+* Fix batch test observation with the spdlog backend by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/151
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v0.10.0...2a9fe1ff9084dc9492f1771e72e732e8cc1a1ec5
+
 # version 0.10.0
 
 ## What's Changed
