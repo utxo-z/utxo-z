@@ -1,6 +1,6 @@
 # UTXO-Z
 
-> **Beta Software**: UTXO-Z is beta software. Its implementation and API are subject to change as integration and testing in Bitcoin Cash nodes continue.
+> **Beta Software**: UTXO-Z is beta software. Its implementation and API are subject to change.
 
 High-performance UTXO database for Bitcoin Cash.
 
@@ -44,14 +44,16 @@ conan remote add kth https://packages.kth.cash/api/
 
 ### Building from source
 
+Build the current development sources into your local Conan cache:
+
 ```bash
 # Clone
-git clone --branch v1.0.0 https://github.com/utxo-z/utxo-z.git
+git clone https://github.com/utxo-z/utxo-z.git
 cd utxo-z
 
 # Build and install to local Conan cache
 conan profile detect  # Only if you do not already have a default profile
-conan create . --version=1.0.0 --build=missing -s compiler.cppstd=23 -s build_type=Release
+./scripts/build-create.sh 0.0.0-dev
 ```
 
 ## Usage
@@ -274,9 +276,9 @@ rdb.for_each_entry([](utxoz::raw_outpoint const& key,
 UTXO-Z supports three logging backends configured at build time:
 
 ```bash
-conan create . --version=1.0.0 --build=missing -s compiler.cppstd=23 -s build_type=Release -o "utxoz/*:log=custom"  # Callback-based (default)
-conan create . --version=1.0.0 --build=missing -s compiler.cppstd=23 -s build_type=Release -o "utxoz/*:log=spdlog"  # spdlog integration
-conan create . --version=1.0.0 --build=missing -s compiler.cppstd=23 -s build_type=Release -o "utxoz/*:log=none"    # Disabled
+./scripts/build-create.sh 0.0.0-dev custom   # Callback-based (default)
+./scripts/build-create.sh 0.0.0-dev spdlog   # spdlog integration
+./scripts/build-create.sh 0.0.0-dev none     # Disabled
 ```
 
 #### Custom callback
