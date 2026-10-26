@@ -24,6 +24,9 @@ fi
 
 echo "Building version: ${VERSION}"
 
+# Documentation is prepared in the release PR, before CI or publication.
+command -v python3 >/dev/null || { echo "python3 is required to update release documentation"; exit 1; }
+
 # Verify GitHub CLI authentication
 echo "Verifying GitHub CLI authentication..."
 if ! gh auth status >/dev/null 2>&1; then
@@ -167,6 +170,14 @@ echo "Release notes captured (${#RELEASE_NOTES} characters)."
 
 git checkout -b "release/${VERSION}"
 
+# Only actionable UTXO-Z references in documentation are updated. Historical
+# release notes, dependency versions and development examples stay unchanged.
+# A failure must stop before the release commit, push or PR is created.
+if ! python3 scripts/update_release_docs.py "${VERSION}" --stage; then
+    echo "Could not update release documentation. Aborting before publishing the release branch."
+    exit 1
+fi
+
 # No version to bump. The version is not written down anywhere in the tree any
 # more: #85 moved include/utxoz/version.hpp into the build tree, because it was
 # generated into the source tree and tracked, so every build rewrote a file
@@ -177,10 +188,9 @@ git checkout -b "release/${VERSION}"
 # it and generates the header. Editing a file to say the version would be
 # recording a second copy that nothing reads.
 #
-# The commit is empty because the branch still needs one: without it there is
-# nothing between master and release/${VERSION}, and `gh pr create` has no pull
-# request to open. It marks the release point and is what post-release.sh later
-# confirms landed on master before tagging.
+# The commit carries the documentation references. Allow it to be empty when
+# those references are already current: the branch still needs a commit for
+# its PR. post-release.sh confirms this commit landed on master before tagging.
 git commit --allow-empty -m "release: ${VERSION}"
 
 git push origin "release/${VERSION}"

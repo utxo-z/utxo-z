@@ -63,6 +63,9 @@ jobs:
       - name: 🧪 Release notes are generated once and carried
         run: ./scripts/test_release_lib.sh
 
+      - name: 🧪 Release documentation versions
+        run: python3 scripts/test_update_release_docs.py
+
       - name: 🔧 Determine version
         id: version
         uses: ./.github/actions/determine-version
