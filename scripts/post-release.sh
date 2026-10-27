@@ -9,7 +9,7 @@ if [ -z "$1" ]; then
     echo "This script performs the post-CI steps of the release process:"
     echo "  - Merges the release PR"
     echo "  - Creates release notes"
-    echo "  - Creates and pushes the release tag"
+    echo "  - Creates and pushes the release tag (a record; the release branch already published)"
     echo "  - Cleans up release branch"
     exit 1
 fi
@@ -146,6 +146,11 @@ printf '%s\n' "${RELEASE_NOTES}" > "${RELEASE_NOTES_FILE}"
 # Tags, pushes and creates the release — and removes the tag again if the
 # release cannot be created, so the remote never carries a v${VERSION} pointing
 # at something that was never published.
+#
+# The tag is a record of what was released, not a second release. The package
+# was published and verified by the push run of release/${VERSION}, which
+# release.sh waited for; the workflow does not trigger on tags, so pushing this
+# one rebuilds and uploads nothing (see ci/release_authority.sh).
 publish_release "${VERSION}" "${RELEASE_NOTES_FILE}"
 
 echo "Release v${VERSION} created successfully!"
