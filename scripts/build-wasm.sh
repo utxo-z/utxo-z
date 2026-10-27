@@ -15,40 +15,26 @@ echo "Building utxoz for WebAssembly (Emscripten)"
 
 cd "${PROJECT_DIR}"
 
-if ! command -v em++ >/dev/null 2>&1 || ! em++ --version | head -n 1 | grep -q ' 6\.'; then
-    echo "Error: Emscripten 6.x is required on PATH."
-    exit 1
-fi
-
-# Check that ems2 profile exists
-if ! conan profile show -pr ems2 > /dev/null 2>&1; then
-    echo "Error: Conan profile 'ems2' not found."
-    echo "Create it with:"
-    echo ""
-    echo "  cat > ~/.conan2/profiles/ems2 <<'EOF'"
-    echo "  [settings]"
-    echo "  arch=wasm"
-    echo "  build_type=Release"
-    echo "  compiler=clang"
-    echo "  compiler.cppstd=23"
-    echo "  compiler.libcxx=libc++"
-    echo "  compiler.version=21"
-    echo "  os=Emscripten"
-    echo ""
-    echo "  [buildenv]"
-    echo "  CC_FOR_BUILD=clang"
-    echo "  CXX_FOR_BUILD=clang++"
-    echo "  EOF"
-    exit 1
-fi
+# CI and local builds use the same compiler version and SDK requirement.
+# Recipe remote setup is documented in doc/build-wasm.md. Conan supplies the
+# SDK: an unrelated em++ on PATH must not select the toolchain.
+PROFILE="${PROJECT_DIR}/ci/conan-ems6"
+conan profile show -pr:h "${PROFILE}" -pr:b default
 
 # Install dependencies
-conan install . -of "${BUILD_DIR}" --version="${VERSION}" --build=missing -pr ems2
+conan install . -of "${BUILD_DIR}" --version="${VERSION}" --build=missing -pr:h "${PROFILE}" -pr:b default \
+    -c "tools.cmake.cmaketoolchain:user_presets="
+
+GENERATORS="${BUILD_DIR}/build/Release/generators"
+# shellcheck disable=SC1091
+source "${GENERATORS}/conanbuild.sh"
 
 # Configure
-cmake --preset conan-release
+cmake -S "${PROJECT_DIR}" -B "${BUILD_DIR}/build/Release" -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="${GENERATORS}/conan_toolchain.cmake" \
+    -DCMAKE_BUILD_TYPE=Release
 
 # Build
-cmake --build --preset conan-release --parallel
+cmake --build "${BUILD_DIR}/build/Release" --parallel
 
 echo "WASM build successful!"
