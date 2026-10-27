@@ -16,7 +16,11 @@ PATTERNS = (
     re.compile(r"(?P<prefix>(?:\./)?scripts/build-create\.sh[ \t]+)" + STABLE),
     re.compile(r"(?P<prefix>https://github\.com/utxo-z/utxo-z/(?:releases/tag/v|tree/v))" + STABLE),
 )
-CLONE_TAG = re.compile(r"(?P<prefix>--branch[ \t]+v)" + STABLE)
+# Match the supported clone example as one unit, not every tag on its line.
+CLONE_TAG = re.compile(
+    r"(?P<prefix>\bgit[ \t]+clone[ \t]+--branch[ \t]+v)" + STABLE
+    + r"(?P<suffix>[ \t]+https://github\.com/utxo-z/utxo-z\.git)(?=$|[\s;&|])"
+)
 BEGIN = '<!-- utxoz:current-release:start -->'
 END = '<!-- utxoz:current-release:end -->'
 
@@ -56,8 +60,7 @@ def update(text, version):
         if current:
             for pattern in PATTERNS:
                 line = pattern.sub(lambda match: match['prefix'] + version, line)
-            if 'git clone ' in line and 'https://github.com/utxo-z/utxo-z.git' in line:
-                line = CLONE_TAG.sub(lambda match: match['prefix'] + version, line)
+            line = CLONE_TAG.sub(lambda match: match['prefix'] + version + match['suffix'], line)
         output.append(line)
     return ''.join(output)
 

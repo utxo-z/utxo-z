@@ -29,6 +29,18 @@ def git_output(args):
 
 
 class ReleaseDocs(unittest.TestCase):
+    def test_two_clone_commands_on_one_line(self):
+        other = 'git clone --branch v0.9.0 https://github.com/other/project.git'
+        ours = 'git clone --branch v1.0.0 https://github.com/utxo-z/utxo-z.git'
+        updated = ours.replace('v1.0.0', 'v1.0.1')
+        for separator in [' && ', '; ', ' || ', ' | ']:
+            for before, after in [(other + separator + ours, other + separator + updated),
+                                  (ours + separator + other, updated + separator + other)]:
+                with self.subTest(before=before):
+                    self.assertEqual(module.update(marked(before + '\n'), '1.0.1'), marked(after + '\n'))
+        lookalike = ours + '.unrelated'
+        self.assertEqual(module.update(marked(lookalike + '\n'), '1.0.1'), marked(lookalike + '\n'))
+
     def test_selective_references(self):
         source = '''utxoz/1.0.0 fmt/12.1.0 boost/1.91.0
 ./scripts/build-create.sh 1.0.0 spdlog
