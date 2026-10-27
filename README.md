@@ -31,10 +31,12 @@ For the technical paper describing the architecture and benchmarks, see [docs/ut
 
 Add to your `conanfile.py`:
 
+<!-- utxoz:current-release:start -->
 ```python
 def requirements(self):
     self.requires("utxoz/1.0.0")
 ```
+<!-- utxoz:current-release:end -->
 
 Configure the package remote if it is not already present:
 
