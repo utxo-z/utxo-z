@@ -236,7 +236,8 @@ def evaluate(expr: str, context: dict[str, str]):
         return kind, val
 
     def truthy(v) -> bool:
-        return bool(v) and v != "false" if isinstance(v, str) else bool(v)
+        # GitHub treats every non-empty string as truthy, including "false".
+        return bool(v)
 
     def primary():
         kind, val = peek()
@@ -714,6 +715,10 @@ def negative_controls(workflow: str, repo: Path, shas: dict[str, str], work: Pat
                      mutate(workflow, NEW_PUBLISH_IF,
                             "    if: needs.setup.outputs.publish == 'true'", "publish event"),
                      AUTHORITY))
+    controls.append(("publish treats the string false as a boolean",
+                     mutate(workflow, NEW_PUBLISH_IF,
+                            "    if: github.event_name == 'push' && needs.setup.outputs.publish",
+                            "publish string truthiness"), AUTHORITY))
 
     script = AUTHORITY.read_text()
     trusting = work / "authority-trusts-forks.sh"
@@ -749,6 +754,16 @@ def main() -> int:
     if shutil.which("git") is None:
         print("FAIL  git is required", file=sys.stderr)
         return 1
+
+    # Keep booleans distinct from strings: setup outputs are strings in Actions.
+    for expression, expected in [("'false'", True), ("'0'", True), ("''", False),
+                                 ("false", False), ("true", True),
+                                 ("! 'false'", False), ("! ''", True)]:
+        actual = evaluate(expression, {})
+        if actual == expected:
+            ok(f"expression truthiness: {expression} -> {expected}")
+        else:
+            bad(f"expression truthiness: {expression}", f"got {actual}, expected {expected}")
 
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
