@@ -232,6 +232,11 @@ else
     exit 1
 fi
 
+# The push run of release/${VERSION} is the release: it runs the full matrix,
+# publishes the package and verifies that the exact revision is retrievable. The
+# pull request's run does not repeat the matrix; it waits for this same push run
+# and mirrors its result (see ci/release_authority.sh). So the push run is the
+# one to wait for, and its success means the package is out.
 echo "Waiting for the build to finish for branch: release/${VERSION}"
 echo "Recording current time to filter only new workflow runs..."
 # Subtract 10 seconds to account for push delay
@@ -342,7 +347,7 @@ echo ""
 echo "Pre-release steps completed:"
 echo "  - Release branch created: release/${VERSION}"
 echo "  - PR created and ready for merge"
-echo "  - CI builds passed"
+echo "  - CI builds passed, and the package was published and verified"
 echo ""
 echo "Next step: Run the post-release script to complete the release:"
 echo "   ./scripts/post-release.sh ${VERSION}"
@@ -350,7 +355,7 @@ echo ""
 echo "The post-release script will:"
 echo "  - Merge the release PR"
 echo "  - Generate and commit release notes"
-echo "  - Create the release tag and GitHub release"
+echo "  - Create the release tag and GitHub release (a record; nothing is rebuilt or published from it)"
 echo "  - Clean up the release branch"
 echo ""
 

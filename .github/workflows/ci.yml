@@ -28,11 +28,24 @@ concurrency:
 env:
   CONAN_VERSION: 2.31.2
 
+# Release authority (#104), decided per run by ci/release_authority.sh:
+#
+#   - A push to release/<version> or hotfix/<version> is the release: the full
+#     matrix, then `publish`, which uploads and verifies the exact revision.
+#   - Its pull request does not run the matrix again. When the head is this
+#     repository's own release branch and already contains its base, the matrix
+#     is skipped and `release-validation` passes only if the push run of the same
+#     commit succeeded. Forks, stale heads and every other pull request get the
+#     full matrix.
+#   - The v<version> tag that post-release.sh pushes is a record. It is not a
+#     trigger, so nothing is rebuilt or published from it.
+#   - master, main and workflow_dispatch run the full matrix and publish nothing.
+#
+# ci/test_release_authority.py evaluates this file's triggers and job conditions
+# for each of those cases, and runs in `setup`.
 on:
   push:
     branches: [main, master, 'release/**', 'hotfix/**']
-    tags:
-      - v*
   pull_request:
     branches: [main, master]
   workflow_dispatch: {}
@@ -45,6 +58,10 @@ jobs:
     timeout-minutes: 10
     outputs:
       build-version: ${{ steps.version.outputs.build-version }}
+      # What every other job reads to decide whether it runs. See the release
+      # authority note above `on:`.
+      validation: ${{ steps.authority.outputs.validation }}
+      publish: ${{ steps.authority.outputs.publish }}
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -66,6 +83,28 @@ jobs:
       - name: 🧪 Release documentation versions
         run: python3 scripts/test_update_release_docs.py
 
+      # Before the decision is taken, so that a regression in it is a red build
+      # rather than a release that publishes twice or a pull request that skips
+      # what nothing else validated.
+      - name: 🧪 Release authority and its wiring
+        run: python3 ci/test_release_authority.py
+
+      # Every input through the environment: the head branch and repository of a
+      # pull request are chosen by whoever opened it.
+      - name: 🔧 Release authority
+        id: authority
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          ./ci/release_authority.sh >> "$GITHUB_OUTPUT"
+
       - name: 🔧 Determine version
         id: version
         uses: ./.github/actions/determine-version
@@ -81,16 +120,52 @@ jobs:
           UTXOZ_BUILD_VERSION: ${{ steps.version.outputs.build-version }}
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
+          VALIDATION: ${{ steps.authority.outputs.validation }}
+          PUBLISH: ${{ steps.authority.outputs.publish }}
         run: |
           {
             echo "## Build Configuration"
             echo "**Version:** \`${UTXOZ_BUILD_VERSION}\`"
             echo "**Event:** ${EVENT_NAME}"
             echo "**Ref:** ${REF}"
+            echo "**Validation:** ${VALIDATION}"
+            echo "**Publishes:** ${PUBLISH}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # A release pull request's validation, when the push run of its head commit is
+  # the authority (see the note above `on:`). Red unless that run succeeded: it
+  # failed, never ran, or had not finished within the wait. A bounded wait, so a
+  # pull request is never left pending on a run that will not come.
+  release-validation:
+    needs: [setup]
+    if: needs.setup.outputs.validation == 'by-push'
+    runs-on: ubuntu-24.04
+    # The script's own bound is two hours, the same one release.sh waits for this
+    # run; this leaves it room to report rather than be killed mid-answer.
+    timeout-minutes: 135
+    name: 🔗 Release revision validated by its push run
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: 🔗 The push run of this commit succeeded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: ./ci/await_push_validation.sh
 
   build:
     needs: [setup]
+    # Every validation job carries this condition, and only this one: `full`
+    # everywhere except a release pull request whose push run is the validation.
+    if: needs.setup.outputs.validation == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -406,14 +481,14 @@ jobs:
           name: sizing-${{ runner.os }}-${{ runner.arch }}
           path: sizing-report/
 
+  # The one publisher: a push to release/<version> or hotfix/<version>. The tag
+  # used to publish the same version a second time, from the merge commit rather
+  # than the branch that had been validated; it is a record now and publishes
+  # nothing. The event check is repeated here on purpose, so that no output of
+  # `setup` can make a pull request publish.
   publish:
     needs: [setup, build]
-    if: >-
-      github.event_name == 'push' && (
-        startsWith(github.ref, 'refs/tags/v') ||
-        startsWith(github.ref, 'refs/heads/release/') ||
-        startsWith(github.ref, 'refs/heads/hotfix/')
-      )
+    if: github.event_name == 'push' && needs.setup.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -589,6 +664,7 @@ jobs:
 
   build-wasm:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     runs-on: ubuntu-24.04
     # A stuck job otherwise runs to the six-hour default, blocking the matrix
     # and reporting nothing about which step it was in.
@@ -669,6 +745,7 @@ jobs:
 
   boost-compatibility:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     runs-on: ubuntu-24.04
     # A stuck job otherwise runs to the six-hour default, blocking the matrix
     # and reporting nothing about which step it was in.
@@ -737,6 +814,7 @@ jobs:
 
   generated-headers:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     runs-on: ubuntu-24.04
     # A stuck job otherwise runs to the six-hour default, blocking the matrix
     # and reporting nothing about which step it was in.
@@ -822,6 +900,7 @@ jobs:
 
   tools-without-tests:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     name: 🧰 Tools with tests off
@@ -950,6 +1029,7 @@ jobs:
 
   statistics-lookup:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -1079,6 +1159,7 @@ jobs:
 
   statistics-level-rejected:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     name: 🚫 An unknown statistics level is refused
@@ -1167,6 +1248,7 @@ jobs:
 
   statistics-disabled:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     runs-on: ubuntu-24.04
     # A stuck job otherwise runs to the six-hour default, blocking the matrix
     # and reporting nothing about which step it was in.
@@ -1287,6 +1369,7 @@ jobs:
 
   publish-dry-run:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     # The same platforms publish runs on, because the thing being rehearsed is
     # platform-specific. A Linux-only dry run said the package was consumable
     # while the Windows one could not link at all: `conan create` — and with it
@@ -1591,6 +1674,7 @@ jobs:
 
   benchmark:
     needs: [setup]
+    if: needs.setup.outputs.validation == 'full'
     runs-on: ubuntu-24.04
     # A stuck job otherwise runs to the six-hour default, blocking the matrix
     # and reporting nothing about which step it was in.
