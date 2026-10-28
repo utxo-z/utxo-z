@@ -83,6 +83,9 @@ jobs:
       - name: 🧪 Release documentation versions
         run: python3 scripts/test_update_release_docs.py
 
+      - name: 🧪 Shared Emscripten profile
+        run: python3 ci/test_emsdk_profile.py
+
       # Before the decision is taken, so that a regression in it is a red build
       # rather than a release that publishes twice or a pull request that skips
       # what nothing else validated.
@@ -677,11 +680,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 🌐 Install Emscripten 6.0.6
-        uses: mymindstorm/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
+      - name: 📥 Emscripten recipe source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          version: 6.0.6
-          actions-cache-folder: emsdk-cache
+          repository: conan-io/conan-toolchains
+          ref: 11b83330cdeb20622fe4b097dccb254969639a54
+          path: .conan-toolchains
+          persist-credentials: false
 
       - name: 🐍 Install Conan
         run: |
@@ -691,33 +696,18 @@ jobs:
       - name: 🔧 Setup Conan profiles
         run: |
           conan profile detect --force
-
-          cat > ~/.conan2/profiles/ems2 <<EOF
-          [settings]
-          arch=wasm
-          build_type=Release
-          compiler=clang
-          compiler.cppstd=23
-          compiler.libcxx=libc++
-          compiler.version=21
-          os=Emscripten
-
-          [buildenv]
-          CC_FOR_BUILD=clang
-          CXX_FOR_BUILD=clang++
-
-          [conf]
-          tools.cmake.cmaketoolchain:user_toolchain=["$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"]
-          EOF
+          conan remote add conan-toolchains "$GITHUB_WORKSPACE/.conan-toolchains"
+          conan profile show -pr:h ./ci/conan-ems6 -pr:b default
 
       - name: 📦 Install dependencies
         env:
           UTXOZ_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
         run: |
-          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr ems2
+          conan install . -of build --version="$UTXOZ_BUILD_VERSION" --build=missing -pr:h ./ci/conan-ems6 -pr:b default
 
       - name: ⚙️ Configure CMake
         run: |
+          source build/build/Release/generators/conanbuild.sh
           cmake --preset conan-release
 
       - name: 🧪 Verify configured toolchain
@@ -729,9 +719,11 @@ jobs:
           EXPECTED_CPPSTD: 23
           EXPECTED_BUILD_VERSION: ${{ needs.setup.outputs.build-version }}
           CMAKE_CACHE: build/build/Release/CMakeCache.txt
-          CONAN_PROFILE: ems2
+          CONAN_PROFILE: ./ci/conan-ems6
           TOOLCHAIN_MANIFEST: toolchain-Emscripten.json
-        run: python3 scripts/ci_toolchain_manifest.py
+        run: |
+          source build/build/Release/generators/conanbuild.sh
+          python3 scripts/ci_toolchain_manifest.py
 
       - name: 📤 Upload toolchain manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -741,6 +733,7 @@ jobs:
 
       - name: 🔨 Build
         run: |
+          source build/build/Release/generators/conanbuild.sh
           cmake --build --preset conan-release --parallel
 
   boost-compatibility:
