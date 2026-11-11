@@ -27,6 +27,7 @@ add_executable(utxoz_tests
     test_sync.cpp
     test_path_encoding.cpp
     test_named_object_guard.cpp
+    test_persisted_segment_lock.cpp
     test_format_barrier.cpp
     test_shard_of.cpp
     test_container_selection.cpp
