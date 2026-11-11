@@ -232,6 +232,10 @@ enum class error_code : uint8_t {
     /// created up to v0.10.0. Its layout cannot be established after the fact,
     /// so it is refused rather than assumed, and nothing about it is touched.
     /// It has to be rebuilt from the chain.
+    ///
+    /// Also a database whose version files carry Boost.Interprocess's segment
+    /// manager, as every release up to the last one built on it wrote. Later builds write a segment
+    /// layout of their own and do not read that one.
     migration_required,
     /// The container sizing this build writes is not the one the file was
     /// written under.

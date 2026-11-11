@@ -41,7 +41,7 @@
 #include <span>
 #include <vector>
 
-#include <boost/interprocess/managed_mapped_file.hpp>
+#include "mapped_segment.hpp"
 
 #include <utxoz/types.hpp>
 
@@ -53,7 +53,6 @@
 
 namespace utxoz::detail {
 
-namespace bip = boost::interprocess;
 namespace fs = std::filesystem;
 
 /// What a stamp says. Decoded form; the stored form is the byte array below.
@@ -75,7 +74,7 @@ struct segment_identity {
  * the layout is trusted.
  */
 struct segment_stamp {
-    static constexpr char const* object_name = "utxoz_stamp";
+    static constexpr segment_slot object_name = segment_slot::stamp;
     static constexpr std::array<char, 4> magic{'U', 'Z', 'S', 'T'};
     static constexpr uint16_t current_format = 1;
 
@@ -177,17 +176,13 @@ inline std::expected<segment_identity, stamp_error> decode_stamp(segment_stamp c
  * this, or the file belongs to another database entirely.
  */
 [[nodiscard]]
-inline result<> validate_stamp(bip::managed_mapped_file& segment, fs::path const& path,
+inline result<> validate_stamp(mapped_segment& segment, fs::path const& path,
                                segment_identity const& expected) {
     // Asked directly rather than through find_single_named, because the two
     // answers it folds together mean different things here: no stamp at all is a
     // file this build did not write, while a stamp that does not measure one
     // instance is a file whose stamp cannot be read as a stamp.
-    //
-    // And without the segment manager's lock, for the reason given at
-    // find_single_named(): it is persisted with the file and may come back
-    // taken.
-    auto const found = segment.find_no_lock<segment_stamp>(segment_stamp::object_name);
+    auto const found = segment.find<segment_stamp>(segment_stamp::object_name);
     if (found.first == nullptr) {
         log::error("{}: carries no format stamp", path_display(path));
         return std::unexpected(error_code::segment_stamp_missing);
@@ -247,14 +242,13 @@ inline result<> validate_stamp(bip::managed_mapped_file& segment, fs::path const
 /// `find_or_construct`: this file is new, so a name already taken means it is not
 /// the file this call thinks it is.
 [[nodiscard]]
-inline result<> place_stamp(bip::managed_mapped_file& segment, fs::path const& path,
+inline result<> place_stamp(mapped_segment& segment, fs::path const& path,
                             segment_identity const& identity) {
     try {
-        // nothrow, so a name already taken comes back as a null rather than as an
-        // exception this would report as a failure to open. They are different
-        // things: one is a file that already carries a stamp.
-        auto* placed = segment.construct<segment_stamp>(segment_stamp::object_name, std::nothrow)(
-            encode_stamp(identity));
+        // A slot already taken comes back as a null: a file that already
+        // carries a stamp is not the file this call thinks it is.
+        auto* placed = segment.construct<segment_stamp>(segment_stamp::object_name,
+                                                        encode_stamp(identity));
         if (placed == nullptr) {
             log::error("{}: already carries a format stamp", path_display(path));
             return std::unexpected(error_code::identity_collision);

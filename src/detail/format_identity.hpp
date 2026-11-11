@@ -43,8 +43,6 @@
 #include <initializer_list>
 
 #include <boost/container_hash/hash.hpp>
-#include <boost/interprocess/offset_ptr.hpp>
-#include <boost/interprocess/sync/interprocess_mutex.hpp>
 
 #include <utxoz/types.hpp>
 
@@ -71,36 +69,18 @@ inline constexpr uint32_t data_abi_id = []() constexpr {
     return (endian << 24)
          | (uint32_t(sizeof(size_t)) << 16)
          | (uint32_t(sizeof(void*)) << 8)
-         | uint32_t(sizeof(boost::interprocess::offset_ptr<void>));
+         | uint32_t(sizeof(offset_ptr<void>));
 }();
 
 static_assert(sizeof(size_t) <= 255 && sizeof(void*) <= 255
-              && sizeof(boost::interprocess::offset_ptr<void>) <= 255,
+              && sizeof(offset_ptr<void>) <= 255,
               "data_abi_id packs each of these into one byte");
-
-/**
- * @brief Which interprocess mutex this build compiles, taken from Boost itself.
- *
- * Read from the macros `interprocess_mutex.hpp` leaves behind rather than by
- * re-deriving the predicate it switches on. The two agree today; a Boost that
- * changed the condition would leave a copy of it here quietly describing the
- * wrong thing, which is the failure this identity exists to prevent.
- */
-inline constexpr uint32_t sync_abi_family =
-#if defined(BOOST_INTERPROCESS_MUTEX_USE_POSIX)
-    1u;   // pthread process-shared mutexes
-#elif defined(BOOST_INTERPROCESS_MUTEX_USE_WINAPI)
-    2u;   // the Windows API
-#else
-    3u;   // Boost's spinlock emulation
-#endif
 
 /// Which platform and C runtime this is.
 ///
-/// The family is not enough on its own. Two targets can both take the POSIX
-/// branch and still disagree about what a `pthread_mutex_t` looks like — glibc
-/// and bionic do — so the same branch is not the same persisted layout, and only
-/// the layout matters to a file.
+/// The sizes in `data_abi_id` are not enough on their own: two targets can agree
+/// on all of them and still lay a stored value out differently, and only the
+/// layout matters to a file.
 ///
 /// There is deliberately no catch-all. A shared fallback would make two
 /// unrecognised platforms compatible *with each other*, which is the same defect
@@ -165,60 +145,48 @@ inline constexpr uint32_t mix_identity(std::initializer_list<uint32_t> parts) {
 
 /// Bumped if the ingredient list changes, so an old id and a new one cannot
 /// collide into looking compatible.
-inline constexpr uint32_t platform_abi_encoding = 1;
+inline constexpr uint32_t platform_abi_encoding = 2;
 
 /**
- * @brief The whole persisted ABI: the data, and the segment's own machinery.
+ * @brief The whole persisted ABI: the data, and the segment's own header.
  *
- * A managed segment keeps its allocator's mutex — and the segment manager that
- * owns it — **inside the mapped file**. Boost picks a different mutex per
- * platform: POSIX process-shared mutexes where they work, the Windows API where
- * that is the choice, a spinlock emulation otherwise. macOS takes the third road
- * because Boost marks Apple's process-shared mutexes as broken, in
- * `detail/workaround.hpp`, with the reason written out. Different types,
- * different sizes, at one offset, and everything after them moves.
+ * A version file begins with a header this library defines (mapped_segment.hpp):
+ * fixed-width integers, no lock, nothing a platform chooses. Its format number
+ * and its measured shape go in, so that a build with a different header refuses
+ * the file instead of reading one header as another.
  *
- * Linux x86_64 and macOS arm64 agree on every number in `data_abi_id`. So the
- * barrier accepted a file it had to refuse, the segment mapped cleanly, and the
- * first named-object lookup never returned — a lock taken on another platform's
- * bytes. No diagnostic, no failure, no end.
- *
- * The family alone would not have been enough either. What goes in is the
- * measurable shape of the persisted machinery — the size and alignment of the
- * mutex and of the segment manager — together with the platform and C runtime,
- * so that two POSIX targets are not taken for each other merely because their
- * mutexes happen to be the same size.
+ * Earlier formats kept Boost.Interprocess's segment manager and its mutex in the
+ * file, and the mutex was a different type on every platform. Linux x86_64 and
+ * macOS arm64 agreed on every number in `data_abi_id`, a file from one mapped
+ * cleanly on the other, and the first lookup never returned: a lock taken on
+ * another platform's bytes. The platform and C runtime stay in the identity for
+ * what remains platform-shaped, which is the layout of the stored values.
  *
  * Parameterised so there is exactly one ingredient list. A test asking what a
  * differently-built target's identity would be, and the constant this build uses,
  * are then the same arithmetic rather than two copies of it that can drift.
  */
-inline constexpr uint32_t compute_platform_abi_id(uint32_t family, uint32_t tag) {
+inline constexpr uint32_t compute_platform_abi_id(uint32_t header_format, uint32_t tag) {
     return mix_identity({
         platform_abi_encoding,
         data_abi_id,
-        family,
-        uint32_t(sizeof(boost::interprocess::interprocess_mutex)),
-        uint32_t(alignof(boost::interprocess::interprocess_mutex)),
-        uint32_t(sizeof(segment_manager_t)),
-        uint32_t(alignof(segment_manager_t)),
+        header_format,
+        uint32_t(sizeof(segment_header)),
+        uint32_t(alignof(segment_header)),
         tag,
     });
 }
 
 inline constexpr uint32_t platform_abi_id =
-    compute_platform_abi_id(sync_abi_family, platform_tag);
+    compute_platform_abi_id(segment_header::current_format, platform_tag);
 
-static_assert(sync_abi_family >= 1 && sync_abi_family <= 3);
-static_assert(compute_platform_abi_id(1, platform_tag) != compute_platform_abi_id(3, platform_tag),
-              "the mutex family has to change the identity, or the barrier cannot tell "
-              "a POSIX-built file from a spinlock-built one");
-static_assert(compute_platform_abi_id(sync_abi_family, 1) != compute_platform_abi_id(sync_abi_family, 2),
-              "so does the platform: two targets on the same branch can still disagree "
-              "about what a mutex looks like");
-static_assert(sizeof(segment_manager_t) > 0,
-              "the segment manager is the header this format is written around; "
-              "its shape belongs in the identity");
+static_assert(compute_platform_abi_id(1, platform_tag) != compute_platform_abi_id(2, platform_tag),
+              "the header format has to change the identity, or the barrier cannot tell "
+              "a file with one header from a file with another");
+static_assert(compute_platform_abi_id(segment_header::current_format, 1)
+                  != compute_platform_abi_id(segment_header::current_format, 2),
+              "so does the platform: two targets can agree on every size here and still "
+              "disagree about what the stored values look like");
 
 /**
  * @brief The container sizing this build writes.

@@ -40,6 +40,7 @@
 
 #include <utxoz/types.hpp>
 
+#include "mapped_segment.hpp"
 #include "durability.hpp"
 #include "system_entropy.hpp"
 
@@ -71,7 +72,7 @@ enum class sidecar_read_error : uint8_t {
  */
 struct merge_marker {
     /// The name it is stored under inside the target's segment.
-    static constexpr char const* object_name = "utxoz_merge_id";
+    static constexpr segment_slot object_name = segment_slot::merge_marker;
 
     uint64_t high = 0;
     uint64_t low = 0;

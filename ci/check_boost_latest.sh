@@ -213,8 +213,9 @@ trap 'rm -rf "${work}"' EXIT
 # them the compatibility cases fail on the missing files, which would be reported
 # as the format having changed — the one thing this job must never say when it
 # has not looked.
-# The production set: geometry 4, what a 1.0 build writes. The legacy set
-# (geometry 3) is only there to be refused, and the suite needs its path too.
+# The production set: geometry 4 in the current segment layout. The legacy set
+# (written over Boost.Interprocess segments) is only there to be refused, and
+# the suite needs its path too.
 readonly fixtures="tests/fixtures/geometry4-lp64"
 readonly legacy_fixtures="tests/fixtures/epoch1-lp64"
 if [[ ! -f "${fixtures}/manifest.json" ]]; then
@@ -296,7 +297,6 @@ build_failed=0
 for src in src/database.cpp src/database_impl.cpp src/statistics.cpp src/utils.cpp src/log.cpp; do
     if ! g++ -std=c++23 -O2 -c -I include -I build/build/Release/include -I src \
         -DFMT_HEADER_ONLY \
-        -DBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u \
         -isystem "${headers}" -isystem "${fmt_include}" \
         -o "${work}/obj/$(basename "${src}" .cpp).o" "${src}" 2> "${work}/build.log"; then
         build_failed=1
@@ -324,7 +324,6 @@ fi
 # whatever somebody remembered to put in it, and would drift.
 if ! g++ -std=c++23 -O2 -I include -I build/build/Release/include -I src -I tests \
     -DFMT_HEADER_ONLY \
-    -DBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u \
     -DUTXOZ_FIXTURES_DIR="\"$(pwd)/${fixtures}\"" \
     -DUTXOZ_LEGACY_FIXTURES_DIR="\"$(pwd)/${legacy_fixtures}\"" \
     -isystem "${headers}" -isystem "${fmt_include}" -isystem "${catch_root}/include" \
@@ -338,7 +337,6 @@ fi
 
 if ! g++ -std=c++23 -O2 -I include -I build/build/Release/include -I src -I tests \
     -DFMT_HEADER_ONLY \
-    -DBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u \
     -DUTXOZ_FIXTURES_DIR="\"$(pwd)/${fixtures}\"" \
     -DUTXOZ_LEGACY_FIXTURES_DIR="\"$(pwd)/${legacy_fixtures}\"" \
     -isystem "${headers}" -isystem "${fmt_include}" \
@@ -419,7 +417,6 @@ if [[ ! -x "${pinned_generator}" ]]; then
     physical_note="${pinned_generator} was not built, so there was no baseline to compare against and nothing is claimed about what this Boost writes. Build the utxoz_make_format_fixtures target before running this."
 elif ! g++ -std=c++23 -O2 -I include -I build/build/Release/include -I src -I tests/support -I tests \
         -DFMT_HEADER_ONLY \
-        -DBOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u \
         -isystem "${headers}" -isystem "${fmt_include}" \
         -o "${work}/gen" tools/make_format_fixtures.cpp "${work}"/obj/*.o -pthread \
         2>> "${work}/link.log"; then

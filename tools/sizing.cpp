@@ -61,7 +61,6 @@
 #include "detail/utxo_value.hpp"
 
 namespace fs = std::filesystem;
-namespace bip = boost::interprocess;
 
 using namespace utxoz;
 using namespace utxoz::detail;
@@ -197,7 +196,7 @@ struct measurement_failed : std::runtime_error {
 
 template <class Map>
 struct built_segment {
-    std::unique_ptr<bip::managed_mapped_file> segment;
+    std::unique_ptr<mapped_segment> segment;
     Map* map = nullptr;
 };
 
@@ -227,13 +226,14 @@ std::optional<built_segment<Map>> build_like_production(fs::path const& file, si
     fs::remove(file, ec);
 
     built_segment<Map> out;
-    try {
-        out.segment = std::make_unique<bip::managed_mapped_file>(bip::create_only, file.c_str(), size);
-    } catch (bip::bad_alloc const&) {
-        return std::nullopt;
-    } catch (std::exception const& e) {
-        throw measurement_failed(fmt::format("creating a {} byte segment: {}", size, e.what()));
+    // Too small for the header is a capacity answer like any other.
+    if (size < sizeof(segment_header)) return std::nullopt;
+    auto created = mapped_segment::create(file, size);
+    if ( ! created) {
+        throw measurement_failed(fmt::format("creating a {} byte segment: error {}", size,
+                                             int(created.error())));
     }
+    out.segment = std::move(*created);
 
     // A stamp that will not go down is not a capacity answer. It is fifty-six
     // bytes placed at the start of a segment already sized for a map thousands of
@@ -257,9 +257,9 @@ std::optional<built_segment<Map>> build_like_production(fs::path const& file, si
     }
 
     try {
-        out.map = out.segment->template construct<Map>(map_object_name, std::nothrow)(
+        out.map = out.segment->template construct<Map>(map_object_name,
             asked, outpoint_hash{}, outpoint_equal{}, out.segment->template get_allocator<Alloc>());
-    } catch (bip::bad_alloc const&) {
+    } catch (segment_full const&) {
         return std::nullopt;
     }
     if (out.map == nullptr) return std::nullopt;
@@ -391,10 +391,10 @@ sizing_report measure(fs::path const& work, std::string class_name, size_t asked
     r.slot_bytes = r.bucket_count * r.sizeof_pair;
     r.metadata_bytes = (r.bucket_count / 15 + 1) * 16;
 
-    // Named object, stamp, segment manager, allocator bookkeeping and alignment.
+    // Header, stamp, the map object and alignment.
     // A starting point for the search, not a claim: the measurement below is what
     // is reported, and the difference is printed as overhead.
-    r.estimated_overhead = sizeof(segment_manager_t) + 4096;
+    r.estimated_overhead = sizeof(segment_header) + 4096;
     r.estimated_minimum = r.slot_bytes + r.metadata_bytes + r.estimated_overhead;
 
 
@@ -520,7 +520,7 @@ sizing_report measure(fs::path const& work, std::string class_name, size_t asked
             try {
                 built->map->rehash(r.next_bucket_count);
                 r.next_coexists_via_rehash = built->map->bucket_count() >= r.next_bucket_count;
-            } catch (bip::bad_alloc const&) {
+            } catch (segment_full const&) {
                 r.next_coexists_via_rehash = false;
             }
             r.coexistence_method = "rehash on a populated map inside the recommended segment";
@@ -612,12 +612,10 @@ void print_text(std::ostream& out, sizing_report const& r) {
     out << fmt::format("seconds                  {:.1f}\n", r.seconds);
     out << fmt::format("platform_abi_id          {}\n", platform_abi_id);
     out << fmt::format("data_abi_id              {}\n", data_abi_id);
-    out << fmt::format("sync_abi_family          {}\n", sync_abi_family);
+    out << fmt::format("segment_header_format    {}\n", segment_header::current_format);
     out << fmt::format("platform_tag             {}\n", platform_tag);
-    out << fmt::format("interprocess_mutex       sizeof {} alignof {}\n",
-                       sizeof(bip::interprocess_mutex), alignof(bip::interprocess_mutex));
-    out << fmt::format("segment_manager_t        sizeof {} alignof {}\n",
-                       sizeof(segment_manager_t), alignof(segment_manager_t));
+    out << fmt::format("segment_header           sizeof {} alignof {}\n",
+                       sizeof(segment_header), alignof(segment_header));
     out << fmt::format("boost_version            {}\n", BOOST_VERSION);
 }
 
@@ -665,12 +663,10 @@ void print_json(std::ostream& out, sizing_report const& r) {
     out << fmt::format("  \"seconds\": {:.1f},\n", r.seconds);
     out << fmt::format("  \"platform_abi_id\": {},\n", platform_abi_id);
     out << fmt::format("  \"data_abi_id\": {},\n", data_abi_id);
-    out << fmt::format("  \"sync_abi_family\": {},\n", sync_abi_family);
+    out << fmt::format("  \"segment_header_format\": {},\n", segment_header::current_format);
     out << fmt::format("  \"platform_tag\": {},\n", platform_tag);
-    out << fmt::format("  \"sizeof_interprocess_mutex\": {},\n", sizeof(bip::interprocess_mutex));
-    out << fmt::format("  \"alignof_interprocess_mutex\": {},\n", alignof(bip::interprocess_mutex));
-    out << fmt::format("  \"sizeof_segment_manager\": {},\n", sizeof(segment_manager_t));
-    out << fmt::format("  \"alignof_segment_manager\": {},\n", alignof(segment_manager_t));
+    out << fmt::format("  \"sizeof_segment_header\": {},\n", sizeof(segment_header));
+    out << fmt::format("  \"alignof_segment_header\": {},\n", alignof(segment_header));
     out << fmt::format("  \"boost_version\": {}\n", BOOST_VERSION);
     out << "}\n";
 }

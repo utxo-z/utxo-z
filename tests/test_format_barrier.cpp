@@ -8,9 +8,9 @@
  *        something this build cannot serve.
  *
  * The store keeps its maps inside memory-mapped files, so the internal layout of
- * `boost::unordered_flat_map` is the file format — and Boost.Interprocess
- * resolves a named object by name alone, so a build whose idea of that layout
- * differs would reinterpret a file rather than refuse it. Nothing about that is
+ * `boost::unordered_flat_map` is the file format — and a segment resolves an
+ * object by its slot alone, so a build whose idea of that layout differs would
+ * reinterpret a file rather than refuse it. Nothing about that is
  * observable afterwards; it has to be caught before anything reads the map.
  *
  * Two things stand in the way and both are tested here:
@@ -42,7 +42,6 @@
 #include <unistd.h>
 #endif
 
-#include <boost/interprocess/managed_mapped_file.hpp>
 #include <boost/unordered/detail/foa/core.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
@@ -52,6 +51,7 @@
 #include <utxoz/database.hpp>
 
 #include "detail/format_identity.hpp"
+#include "detail/mapped_segment.hpp"
 #include "detail/segment_stamp.hpp"
 #include "detail/durability.hpp"
 #include "detail/database_lock.hpp"
@@ -60,13 +60,13 @@
 #include "detail/record_bytes.hpp"
 #include "detail/store_config_io.hpp"
 
-namespace bip = boost::interprocess;
 namespace fs = std::filesystem;
 
 using utxoz::detail::database_id_t;
 using utxoz::detail::encode_config;
 using utxoz::detail::encode_stamp;
 using utxoz::detail::local_identity;
+using utxoz::detail::mapped_segment;
 using utxoz::detail::read_config_file;
 using utxoz::detail::segment_identity;
 using utxoz::detail::segment_stamp;
@@ -197,15 +197,19 @@ void rebuild(fs::path const& data_file, replacement const& how) {
     std::error_code ec;
     fs::remove(data_file, ec);
 
-    bip::managed_mapped_file segment(bip::create_only, data_file.c_str(), bytes);
+    auto created = mapped_segment::create(data_file, bytes);
+    REQUIRE(created.has_value());
+    auto& segment = **created;
     if (how.stamp) {
-        segment.construct<segment_stamp>(segment_stamp::object_name)(encode_stamp(*how.stamp));
+        REQUIRE(segment.construct<segment_stamp>(segment_stamp::object_name,
+                                                 encode_stamp(*how.stamp)) != nullptr);
     }
     if (how.with_map) {
         using map_t = utxoz::detail::utxo_map<utxoz::container_sizes[0]>;
-        segment.construct<map_t>(utxoz::detail::map_object_name)(
+        REQUIRE(segment.construct<map_t>(
+            utxoz::detail::map_object_name,
             64, utxoz::detail::outpoint_hash{}, utxoz::detail::outpoint_equal{},
-            segment.get_allocator<map_t::value_type>());
+            segment.get_allocator<map_t::value_type>()) != nullptr);
     }
 }
 
@@ -432,18 +436,18 @@ TEST_CASE("the config refuses another platform's bytes", "[format]") {
 
 TEST_CASE("a file whose data ABI matches but whose machinery does not is refused",
           "[format]") {
-    // The case the identity used to miss, and the reason it was widened. Linux
-    // and macOS agree on endianness and on the width of a size_t, a pointer and
-    // an offset_ptr — and write files the other cannot read, because a segment
-    // keeps its allocator's mutex inside the mapped file and Boost compiles a
-    // different one for each. What followed was not a wrong answer but no answer:
-    // the segment mapped, and the first named-object lookup never returned.
-    fresh_db f("cfg_sync_abi");
+    // The data ABI is not the whole of what a file depends on. Two builds can
+    // agree on endianness and on the width of a size_t, a pointer and an
+    // offset_ptr and still disagree about the header every version file begins
+    // with — and a header read as another is not a wrong answer about one object
+    // but about where every object is. So the header's format is part of the
+    // identity, and a config written over a different one is refused here.
+    fresh_db f("cfg_header_abi");
 
-    // Same data ABI, different persisted machinery — exactly what one of those
-    // files looks like from here.
+    // Same data ABI, same platform, different segment header — exactly what a
+    // database written around another header looks like from here.
     auto const foreign = utxoz::detail::compute_platform_abi_id(
-        utxoz::detail::sync_abi_family == 1u ? 3u : 1u, utxoz::detail::platform_tag);
+        utxoz::detail::segment_header::current_format + 1, utxoz::detail::platform_tag);
     REQUIRE(foreign != utxoz::detail::platform_abi_id);
     rewrite_config(f.dir, [&](store_config& c) { c.platform_abi_id = foreign; });
 
@@ -590,8 +594,10 @@ TEST_CASE("a stamp damaged in flight is refused as damage", "[format]") {
         constexpr size_t bytes = 16u * 1024u * 1024u;
         std::error_code ec;
         fs::remove(v0_of(f.dir), ec);
-        bip::managed_mapped_file segment(bip::create_only, v0_of(f.dir).c_str(), bytes);
-        segment.construct<segment_stamp>(segment_stamp::object_name)(stamp);
+        auto segment = mapped_segment::create(v0_of(f.dir), bytes);
+        REQUIRE(segment.has_value());
+        REQUIRE((*segment)->construct<segment_stamp>(segment_stamp::object_name, stamp)
+                != nullptr);
     }
 
     auto const db = utxoz::full_db::open_for_testing(f.dir, false);
@@ -670,6 +676,60 @@ TEST_CASE("a format-1 database is refused and left exactly as it was", "[format]
     }
 }
 
+TEST_CASE("a format-2 database is refused and left exactly as it was", "[format]") {
+    // Format 2 is the same config record as today's, written over version files
+    // that kept Boost.Interprocess's segment manager inside them. Every field
+    // of such a config still checks out — the checksum, the geometry, the
+    // epochs — which is why it has to be refused on the format number and
+    // before any of them is compared: the first thing to disagree would
+    // otherwise name a fault the database does not have.
+    fresh_db f("managed");
+
+    // Its own config with the format put back, and resealed so that it is the
+    // well-formed file such a build wrote rather than one a checksum rejects.
+    auto bytes = read_bytes(config_of(f.dir));
+    uint32_t const managed = store_config::managed_segment_format;
+    REQUIRE(managed == 2);
+    std::memcpy(bytes.data() + 4, &managed, sizeof(managed));
+    reseal(bytes);
+    write_bytes(config_of(f.dir), bytes);
+
+    auto const before = contents_of(f.dir);
+    REQUIRE(before.size() >= 2);   // at least the config and one version file
+    auto const mapped_before = utxoz::detail::failpoints::segments_mapped.load(
+        std::memory_order_relaxed);
+
+    auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::migration_required);
+
+    // Refused, and nothing about it repaired, upgraded or half-upgraded.
+    CHECK(contents_of(f.dir) == before);
+    CHECK(no_leftovers(f.dir));
+
+    // And no version file was mapped: those files would be in a layout this
+    // build cannot make sense of, so the refusal has to come before the first.
+    CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+          == mapped_before);
+}
+
+TEST_CASE("a format-2 config is refused before its checksum is consulted", "[format]") {
+    // The ordering, as for a format from the future: what is known about the
+    // file is its format, and that alone decides. A damaged format-2 config is
+    // still a database to rebuild, not a corrupt one to investigate.
+    fresh_db f("managed_torn");
+
+    auto bytes = read_bytes(config_of(f.dir));
+    uint32_t const managed = store_config::managed_segment_format;
+    std::memcpy(bytes.data() + 4, &managed, sizeof(managed));
+    bytes[20] ^= 0xFF;   // and left unsealed
+    write_bytes(config_of(f.dir), bytes);
+
+    auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::migration_required);
+}
+
 // =============================================================================
 // D. Creating is not the same as opening
 // =============================================================================
@@ -677,7 +737,9 @@ TEST_CASE("a format-1 database is refused and left exactly as it was", "[format]
 TEST_CASE("a version file is stamped once and holds one map", "[format]") {
     fresh_db f("once");
 
-    bip::managed_mapped_file segment(bip::open_only, v0_of(f.dir).c_str());
+    auto const opened = mapped_segment::open(v0_of(f.dir));
+    REQUIRE(opened.has_value());
+    auto const& segment = **opened;
 
     auto const stamp = segment.find<segment_stamp>(segment_stamp::object_name);
     REQUIRE(stamp.first != nullptr);
@@ -699,7 +761,9 @@ TEST_CASE("reopening does not build a second anything", "[format]") {
         db->close();
     }
 
-    bip::managed_mapped_file segment(bip::open_only, v0_of(f.dir).c_str());
+    auto const opened = mapped_segment::open(v0_of(f.dir));
+    REQUIRE(opened.has_value());
+    auto const& segment = **opened;
     CHECK(segment.find<segment_stamp>(segment_stamp::object_name).second == 1);
     CHECK(segment.find<utxoz::detail::utxo_map<utxoz::container_sizes[0]>>(utxoz::detail::map_object_name).second == 1);
     CHECK(read_bytes(v0_of(f.dir)).size() == before);

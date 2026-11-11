@@ -12,7 +12,7 @@
  * map layout, a hash or a platform this build does not share is refused while
  * every file is still untouched.
  *
- * @par Format 2
+ * @par Format 3
  * Fixed length, field by field, little-endian, checksum last — the same
  * encoding the metadata records use, and for the same reason: five completed
  * reads prove the file was long enough, not that it is ours or that the write
@@ -31,6 +31,13 @@
  * 44   4  boost_version    (diagnostic only — never compared)
  * 48   4  checksum
  * ```
+ *
+ * @par Format 2
+ * The same record, written over version files that kept Boost.Interprocess's
+ * segment manager, name index and mutexes inside them. From format 3 a version
+ * file has a header of this library's own (mapped_segment.hpp) and no lock. The
+ * two layouts share nothing past the first byte, so a format-2 database is
+ * recognised and refused by name, and has to be rebuilt.
  *
  * @par Format 1
  * Four bytes of magic, a version, and a mode byte. It records nothing about the
@@ -73,7 +80,10 @@ namespace fs = std::filesystem;
 struct store_config {
     static constexpr std::array<char, 4> magic{'U', 'T', 'X', 'O'};
     static constexpr uint32_t legacy_format = 1;
-    static constexpr uint32_t current_format = 2;
+    /// Same record as the current one, over version files that kept
+    /// Boost.Interprocess's segment manager in them.
+    static constexpr uint32_t managed_segment_format = 2;
+    static constexpr uint32_t current_format = 3;
     static constexpr size_t encoded_size = 52;
 
     storage_mode mode = storage_mode::full;
@@ -168,6 +178,13 @@ inline result<store_config> read_config_file(fs::path const& path) {
                    "written under (config format 1). What its files mean cannot be "
                    "established after the fact, so it is refused rather than assumed: "
                    "rebuild the database from the chain.", path_display(path));
+        return std::unexpected(error_code::migration_required);
+    }
+    if (format == store_config::managed_segment_format) {
+        log::error("{}: this database was written by a build whose version files carried "
+                   "Boost.Interprocess's segment manager (config format 2). This build "
+                   "writes and reads a segment layout of its own and does not read that "
+                   "one: rebuild the database from the chain.", path_display(path));
         return std::unexpected(error_code::migration_required);
     }
     if (format != store_config::current_format) {

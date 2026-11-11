@@ -7,10 +7,15 @@
  * @brief That this build still reads what an earlier one wrote.
  *
  * The fixtures under `tests/fixtures/` were written once, by the code that
- * introduced the format barrier, against Boost 1.91 on a 64-bit little-endian
- * target. They are artefacts, not outputs: nothing here regenerates them, and a
+ * introduced the segment layout they are in, against Boost 1.91 on a 64-bit
+ * little-endian target. They are artefacts, not outputs: nothing here regenerates them, and a
  * change to their bytes is a change that has to be read and justified by a
  * person.
+ *
+ * The legacy set beside them is older and is not read at all: it was written
+ * over version files that kept Boost.Interprocess's segment manager inside
+ * them, and what is certified about it is that it is refused, by name, with
+ * every byte left where it was.
  *
  * @par What a green run here does and does not mean
  * A fixture written under epoch 1 proves that the current reader still reads
@@ -72,7 +77,6 @@
 #include "support/read_file.hpp"
 
 namespace fs = std::filesystem;
-namespace bip = boost::interprocess;
 
 using utxoz::testing::logical_entry;
 
@@ -248,10 +252,9 @@ std::optional<std::string> schema_error(std::string const& text) try {
     auto const& written = value.at("written_by").as_object();
     for (auto const* field : {"boost_version", "config_format", "geometry_id",
                               "map_layout_epoch", "hash_epoch", "platform_abi_id",
-                              "platform_abi_encoding", "data_abi_id", "sync_abi_family",
-                              "sizeof_interprocess_mutex", "alignof_interprocess_mutex",
-                              "sizeof_segment_manager", "alignof_segment_manager",
-                              "platform_tag",
+                              "platform_abi_encoding", "data_abi_id",
+                              "segment_header_format", "sizeof_segment_header",
+                              "alignof_segment_header", "platform_tag",
                               "sizeof_size_t", "sizeof_pointer", "sizeof_offset_ptr"}) {
         if ( ! num(written.at(field))) return std::string(field) + " is not a count";
     }
@@ -481,44 +484,94 @@ uint64_t abi_of_set(fs::path const& root) {
     return v.at("written_by").at("platform_abi_id").to_number<uint64_t>();
 }
 
+/// The format a config file declares, read without the reader under test.
+uint32_t declared_config_format(fs::path const& config) {
+    auto const bytes = utxoz::testing::read_file_bytes(config);
+    REQUIRE(bytes.size() >= 8);
+    uint32_t format = 0;
+    std::memcpy(&format, bytes.data() + 4, sizeof(format));
+    return format;
+}
+
+/// Opens a copy of one database of a set and requires the refusal named, with
+/// the copy and the original both byte for byte what they were.
+void refused_untouched(fs::path const& root, std::string const& name,
+                       utxoz::error_code expected) {
+    INFO(name);
+    auto const pristine = files_of(root / name);
+    fixture_copy f(name, root);
+    auto const before = files_of(f.dir);
+    REQUIRE(before == pristine);
+
+    if (name.starts_with("full")) {
+        auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+        REQUIRE_FALSE(db.has_value());
+        CHECK(db.error() == expected);
+    } else {
+        auto const db = utxoz::reference_db::open_for_testing(f.dir, false);
+        REQUIRE_FALSE(db.has_value());
+        CHECK(db.error() == expected);
+    }
+
+    // The copy is byte for byte what it was (apart from the claim an open
+    // takes, which is not part of a database), and the set in the tree
+    // was never opened at all.
+    auto after = files_of(f.dir);
+    after.erase(std::string(utxoz::detail::database_lock::file_name));
+    CHECK(after == before);
+    CHECK(files_of(root / name) == pristine);
+}
+
 } // namespace
+
+TEST_CASE("a database from before this segment layout is refused with migration_required, "
+          "untouched", "[compat][format]") {
+    // The legacy set is two real databases written by master builds before 1.0:
+    // config format 2, version files with Boost.Interprocess's segment manager
+    // in them. Nothing in those files is in a layout this build reads, so the
+    // refusal has to come from the config's format alone and before anything
+    // else is compared — which is also why this case has no ABI to be gated on.
+    // Every build on every platform is handed the same bytes and has to give
+    // the same answer, an experimental build included.
+    fs::path const root = fs::path(UTXOZ_LEGACY_FIXTURES_DIR);
+
+    for (std::string const name : {"full-two-generations", "reference-two-generations"}) {
+        // Non-vacuity: the set is what this case says it is. A legacy directory
+        // replaced by a current one would otherwise be refused for some other
+        // reason, or not at all, under a name that no longer described it.
+        REQUIRE(declared_config_format(root / name / "utxoz_config.dat")
+                == utxoz::detail::store_config::managed_segment_format);
+
+        auto const mapped_before = utxoz::detail::failpoints::segments_mapped.load(
+            std::memory_order_relaxed);
+        refused_untouched(root, name, utxoz::error_code::migration_required);
+
+        // And not one of its version files was mapped on the way to saying no.
+        CHECK(utxoz::detail::failpoints::segments_mapped.load(std::memory_order_relaxed)
+              == mapped_before);
+    }
+}
 
 TEST_CASE("a database of another geometry is refused with geometry_mismatch, untouched",
           "[compat][format]") {
-    // A production build is handed the geometry-3 set, written by master builds
-    // before 1.0. An experimental build is handed the production geometry-4 set.
-    // Either way the database is from another geometry: it must be refused by
-    // name, and not one byte of it may change.
-    fs::path const root = utxoz::experimental_build ? fs::path(UTXOZ_FIXTURES_DIR)
-                                                    : fs::path(UTXOZ_LEGACY_FIXTURES_DIR);
+    // The committed set is the production geometry, so the build that can be
+    // handed "another geometry" from it is an experimental one. A production
+    // build has no set of another geometry in a layout it reads: the last one,
+    // geometry 3, exists only in the legacy set above, which is refused before
+    // its geometry is looked at. What a production build does with a geometry
+    // it does not write is pinned on a rewritten config in
+    // test_format_barrier.cpp.
+    if ( ! utxoz::experimental_build) {
+        SKIP("the committed set is this build's own geometry; the refusal of another "
+             "one is pinned in test_format_barrier.cpp");
+    }
+    fs::path const root = fs::path(UTXOZ_FIXTURES_DIR);
     if (abi_of_set(root) != utxoz::detail::platform_abi_id) {
         SUCCEED("that set was written on another ABI; the ABI refusal covers this platform");
         return;
     }
     for (std::string const name : {"full-two-generations", "reference-two-generations"}) {
-        INFO(name);
-        auto const pristine = files_of(root / name);
-        fixture_copy f(name, root);
-        auto const before = files_of(f.dir);
-        REQUIRE(before == pristine);
-
-        if (name.starts_with("full")) {
-            auto const db = utxoz::full_db::open_for_testing(f.dir, false);
-            REQUIRE_FALSE(db.has_value());
-            CHECK(db.error() == utxoz::error_code::geometry_mismatch);
-        } else {
-            auto const db = utxoz::reference_db::open_for_testing(f.dir, false);
-            REQUIRE_FALSE(db.has_value());
-            CHECK(db.error() == utxoz::error_code::geometry_mismatch);
-        }
-
-        // The copy is byte for byte what it was (apart from the claim an open
-        // takes, which is not part of a database), and the set in the tree
-        // was never opened at all.
-        auto after = files_of(f.dir);
-        after.erase(std::string(utxoz::detail::database_lock::file_name));
-        CHECK(after == before);
-        CHECK(files_of(root / name) == pristine);
+        refused_untouched(root, name, utxoz::error_code::geometry_mismatch);
     }
 }
 
@@ -999,17 +1052,16 @@ TEST_CASE("the manifest agrees with the bytes it certifies", "[compat]") {
     // The full identity is a fold, because what goes into it does not fit a byte
     // each. Recomputed from the ingredients the header declares: an id that meant
     // something other than what is written beside it would not survive this.
-    auto const declared_sync = uint32_t(as_u64(written.at("sync_abi_family")));
-    CHECK(declared_sync >= 1);
-    CHECK(declared_sync <= 3);
+    // Format zero is a header nobody wrote: it is what the field reads in a
+    // file that was sized and never initialised.
+    auto const declared_header_format = uint32_t(as_u64(written.at("segment_header_format")));
+    CHECK(declared_header_format >= 1);
     CHECK(utxoz::detail::mix_identity({
               uint32_t(as_u64(written.at("platform_abi_encoding"))),
               declared_data_abi,
-              declared_sync,
-              uint32_t(as_u64(written.at("sizeof_interprocess_mutex"))),
-              uint32_t(as_u64(written.at("alignof_interprocess_mutex"))),
-              uint32_t(as_u64(written.at("sizeof_segment_manager"))),
-              uint32_t(as_u64(written.at("alignof_segment_manager"))),
+              declared_header_format,
+              uint32_t(as_u64(written.at("sizeof_segment_header"))),
+              uint32_t(as_u64(written.at("alignof_segment_header"))),
               uint32_t(as_u64(written.at("platform_tag"))),
           })
           == declared_abi);

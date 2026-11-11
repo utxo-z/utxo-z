@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include <boost/interprocess/managed_mapped_file.hpp>
+#include "mapped_segment.hpp"
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <fmt/format.h>
 
@@ -275,7 +275,7 @@ struct file_cache {
 
 private:
     struct cached_file {
-        std::unique_ptr<bip::managed_mapped_file> segment;
+        std::unique_ptr<mapped_segment> segment;
         void* map_ptr;
         std::chrono::steady_clock::time_point last_used;
         size_t access_count = 0;

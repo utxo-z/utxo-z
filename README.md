@@ -366,8 +366,8 @@ auto index = utxoz::get_output_index(key);
 
 A database keeps its hash tables inside memory-mapped files, so the internal
 layout of `boost::unordered_flat_map` *is* part of the format. Boost promises
-nothing about that layout, and Boost.Interprocess resolves a named object by name
-alone — it does not check the type — so a build whose idea of the layout differed
+nothing about that layout, and a mapped file hands back whatever bytes are at an
+offset as whatever type is asked for, so a build whose idea of the layout differed
 from the one that wrote the files would reinterpret them rather than refuse them.
 
 Every database therefore records what it was written under, in its config and
@@ -378,12 +378,27 @@ again in every version file, and both are checked before anything reads a map:
 | `geometry_id` | the container sizing this build writes - in 1.0, geometry 4: the 48-byte class in eight shards |
 | `map_layout_epoch` | the map implementation this build is certified against |
 | `hash_epoch` | the effective hash, `mulx_mix(hash_outpoint(key))` |
-| `platform_abi_id` | endianness, and the width of `size_t`, pointers and `offset_ptr` |
+| `platform_abi_id` | endianness, the width of `size_t`, pointers and `offset_ptr`, the segment header, and the platform |
 | `database_id` | sixteen random bytes, so a version file from another database is caught |
 
 A mismatch is refused with a specific error rather than served. The Boost version
 is recorded too, for diagnosis, and is never compared: several Boost releases can
 share one `map_layout_epoch`.
+
+### Version files
+
+A version file is one shared mapping with a fixed header of this library's own:
+a format number, the file's size, an allocation mark, and the offsets of the
+objects in it — the format stamp, the map, and on a compaction target a marker.
+The map stores its pointers as offsets from themselves, so the file means the
+same wherever it is mapped.
+
+There is **no lock in the file** and no name index. Releases built on
+Boost.Interprocess kept its segment manager and mutexes inside every version
+file; a lock held in a mapping is a dirty page, and one that reached the disk
+before a power loss came back held by nobody. Databases written by those
+releases are recognised by their config and refused with `migration_required`:
+the two layouts share nothing, and the database has to be rebuilt.
 
 ### Databases from before 1.0
 
