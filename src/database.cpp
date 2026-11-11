@@ -79,6 +79,44 @@ result<> db_base::sync() {
     return impl_->sync();
 }
 
+result<pending_sync> db_base::begin_sync() {
+    if ( ! impl_) return std::unexpected(error_code::closed);
+    if (auto const intact = impl_->refuse_if_integrity_latched(); ! intact) {
+        return std::unexpected(intact.error());
+    }
+    if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) {
+        return std::unexpected(usable.error());
+    }
+    if (auto const begun = impl_->begin_sync(); ! begun) {
+        return std::unexpected(begun.error());
+    }
+    return pending_sync{impl_};
+}
+
+pending_sync::pending_sync(std::weak_ptr<detail::database_impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+pending_sync::pending_sync(pending_sync&&) noexcept = default;
+pending_sync& pending_sync::operator=(pending_sync&&) noexcept = default;
+pending_sync::~pending_sync() = default;
+
+result<> pending_sync::finish() && {
+    // Consumed whatever happens next: a second call has nothing to finish.
+    auto const owner = std::exchange(impl_, {});
+    if ( ! owner.owner_before(std::weak_ptr<detail::database_impl>{})
+            && ! std::weak_ptr<detail::database_impl>{}.owner_before(owner)) {
+        return std::unexpected(error_code::sync_failed);
+    }
+    auto const impl = owner.lock();
+    if ( ! impl) return std::unexpected(error_code::closed);
+    if (auto const intact = impl->refuse_if_integrity_latched(); ! intact) {
+        return std::unexpected(intact.error());
+    }
+    if (auto const usable = impl->refuse_if_inspection_only(); ! usable) {
+        return std::unexpected(usable.error());
+    }
+    return impl->finish_sync();
+}
+
 result<> db_base::compact_all() {
     if (!impl_) return std::unexpected(error_code::closed);
     if (auto const ready = impl_->refuse_if_unusable(); ! ready) return std::unexpected(ready.error());
@@ -178,7 +216,7 @@ full_db& full_db::operator=(full_db&&) noexcept = default;
 
 result<full_db> full_db::open(std::filesystem::path path, bool remove_existing) {
     full_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->configure(std::move(path), remove_existing, storage_mode::full);
     if (!r) return std::unexpected(r.error());
     return db;
@@ -186,7 +224,7 @@ result<full_db> full_db::open(std::filesystem::path path, bool remove_existing) 
 
 result<full_db> full_db::open_for_testing(std::filesystem::path path, bool remove_existing) {
     full_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->configure_for_testing(std::move(path), remove_existing, storage_mode::full);
     if (!r) return std::unexpected(r.error());
     return db;
@@ -194,7 +232,7 @@ result<full_db> full_db::open_for_testing(std::filesystem::path path, bool remov
 
 result<full_db> full_db::open_for_inspection(std::filesystem::path path) {
     full_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->open_for_inspection(std::move(path), storage_mode::full);
     if ( ! r) return std::unexpected(r.error());
     return db;
@@ -202,7 +240,7 @@ result<full_db> full_db::open_for_inspection(std::filesystem::path path) {
 
 result<full_db> full_db::open_for_inspection_for_testing(std::filesystem::path path) {
     full_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->open_for_inspection_for_testing(std::move(path), storage_mode::full);
     if ( ! r) return std::unexpected(r.error());
     return db;
@@ -268,7 +306,7 @@ reference_db& reference_db::operator=(reference_db&&) noexcept = default;
 
 result<reference_db> reference_db::open(std::filesystem::path path, bool remove_existing) {
     reference_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->configure(std::move(path), remove_existing, storage_mode::reference);
     if (!r) return std::unexpected(r.error());
     return db;
@@ -276,7 +314,7 @@ result<reference_db> reference_db::open(std::filesystem::path path, bool remove_
 
 result<reference_db> reference_db::open_for_testing(std::filesystem::path path, bool remove_existing) {
     reference_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->configure_for_testing(std::move(path), remove_existing, storage_mode::reference);
     if (!r) return std::unexpected(r.error());
     return db;
@@ -284,7 +322,7 @@ result<reference_db> reference_db::open_for_testing(std::filesystem::path path, 
 
 result<reference_db> reference_db::open_for_inspection(std::filesystem::path path) {
     reference_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->open_for_inspection(std::move(path), storage_mode::reference);
     if ( ! r) return std::unexpected(r.error());
     return db;
@@ -292,7 +330,7 @@ result<reference_db> reference_db::open_for_inspection(std::filesystem::path pat
 
 result<reference_db> reference_db::open_for_inspection_for_testing(std::filesystem::path path) {
     reference_db db;
-    db.impl_ = std::make_unique<detail::database_impl>();
+    db.impl_ = std::make_shared<detail::database_impl>();
     auto r = db.impl_->open_for_inspection_for_testing(std::move(path), storage_mode::reference);
     if ( ! r) return std::unexpected(r.error());
     return db;

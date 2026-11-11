@@ -95,6 +95,12 @@ struct failpoints {
     /// How many times the file barrier has been crossed, for the same reason.
     static inline std::atomic<uint64_t> sync_file_calls{0};
 
+    /// Called by the second half of a barrier once it has begun and before it
+    /// has finished, if set. A test parks the barrier here until the lookups
+    /// it runs alongside have gone round, so that the overlap it is checking
+    /// is one it arranged rather than one the scheduler happened to give it.
+    static inline std::atomic<void (*)()> inside_finish_sync{nullptr};
+
     /// Fails the Nth file barrier and no other, counting from one. Blanket
     /// failure cannot reach past the first barrier a call performs, so it
     /// cannot show what happens when one in the middle fails — which is the
@@ -393,6 +399,7 @@ struct failpoints {
         fail_sync_mapped_region.store(false, std::memory_order_relaxed);
         sync_mapped_region_calls.store(0, std::memory_order_relaxed);
         sync_file_calls.store(0, std::memory_order_relaxed);
+        inside_finish_sync.store(nullptr, std::memory_order_relaxed);
         fail_sync_file_at.store(0, std::memory_order_relaxed);
         fail_sync_directory.store(false, std::memory_order_relaxed);
         fail_replace.store(false, std::memory_order_relaxed);
