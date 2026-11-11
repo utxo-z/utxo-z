@@ -183,7 +183,11 @@ inline result<> validate_stamp(bip::managed_mapped_file& segment, fs::path const
     // answers it folds together mean different things here: no stamp at all is a
     // file this build did not write, while a stamp that does not measure one
     // instance is a file whose stamp cannot be read as a stamp.
-    auto const found = segment.find<segment_stamp>(segment_stamp::object_name);
+    //
+    // And without the segment manager's lock, for the reason given at
+    // find_single_named(): it is persisted with the file and may come back
+    // taken.
+    auto const found = segment.find_no_lock<segment_stamp>(segment_stamp::object_name);
     if (found.first == nullptr) {
         log::error("{}: carries no format stamp", path_display(path));
         return std::unexpected(error_code::segment_stamp_missing);

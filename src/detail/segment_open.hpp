@@ -176,7 +176,22 @@ template <typename T>
 inline result<T*> find_single_named(bip::managed_mapped_file& segment,
                                     char const* name,
                                     fs::path const& path) {
-    auto const found = segment.find<T>(name);
+    // Without the segment manager's lock. That lock lives in the file, taking
+    // it writes to the mapping, and a taken state that reaches the disk -- by
+    // writeback, or by a barrier made while a lookup is inside -- comes back
+    // after a power loss held by nobody, to be waited for without end. Nothing
+    // here needs it: the directory lock keeps every other process out, and the
+    // names of a version file are written once, when it is created, before
+    // anything can look them up.
+    //
+    // Boost documents find_no_lock() for use inside atomic_func(), which is
+    // one way of meeting its actual requirement: that the name index does not
+    // change underneath the search. Here that holds for the life of the file.
+    // Every construct<>() in this library is on a segment opened create_only
+    // by the mutation that is creating it, nothing is ever destroyed by name,
+    // and concurrent searches only read. A named object added to an existing
+    // file would break this, and would have to bring its own exclusion.
+    auto const found = segment.find_no_lock<T>(name);
 
     if (found.first == nullptr) {
         log::error("{}: holds no object named '{}'", path_display(path), name);
