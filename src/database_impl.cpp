@@ -4,7 +4,7 @@
 
 /**
  * @file database_impl.cpp
- * @brief Database implementation - migrated from interprocess_multiple_v12.hpp
+ * @brief Database implementation
  */
 
 #include "detail/capacity_policy.hpp"
@@ -345,14 +345,12 @@ result<> database_impl::create_container(size_t slot, size_t version) {
     // version this call believes is new and is not means the catalogue and the
     // directory disagree, and building into whatever is there would be the
     // reinterpretation the stamp exists to prevent.
-    std::unique_ptr<bip::managed_mapped_file> segment;
-    try {
-        segment = std::make_unique<bip::managed_mapped_file>(
-            bip::create_only, file_name.c_str(), capacity_[slot].file_size);
-    } catch (std::exception const& e) {
-        log::error("container {} v{} could not be created: {}", Index, version, e.what());
+    auto created = mapped_segment::create(file_name, capacity_[slot].file_size);
+    if ( ! created) {
+        log::error("container {} v{} could not be created", Index, version);
         return std::unexpected(error_code::identity_collision);
     }
+    auto segment = std::move(*created);
 
     // From here the file exists and this call is what made it — create_only
     // guarantees that, which is what makes removing it safe. Until the segment
@@ -385,12 +383,21 @@ result<> database_impl::create_container(size_t slot, size_t version) {
         return std::unexpected(error_code::file_open_failed);
     }
 
-    auto* map = segment->construct<utxo_map<container_sizes[Index]>>(map_object_name, std::nothrow)(
-        capacity_for(slot),
-        outpoint_hash{},
-        outpoint_equal{},
-        segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>()
-    );
+    // The map's buckets are claimed from the segment as it is constructed, and
+    // a segment with no room for them says so by throwing. Opening reports
+    // through its result like everything else here, and the guard above takes
+    // the new file away again.
+    utxo_map<container_sizes[Index]>* map = nullptr;
+    try {
+        map = segment->construct<utxo_map<container_sizes[Index]>>(map_object_name, capacity_for(slot),
+            outpoint_hash{},
+            outpoint_equal{},
+            segment->get_allocator<typename utxo_map<container_sizes[Index]>::value_type>()
+        );
+    } catch (segment_full const&) {
+        log::error("container {} v{} has no room for its map", Index, version);
+        return std::unexpected(error_code::insufficient_space);
+    }
     if (map == nullptr) {
         log::error("container {} v{} already holds a map", Index, version);
         return std::unexpected(error_code::identity_collision);
@@ -502,7 +509,7 @@ bool database_impl::can_insert_safely(size_t slot, uint64_t* free_bytes) const {
 
 template<size_t Index>
 bool database_impl::can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map,
-                                              bip::managed_mapped_file const& segment) const {
+                                              mapped_segment const& segment) const {
     if (map.bucket_count() > 0 && map.size() >= max_entries_for(map.bucket_count())) {
         return false;
     }
@@ -1447,7 +1454,7 @@ result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key
                 if (failpoints::fail_insert_after_mutating.load(std::memory_order_relaxed)) {
                     map.emplace(key, val);
                 }
-                throw bip::bad_alloc();
+                throw segment_full();
             }
             auto [it, inserted] = map.emplace(key, val);
             if ( ! inserted) {
@@ -1510,7 +1517,7 @@ result<bool> database_impl::insert_in_index(size_t slot, raw_outpoint const& key
             }
             return inserted;
 
-        } catch (bip::bad_alloc const& e) {
+        } catch (segment_full const& e) {
             // Read after the throw, from the same map: under the guarantee
             // `emplace` documents these are the figures it had before. All three
             // accessors are `noexcept`, and the probe is best-effort, so reaching
@@ -2488,8 +2495,12 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
         std::error_code ec;
         fs::remove(building, ec);   // a leftover from a previous attempt
 
-        auto segment = std::make_unique<bip::managed_mapped_file>(
-            bip::create_only, building.c_str(), policy.file_size());
+        auto created = mapped_segment::create(building, policy.file_size());
+        if ( ! created) {
+            abandon();
+            return std::unexpected(error_code::file_open_failed);
+        }
+        auto segment = std::move(*created);
 
         // Every exit from here to the end of this block discards what was being
         // built, and there are seven of them. They used to say so one by one,
@@ -2525,6 +2536,7 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
         }
 
         auto* target_map = Policy::construct_map(*segment, policy.min_buckets());
+        if (target_map == nullptr) return std::unexpected(error_code::identity_collision);
 
         // The invariant applies here too, and this is where it was missing: a
         // merge that filled the target past its threshold would grow the map it
@@ -2538,7 +2550,9 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
         size_t const target_limit = max_size_without_rehash(target_buckets);
 
         // Before the barriers, so the marker is as durable as the entries.
-        segment->template construct<merge_marker>(merge_marker::object_name)(merge_id);
+        if (segment->template construct<merge_marker>(merge_marker::object_name, merge_id) == nullptr) {
+            return std::unexpected(error_code::identity_collision);
+        }
 
         for (auto const source : sources) {
             auto const source_path = data_path(idx, source);
@@ -2621,7 +2635,7 @@ result<> database_impl::merge_versions(Policy policy, std::vector<size_t> const&
                                    target_map->bucket_count());
                         return std::unexpected(error_code::insufficient_space);
                     }
-                } catch (boost::interprocess::bad_alloc const&) {
+                } catch (segment_full const&) {
                     // The group was planned to fit and did not. Leave every
                     // source exactly as it is and let the caller try a smaller
                     // group; sources are only ever read here.
@@ -3850,14 +3864,12 @@ result<> database_impl::reference_open_existing(size_t version) {
 result<> database_impl::reference_create(size_t version) {
     auto const file_name = db_path_ / fmt::format(reference_data_file_format, version);
 
-    std::unique_ptr<bip::managed_mapped_file> segment;
-    try {
-        segment = std::make_unique<bip::managed_mapped_file>(
-            bip::create_only, file_name.c_str(), reference_active_file_size_);
-    } catch (std::exception const& e) {
-        log::error("reference v{} could not be created: {}", version, e.what());
+    auto created = mapped_segment::create(file_name, reference_active_file_size_);
+    if ( ! created) {
+        log::error("reference v{} could not be created", version);
         return std::unexpected(error_code::identity_collision);
     }
+    auto segment = std::move(*created);
 
     // From here the file exists and this call is what made it — create_only
     // guarantees that, which is what makes removing it safe. Until the segment
@@ -3890,12 +3902,19 @@ result<> database_impl::reference_create(size_t version) {
         return std::unexpected(error_code::file_open_failed);
     }
 
-    auto* map = segment->construct<reference_map_t>(map_object_name, std::nothrow)(
-        capacity_for_reference(),
-        outpoint_hash{},
-        outpoint_equal{},
-        segment->get_allocator<typename reference_map_t::value_type>()
-    );
+    // As in create_container: no room for the buckets is an answer, not an
+    // exception to let out of open().
+    reference_map_t* map = nullptr;
+    try {
+        map = segment->construct<reference_map_t>(map_object_name, capacity_for_reference(),
+            outpoint_hash{},
+            outpoint_equal{},
+            segment->get_allocator<typename reference_map_t::value_type>()
+        );
+    } catch (segment_full const&) {
+        log::error("reference v{} has no room for its map", version);
+        return std::unexpected(error_code::insufficient_space);
+    }
     if (map == nullptr) {
         log::error("reference v{} already holds a map", version);
         return std::unexpected(error_code::identity_collision);
@@ -4691,7 +4710,7 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
                 if (failpoints::fail_insert_after_mutating.load(std::memory_order_relaxed)) {
                     map.emplace(key, val);
                 }
-                throw bip::bad_alloc();
+                throw segment_full();
             }
             auto [it, inserted] = map.emplace(key, val);
             if (!inserted) {
@@ -4732,7 +4751,7 @@ result<bool> database_impl::reference_insert_typed(raw_outpoint const& key, uint
             }
             return inserted;
 
-        } catch (bip::bad_alloc const& e) {
+        } catch (segment_full const& e) {
             auto& after_map = reference_map();
             auto const after = snapshot_of(after_map);
             bool const key_present_after = after_map.find(key) != after_map.end();

@@ -8,25 +8,13 @@
  *        to reach an object inside it.
  * @internal
  *
- * Boost, handed a mapped file whose header does not read as initialised,
- * assumes another process is midway through creating it and spins waiting for
- * that to finish — `BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC`,
- * five minutes by default — before reporting corruption.
+ * Every opening of an existing version file goes through here, so the checks
+ * and the failpoints are a property of the store rather than of the call sites
+ * that remembered them. There is deliberately no other opening of an existing
+ * segment in `src/`.
  *
- * Nothing here ever waits on another process creating a segment. One instance
- * per database is the documented contract — though a precondition rather than a
- * guarantee: nothing currently excludes a second process, which is #71. Either
- * way this store never *waits* for one, so the wait is pure delay, and a
- * truncated or foreign file at a canonical version name would stall whatever
- * met it for minutes, once per file, before saying anything.
- *
- * Every opening of an existing version file goes through here, so the check is
- * a property of the store rather than of the call sites that remembered it.
- * There is deliberately no other `open_only` in `src/`.
- *
- * Both functions report failure as a value. Mapping a file is the one operation
- * in this path that raises, so it is caught here, once, and everything above
- * reads as `result<>` like the rest of the store.
+ * Both functions report failure as a value, like the rest of the store. Nothing
+ * here waits: a file that is not a segment is refused at its header, at once.
  */
 
 #pragma once
@@ -38,7 +26,7 @@
 #include <new>
 #include <string>
 
-#include <boost/interprocess/managed_mapped_file.hpp>
+#include "mapped_segment.hpp"
 #include <fmt/format.h>
 
 #include <utxoz/types.hpp>
@@ -50,25 +38,7 @@
 
 namespace utxoz::detail {
 
-namespace bip = boost::interprocess;
 namespace fs = std::filesystem;
-
-// The cap on how long Boost waits for a segment somebody else appears to be
-// creating. It is a compile definition on the library target, and it is baked
-// into open_existing_segment() below — an inline function, so a translation unit
-// that included this header without it would give the program a second,
-// different definition of the same function. The symptom is not a diagnostic:
-// the linker keeps one, and whichever it keeps decides whether the wait is ten
-// seconds or five minutes, for everybody.
-//
-// That is not hypothetical. tests/test_named_object_guard.cpp began including
-// this header, the test target did not carry the definition, and the macOS and
-// Windows runners started waiting Boost's full 300 seconds while Linux happened
-// to link the other copy and stayed green.
-static_assert(BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC == 10u,
-              "every target that includes this header must define "
-              "BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u; "
-              "without it this file is a second, slower definition of open_existing_segment()");
 
 /// The smallest version file any configuration in this build creates. Derived
 /// rather than picked, so it follows the sizing constants if they change.
@@ -93,11 +63,11 @@ inline constexpr size_t smallest_configured_file = std::min({
  * @brief Opens a version file that is expected to exist.
  *
  * The three ways of failing — cannot be sized, too small to be one of ours,
- * Boost will not map it — differ only to whoever reads the log afterwards, so
+ * it will not map as a segment — differ only to whoever reads the log afterwards, so
  * they share one error and are told apart there.
  */
 [[nodiscard]]
-inline result<std::unique_ptr<bip::managed_mapped_file>> open_existing_segment(fs::path const& path) {
+inline result<std::unique_ptr<mapped_segment>> open_existing_segment(fs::path const& path) {
     std::error_code ec;
     auto const size = fs::file_size(path, ec);
     if (ec) {
@@ -105,10 +75,8 @@ inline result<std::unique_ptr<bip::managed_mapped_file>> open_existing_segment(f
         return std::unexpected(error_code::file_open_failed);
     }
     if (size < smallest_configured_file) {
-        // Too small to be a segment this build wrote. Saying so costs one stat;
-        // letting Boost find out costs minutes of spinning, because a header
-        // that does not read as initialised is indistinguishable to it from one
-        // another process is still writing.
+        // Too small to be a segment this build wrote: said here, by its size,
+        // rather than left for the header checks to describe less exactly.
         log::error("{}: {} bytes is too small to be a version file", path_display(path), size);
         return std::unexpected(error_code::file_open_failed);
     }
@@ -120,86 +88,56 @@ inline result<std::unique_ptr<bip::managed_mapped_file>> open_existing_segment(f
         return std::unexpected(error_code::file_open_failed);
     }
 
-    try {
-        auto mapped = std::make_unique<bip::managed_mapped_file>(bip::open_only, path.c_str());
-        // Counted at the edge itself, so a test can ask whether a refusal came
-        // before any segment was mapped instead of inferring it — and counted
-        // after the mapping exists rather than before it is attempted, because a
-        // constructor that throws mapped nothing and the question is about
-        // mappings, not about tries.
-        failpoints::segments_mapped.fetch_add(1, std::memory_order_relaxed);
-        return mapped;
-    } catch (std::bad_alloc const&) {
-        // The heap, not the file: nothing here says the file is bad, and a
-        // caller told file_open_failed would go looking at it.
-        log::error("{}: ran out of memory opening it as a segment", path_display(path));
-        return std::unexpected(error_code::out_of_memory);
-    } catch (std::exception const& e) {
-        log::error("{}: will not open as a segment: {}", path_display(path), e.what());
-        return std::unexpected(error_code::file_open_failed);
-    }
+    auto mapped = mapped_segment::open(path);
+    if ( ! mapped) return std::unexpected(mapped.error());
+    // Counted at the edge itself, so a test can ask whether a refusal came
+    // before any segment was mapped instead of inferring it -- and counted
+    // after the mapping exists rather than before it is attempted, because the
+    // question is about mappings, not about tries.
+    failpoints::segments_mapped.fetch_add(1, std::memory_order_relaxed);
+    return mapped;
 }
 
 /**
- * @brief The one way to reach a named object inside a segment that already exists.
+ * @brief The one way to reach an object inside a segment that already exists.
  *
- * Boost.Interprocess resolves a named object by **name alone**. Its
- * `priv_generic_find<T>` looks the name up in the index, checks nothing about the
- * type beyond a `BOOST_ASSERT` that vanishes in release builds, and hands back
- * `static_cast<T*>` of the stored address. Two things follow, and this function
- * exists for both:
+ * A slot says where an object is and how many bytes were constructed there. It
+ * says nothing about what type they were, and find<T>() hands back a T* either
+ * way. Two things follow, and this function exists for both:
  *
  * 1. A version file that does not hold the object is not an empty version file.
- *    Every call site used to read the null and carry on — `if ( ! map_ptr)
- *    continue;` — so a file whose map could not be reached dropped out of an
+ *    Every call site used to read the null and carry on -- `if ( ! map_ptr)
+ *    continue;` -- so a file whose map could not be reached dropped out of an
  *    enumeration that still reported success, and dropped out of a *compaction*
  *    that then deleted it. Refusing here is what turns both into a failure the
  *    callers already know how to report.
  *
- * 2. `find<T>()` also returns how many instances of `T` the stored bytes make up:
- *    `value_bytes / sizeof(T)`. For an object written as one instance that is 1,
- *    unless `sizeof(T)` has changed since it was written. Checking it costs
- *    nothing and was being discarded.
+ * 2. find<T>() also returns how many instances of `T` the stored bytes make up:
+ *    `bytes / sizeof(T)`. For an object written as one instance that is 1,
+ *    unless `sizeof(T)` has changed since it was written.
  *
  * @warning This is a cardinality check, not a layout check, and the difference
  * matters. Integer division means the count still reads 1 for any `sizeof(T)`
- * satisfying `value_bytes / 2 < sizeof(T) <= value_bytes` — with today's
- * `sizeof(utxo_map<48>) == 56`, anything from 29 to 56 bytes passes. A layout
- * that reorders fields without changing the total passes too, and a change to
- * the hash or to how it is mixed relocates every key while leaving every size
- * alone. None of that is visible from here. The barrier for those is an explicit
- * format epoch validated before any segment is touched, plus fixtures written by
- * earlier builds; this closes only the cases that happen to be free.
+ * satisfying `bytes / 2 < sizeof(T) <= bytes`. A layout that reorders fields
+ * without changing the total passes too, and a change to the hash or to how it
+ * is mixed relocates every key while leaving every size alone. None of that is
+ * visible from here. The barrier for those is the format stamp and the
+ * identities in format_identity.hpp.
  */
 template <typename T>
 [[nodiscard]]
-inline result<T*> find_single_named(bip::managed_mapped_file& segment,
-                                    char const* name,
+inline result<T*> find_single_named(mapped_segment& segment,
+                                    segment_slot slot,
                                     fs::path const& path) {
-    // Without the segment manager's lock. That lock lives in the file, taking
-    // it writes to the mapping, and a taken state that reaches the disk -- by
-    // writeback, or by a barrier made while a lookup is inside -- comes back
-    // after a power loss held by nobody, to be waited for without end. Nothing
-    // here needs it: the directory lock keeps every other process out, and the
-    // names of a version file are written once, when it is created, before
-    // anything can look them up.
-    //
-    // Boost documents find_no_lock() for use inside atomic_func(), which is
-    // one way of meeting its actual requirement: that the name index does not
-    // change underneath the search. Here that holds for the life of the file.
-    // Every construct<>() in this library is on a segment opened create_only
-    // by the mutation that is creating it, nothing is ever destroyed by name,
-    // and concurrent searches only read. A named object added to an existing
-    // file would break this, and would have to bring its own exclusion.
-    auto const found = segment.find_no_lock<T>(name);
+    auto const found = segment.find<T>(slot);
 
     if (found.first == nullptr) {
-        log::error("{}: holds no object named '{}'", path_display(path), name);
+        log::error("{}: holds no object in slot {}", path_display(path), uint32_t(slot));
         return std::unexpected(error_code::version_unreadable);
     }
     if (found.second != 1) {
-        log::error("{}: '{}' measures {} instances, not one", path_display(path), name,
-                   found.second);
+        log::error("{}: slot {} measures {} instances, not one", path_display(path),
+                   uint32_t(slot), found.second);
         return std::unexpected(error_code::version_unreadable);
     }
     return found.first;

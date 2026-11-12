@@ -29,7 +29,7 @@
 #include <memory>
 #include <string>
 
-#include <boost/interprocess/managed_mapped_file.hpp>
+#include "mapped_segment.hpp"
 
 #include <utxoz/aliases.hpp>
 #include <utxoz/types.hpp>
@@ -40,7 +40,6 @@
 
 namespace utxoz::detail {
 
-namespace bip = boost::interprocess;
 
 struct database_impl;
 
@@ -73,9 +72,8 @@ struct full_merge_policy {
     /// `find_or_construct` would accept one silently, which here would mean
     /// building into a map that came from somewhere unexplained.
     [[nodiscard]]
-    static map_type* construct_map(bip::managed_mapped_file& segment, size_t buckets) {
-        return segment.construct<map_type>(map_object_name)(
-            buckets, outpoint_hash{}, outpoint_equal{},
+    static map_type* construct_map(mapped_segment& segment, size_t buckets) {
+        return segment.construct<map_type>(map_object_name, buckets, outpoint_hash{}, outpoint_equal{},
             segment.get_allocator<typename map_type::value_type>());
     }
 
@@ -84,7 +82,7 @@ struct full_merge_policy {
     /// source is unlinked once the target is published — so skipping one dropped
     /// its entries and then deleted the only copy.
     [[nodiscard]]
-    static result<map_type*> find_map(bip::managed_mapped_file& segment, fs::path const& path) {
+    static result<map_type*> find_map(mapped_segment& segment, fs::path const& path) {
         return find_single_named<map_type>(segment, map_object_name, path);
     }
 
@@ -116,9 +114,8 @@ struct reference_merge_policy {
     /// `find_or_construct` would accept one silently, which here would mean
     /// building into a map that came from somewhere unexplained.
     [[nodiscard]]
-    static map_type* construct_map(bip::managed_mapped_file& segment, size_t buckets) {
-        return segment.construct<map_type>(map_object_name)(
-            buckets, outpoint_hash{}, outpoint_equal{},
+    static map_type* construct_map(mapped_segment& segment, size_t buckets) {
+        return segment.construct<map_type>(map_object_name, buckets, outpoint_hash{}, outpoint_equal{},
             segment.get_allocator<typename map_type::value_type>());
     }
 
@@ -127,7 +124,7 @@ struct reference_merge_policy {
     /// source is unlinked once the target is published — so skipping one dropped
     /// its entries and then deleted the only copy.
     [[nodiscard]]
-    static result<map_type*> find_map(bip::managed_mapped_file& segment, fs::path const& path) {
+    static result<map_type*> find_map(mapped_segment& segment, fs::path const& path) {
         return find_single_named<map_type>(segment, map_object_name, path);
     }
 

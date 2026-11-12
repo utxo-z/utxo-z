@@ -2,18 +2,16 @@
   "manifest_format": 1,
   "written_by": {
     "boost_version": 109100,
-    "config_format": 2,
+    "config_format": 3,
     "geometry_id": 4,
     "map_layout_epoch": 1,
     "hash_epoch": 1,
-    "platform_abi_id": 3060504794,
-    "platform_abi_encoding": 1,
+    "platform_abi_id": 442788497,
+    "platform_abi_encoding": 2,
     "data_abi_id": 17303560,
-    "sync_abi_family": 1,
-    "sizeof_interprocess_mutex": 40,
-    "alignof_interprocess_mutex": 8,
-    "sizeof_segment_manager": 200,
-    "alignof_segment_manager": 8,
+    "segment_header_format": 1,
+    "sizeof_segment_header": 160,
+    "alignof_segment_header": 8,
     "platform_tag": 4,
     "endian": "little",
     "sizeof_size_t": 8,
@@ -42,19 +40,19 @@
         {"container_kind": 11, "generation": 0, "entries": 70, "logical_digest": "9a7de73f21dad651d5f9279168ab31c33e2135e6b9269dbc1b3118f7cdc7ac4b"}
       ],
       "files": [
-        {"name": "cont_0s0_v00000.dat", "bytes": 10485760, "sha256": "c35b08d6746126a588e0fa1b65596b235380ec23d8b8d4866ca95cda995cd08b"},
-        {"name": "cont_0s0_v00001.dat", "bytes": 10485760, "sha256": "b98cd9b308ac7da4e0726a78ef1c38f5f51b1ee23c9baa7320208eb97d50264d"},
-        {"name": "cont_0s1_v00000.dat", "bytes": 10485760, "sha256": "2103ceec5051b48c74050102a10e733fe0317b6d129b01fe5deb083e0d6aa0d6"},
-        {"name": "cont_0s2_v00000.dat", "bytes": 10485760, "sha256": "f07552cbe4a0a7752a541890ac0c290a16e66bd898efcc38500efd5357422b9e"},
-        {"name": "cont_0s3_v00000.dat", "bytes": 10485760, "sha256": "2d1dbd06906478ba2bade8ed951539a72b02041ab0d83c88b4b3d64177152805"},
-        {"name": "cont_0s4_v00000.dat", "bytes": 10485760, "sha256": "97e31111272d27300ccfcbba42ac47710d7d4b71f17a3081cfe2f6597767c7ab"},
-        {"name": "cont_0s5_v00000.dat", "bytes": 10485760, "sha256": "262fad1c82bbad6632604502c24b530531cc0a8cf852bb44c161d73e851b45c4"},
-        {"name": "cont_0s6_v00000.dat", "bytes": 10485760, "sha256": "72482d14984113f6ef1c90353840cf6227527bdd132cc9562403f9f3eca3b3ce"},
-        {"name": "cont_0s7_v00000.dat", "bytes": 10485760, "sha256": "6bc982517699808cff396882593f2009f9e9c389db75def85e4a0fca3785f23c"},
-        {"name": "cont_1_v00000.dat", "bytes": 10485760, "sha256": "683650876c21b7331d7cc02d563a2e2b712cc00229cc00c31768d1b4746694b9"},
-        {"name": "cont_2_v00000.dat", "bytes": 10485760, "sha256": "78974b8959a8d3dea6a9e99445c042ad5144325d67d3467c8f656b9bba436c95"},
-        {"name": "cont_3_v00000.dat", "bytes": 10485760, "sha256": "8eb4c7ac062df1ef31b26ef625e176baf4be43f9cd6deb3cb09e5f606364d5f8"},
-        {"name": "cont_4_v00000.dat", "bytes": 10485760, "sha256": "e141fc8a1ba715d6242fd1f34f119ca640373b9c431fb40c59fe097926516371"},
+        {"name": "cont_0s0_v00000.dat", "bytes": 10485760, "sha256": "c320ae1cc87dd9fc1552b66d0928c569d7c1563ec52af2b2c47fa71136acc15f"},
+        {"name": "cont_0s0_v00001.dat", "bytes": 10485760, "sha256": "81a09083d896e05f0d0b2683a944c694dbfa4f823309901074369ccb6c25d59b"},
+        {"name": "cont_0s1_v00000.dat", "bytes": 10485760, "sha256": "6ab7c3733678a9ed903fa67da4763aa78657bd2605a029878fd829d22e2f7419"},
+        {"name": "cont_0s2_v00000.dat", "bytes": 10485760, "sha256": "ec61d4d0969010fd59ed98981cdbc63422e91d7c65decbf6d9e5998d46da16aa"},
+        {"name": "cont_0s3_v00000.dat", "bytes": 10485760, "sha256": "ebfe9d14e07f156a8a9a05bd6326838bb30d453a9e595a796cdbc786ea46cd9f"},
+        {"name": "cont_0s4_v00000.dat", "bytes": 10485760, "sha256": "140ea461e793475d78cb01ed7edc0dfe482aec86ead27b7b41f13f91831ca7af"},
+        {"name": "cont_0s5_v00000.dat", "bytes": 10485760, "sha256": "1cb410754eab16fe7becfad7ebb737a8b568345034b9e2c34bbcd3dd7e5f22b8"},
+        {"name": "cont_0s6_v00000.dat", "bytes": 10485760, "sha256": "149c41c2456a4ea51a1d1f30f70c68416d291e35a646334d180af8b9f52ffde9"},
+        {"name": "cont_0s7_v00000.dat", "bytes": 10485760, "sha256": "28409d9eabb8bef85785d61f9163f3461bc7d0d2fd9fd4cfabb2605e4da305a2"},
+        {"name": "cont_1_v00000.dat", "bytes": 10485760, "sha256": "f1849fc7692e1dda9bdb1e966f05b6e737453838a07f017930aa56b05b3b7566"},
+        {"name": "cont_2_v00000.dat", "bytes": 10485760, "sha256": "b3c4a22f1c8a0594176c7a67305724f75fc461e0429145a1d67a4d40c790035f"},
+        {"name": "cont_3_v00000.dat", "bytes": 10485760, "sha256": "ac741f4c210e0823910cc01f84c1da12854b40f5ca68d1d0d2d649f9768aba9e"},
+        {"name": "cont_4_v00000.dat", "bytes": 10485760, "sha256": "2cd1dfd68ee8bcdc83d35231fbbf1f07e434a6315bb14b1d32a960ae8e127ae9"},
         {"name": "meta_0s0_v00000.dat", "bytes": 100, "sha256": "c696b046ac4888cc0fbbad834272b39b1012b79c4927a9cbeb9b54cd55dde345"},
         {"name": "meta_0s0_v00001.dat", "bytes": 100, "sha256": "1649a975c33b84ee8f05d5329ebb7f23c122bb7284d14717e4d14595ccf58e58"},
         {"name": "meta_0s2_v00000.dat", "bytes": 100, "sha256": "3485a9976d3a8846ec3a4a81bbd474149d5452f75dd4fc27c67e0a3913cdb17c"},
@@ -65,7 +63,7 @@
         {"name": "meta_2_v00000.dat", "bytes": 100, "sha256": "54af8245ddc7893681b135ef5ba5dd71b58b0f092da23d012403b01b2ff69fe2"},
         {"name": "meta_3_v00000.dat", "bytes": 100, "sha256": "77508ef6dcf7b5f1e179f0752e512e3e6ab6a59348a47964c8acdef5dd602209"},
         {"name": "meta_4_v00000.dat", "bytes": 100, "sha256": "f8fdf7949d0d06ff2888cb002cab9634c964742100ead859a244e09979eec32a"},
-        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "84de41edadcc41a6a8054a379a4cb0c16504bdea3e2fa06b0b8cc337d28912ec"}
+        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "df082dce3b0132baa2ffcfebb8b5bad487d25559c4e96ca1e3d4fa4f929fe108"}
       ]
     },
     {
@@ -78,11 +76,11 @@
         {"container_kind": 4294967295, "generation": 1, "entries": 210, "logical_digest": "9395732be72bc7b116119d2040fdc5cc0384124d0bd57f24c62f26c8fa7b8061"}
       ],
       "files": [
-        {"name": "compact_v00000.dat", "bytes": 10485760, "sha256": "322d0b72ae44353132587cd08be84da86c85b028a82aaa63939e9c12185903d0"},
-        {"name": "compact_v00001.dat", "bytes": 10485760, "sha256": "59e828aac86025a55ecda02e5dedbe5a127dded3bbd5e885669fea22896e5ae3"},
+        {"name": "compact_v00000.dat", "bytes": 10485760, "sha256": "864eed4a84e40908886cb14b8c5cd359d3ff33f7ceffa8241b8ab8a44ec6ac0a"},
+        {"name": "compact_v00001.dat", "bytes": 10485760, "sha256": "2b8d61b438e10bc34954bf0ce8110727e56e8223c932e99d9ef0fe05dd28e40f"},
         {"name": "meta_compact_v00000.dat", "bytes": 100, "sha256": "20d6ccdcc2f11565cfda0c13f69fd564daabf9f3d48b63095fea30f177aacc7c"},
         {"name": "meta_compact_v00001.dat", "bytes": 100, "sha256": "002933537b864199f09fe5265828c3a663b82d10501199cd7b37488920233199"},
-        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "fb9efdf3c9015b12e1b27a2d0481c7b9279e36730cd2c20b108e698988027b74"}
+        {"name": "utxoz_config.dat", "bytes": 52, "sha256": "39e2be0cc9a987214439c11c07139024ec06a96b73170a3de934ee78c379a3bd"}
       ]
     }
   ]

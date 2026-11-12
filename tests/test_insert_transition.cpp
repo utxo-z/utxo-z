@@ -721,7 +721,7 @@ TEST_CASE("the free-memory probe reports rather than throws", "[transition]") {
 
     // No segment is a legitimate state — a class whose rotation failed released
     // its mapping — and it is not the same fact as a segment with nothing left.
-    CHECK(free_bytes_best_effort<detail::bip::managed_mapped_file>(nullptr)
+    CHECK(free_bytes_best_effort<detail::mapped_segment>(nullptr)
           == utxoz::detail::free_bytes_unavailable);
 
     temp_db t;

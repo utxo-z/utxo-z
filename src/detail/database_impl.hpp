@@ -260,7 +260,7 @@ private:
 
     template<size_t Index>
     bool can_insert_safely_in_map(utxo_map<container_sizes[Index]> const& map,
-                                   bip::managed_mapped_file const& segment) const;
+                                   mapped_segment const& segment) const;
 
     template<size_t Index>
     bool should_rotate(size_t slot) const;
@@ -563,7 +563,7 @@ private:
     /// called and never derived from anything at run time.
     std::array<capacity_entry, detail::slot_count> capacity_ =
         detail::production_slot_capacity;
-    std::array<std::unique_ptr<bip::managed_mapped_file>, detail::slot_count> segments_;
+    std::array<std::unique_ptr<mapped_segment>, detail::slot_count> segments_;
     std::array<void*, detail::slot_count> containers_{};
 
     /// The bucket count each open generation was created or opened with.
@@ -576,7 +576,7 @@ private:
     std::array<size_t, detail::slot_count> current_versions_{};
 
     // Reference mode storage
-    std::unique_ptr<bip::managed_mapped_file> reference_segment_;
+    std::unique_ptr<mapped_segment> reference_segment_;
     void* reference_container_ = nullptr;
     size_t reference_current_version_ = 0;
     capacity_entry reference_capacity_ = production_reference;

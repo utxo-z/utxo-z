@@ -18,21 +18,18 @@
 #include <span>
 #include <type_traits>
 
-#include <boost/interprocess/allocators/allocator.hpp>
-#include <boost/interprocess/managed_mapped_file.hpp>
+#include "mapped_segment.hpp"
 #include <boost/unordered/unordered_flat_map.hpp>
 
 #include <utxoz/types.hpp>
 
 namespace utxoz::detail {
 
-namespace bip = boost::interprocess;
 
 // =============================================================================
 // Type aliases
 // =============================================================================
 
-using segment_manager_t = bip::managed_mapped_file::segment_manager;
 
 struct outpoint_hash {
     size_t operator()(raw_outpoint const& k) const noexcept {
@@ -122,7 +119,7 @@ static_assert(sizeof(utxo_value<10240>) == 10240);
 /// literal repeated at fifteen call sites is one typo away from a file whose
 /// map nothing can find — which reads as an empty version rather than as an
 /// error.
-inline constexpr char const* map_object_name = "db_map";
+inline constexpr segment_slot map_object_name = segment_slot::map;
 
 template<size_t Size>
 using utxo_map = boost::unordered_flat_map<
@@ -130,7 +127,7 @@ using utxo_map = boost::unordered_flat_map<
     utxo_value<Size>,
     outpoint_hash,
     outpoint_equal,
-    bip::allocator<std::pair<raw_outpoint const, utxo_value<Size>>, segment_manager_t>
+    segment_allocator<std::pair<raw_outpoint const, utxo_value<Size>>>
 >;
 
 // =============================================================================
@@ -148,7 +145,7 @@ using reference_map_t = boost::unordered_flat_map<
     reference_value,
     outpoint_hash,
     outpoint_equal,
-    bip::allocator<std::pair<raw_outpoint const, reference_value>, segment_manager_t>
+    segment_allocator<std::pair<raw_outpoint const, reference_value>>
 >;
 
 } // namespace utxoz::detail

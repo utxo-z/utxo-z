@@ -241,17 +241,6 @@ if(WIN32)
     target_link_libraries(utxoz PUBLIC bcrypt)
 endif()
 
-# Given a mapped file whose header does not read as initialised, Boost assumes
-# another process is still creating it and spins for this long before reporting
-# corruption — five minutes by default. Nothing here waits on another process
-# creating a segment: one instance per database is the documented contract, and
-# a precondition nothing yet enforces (see #71), but either way this store never
-# waits for such a creator. So a corrupt or foreign file should be reported
-# promptly rather than five minutes later.
-# Private: Boost.Interprocess is an implementation detail and this must not
-# change the behaviour of anything a consumer compiles.
-target_compile_definitions(utxoz
-    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u)
 
 # This project links Boost::headers and no Boost binary. On MSVC a Boost header
 # can ask the linker for one anyway, through a `#pragma comment(lib, ...)` that
@@ -328,8 +317,8 @@ endif()
 if(UTXOZ_BUILD_TOOLS)
     add_executable(utxoz_census tools/census.cpp)
     target_link_libraries(utxoz_census PRIVATE utxoz)
-    # Only because Boost.Interprocess reaches MSVC's auto-link pragmas through
-    # the public headers; see the note in the test CMakeLists.
+    # Only because a Boost header can reach MSVC's auto-link pragmas; see the
+    # note in the test CMakeLists.
     target_compile_definitions(utxoz_census PRIVATE BOOST_ALL_NO_LIB)
 
     # A second binary rather than a flag on the first: they answer different
@@ -352,11 +341,7 @@ if(UTXOZ_BUILD_TESTS)
     target_link_libraries(utxoz_make_format_fixtures PRIVATE utxoz)
     target_include_directories(utxoz_make_format_fixtures
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
-    # See src/detail/segment_open.hpp: this value is baked into an inline
-    # function, so every target that includes that header must agree on it.
-    target_compile_definitions(utxoz_make_format_fixtures
-        PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
-                BOOST_ALL_NO_LIB)
+    target_compile_definitions(utxoz_make_format_fixtures PRIVATE BOOST_ALL_NO_LIB)
 
     # The sizing instrument. Built with the tests because it uses the same
     # internal headers, and never installed: it answers a question a person asks
@@ -370,9 +355,7 @@ if(UTXOZ_BUILD_TESTS)
         target_link_libraries(utxoz_sizing PRIVATE spdlog::spdlog_header_only)
     endif()
     target_include_directories(utxoz_sizing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_compile_definitions(utxoz_sizing
-        PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
-                BOOST_ALL_NO_LIB)
+    target_compile_definitions(utxoz_sizing PRIVATE BOOST_ALL_NO_LIB)
 
     # The suite runs the generator, so it has to exist before the suite does.
     add_dependencies(utxoz_tests utxoz_make_format_fixtures utxoz_sizing)

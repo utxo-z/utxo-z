@@ -37,7 +37,7 @@
  * The byte figures are not all the same kind of number and are never added
  * together as though they were:
  *
- *  - **exact** — read from the entries or asked of Boost.Interprocess and the
+ *  - **exact** — read from the entries or asked of the segment and the
  *    filesystem: payload sizes, segment size, free bytes, file size.
  *  - **modelled** — computed from the certified map layout: slot bytes from
  *    `bucket_count × sizeof(value_type)`, group metadata from the group size.

@@ -58,7 +58,6 @@
 #include "logical_digest.hpp"
 
 namespace fs = std::filesystem;
-namespace bip = boost::interprocess;
 
 using namespace utxoz;
 using namespace utxoz::detail;
@@ -386,19 +385,15 @@ int main(int argc, char** argv) try {
     // a header cannot declare one thing while the id means another.
     manifest << "    \"platform_abi_encoding\": " << platform_abi_encoding << ",\n";
     manifest << "    \"data_abi_id\": " << data_abi_id << ",\n";
-    manifest << "    \"sync_abi_family\": " << sync_abi_family << ",\n";
-    manifest << "    \"sizeof_interprocess_mutex\": "
-             << sizeof(boost::interprocess::interprocess_mutex) << ",\n";
-    manifest << "    \"alignof_interprocess_mutex\": "
-             << alignof(boost::interprocess::interprocess_mutex) << ",\n";
-    manifest << "    \"sizeof_segment_manager\": " << sizeof(segment_manager_t) << ",\n";
-    manifest << "    \"alignof_segment_manager\": " << alignof(segment_manager_t) << ",\n";
+    manifest << "    \"segment_header_format\": " << segment_header::current_format << ",\n";
+    manifest << "    \"sizeof_segment_header\": " << sizeof(segment_header) << ",\n";
+    manifest << "    \"alignof_segment_header\": " << alignof(segment_header) << ",\n";
     manifest << "    \"platform_tag\": " << platform_tag << ",\n";
     manifest << "    \"endian\": " << quoted(std::endian::native == std::endian::little
                                              ? "little" : "big") << ",\n";
     manifest << "    \"sizeof_size_t\": " << sizeof(size_t) << ",\n";
     manifest << "    \"sizeof_pointer\": " << sizeof(void*) << ",\n";
-    manifest << "    \"sizeof_offset_ptr\": " << sizeof(bip::offset_ptr<void>) << "\n";
+    manifest << "    \"sizeof_offset_ptr\": " << sizeof(offset_ptr<void>) << "\n";
     manifest << "  },\n";
     manifest << "  \"fixtures\": [\n";
 

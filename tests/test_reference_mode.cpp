@@ -417,10 +417,11 @@ TEST_CASE("renaming the mode did not rename anything on disk", "[reference][form
         ifs.read(reinterpret_cast<char*>(&mode_byte), sizeof(mode_byte));
         REQUIRE(ifs);
 
-        // Format 2 records what the database was written under; the mode still
-        // sits immediately after the format field, which is all this case reads.
+        // Format 3 records what the database was written under, as format 2
+        // did; the mode still sits immediately after the format field, which is
+        // all this case reads.
         CHECK(std::string(magic, 4) == "UTXO");
-        CHECK(format == 2);
+        CHECK(format == 3);
         CHECK(mode_byte == 1);
         CHECK(mode_byte == static_cast<uint8_t>(utxoz::storage_mode::reference));
     }

@@ -7,10 +7,10 @@
  * @brief Pins what find_single_named() refuses, and what a refusal costs the
  *        callers.
  *
- * Boost.Interprocess resolves a named object by name alone: an absent object and
- * an object of the wrong size both arrive as something that looks usable. Every
- * call site used to read the resulting null and carry on, which cost three
- * different things depending on where it happened:
+ * A segment resolves an object by its slot alone: an absent object arrives as a
+ * null, and an object of the wrong size as a pointer that looks usable. Every
+ * call site used to read the result and carry on, which cost three different
+ * things depending on where it happened:
  *
  * - an enumeration returned a subset and reported success;
  * - the entry count at open came out short with nothing said;
@@ -27,11 +27,14 @@
  * should be read as covering them.
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -43,7 +46,6 @@
 #include <unistd.h>
 #endif
 
-#include <boost/interprocess/managed_mapped_file.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <fmt/format.h>
@@ -52,14 +54,16 @@
 
 #include <utxoz/database.hpp>
 
+#include "detail/mapped_segment.hpp"
 #include "detail/segment_open.hpp"
 #include "detail/segment_stamp.hpp"
 #include "detail/store_config_io.hpp"
 
-namespace bip = boost::interprocess;
 namespace fs = std::filesystem;
 
 using utxoz::detail::find_single_named;
+using utxoz::detail::mapped_segment;
+using utxoz::detail::segment_slot;
 
 namespace {
 
@@ -86,6 +90,10 @@ size_t count_files(fs::path const& dir, std::string_view prefix) {
     return n;
 }
 
+/// A slot the header has room for and this store assigns to nothing: the last
+/// one, so a slot added later takes a lower number first.
+constexpr auto unused_slot = segment_slot(utxoz::detail::segment_slot_count - 1);
+
 /// A segment big enough that open_existing_segment() accepts it, holding
 /// whatever the caller constructs and nothing else.
 constexpr size_t segment_bytes = 16u * 1024u * 1024u;
@@ -106,9 +114,10 @@ void blank_the_map_keeping_the_stamp(fs::path const& dir, fs::path const& data_f
 
     std::error_code ec;
     fs::remove(data_file, ec);
-    bip::managed_mapped_file replacement(bip::create_only, data_file.c_str(), segment_bytes);
+    auto replacement = mapped_segment::create(data_file, segment_bytes);
+    REQUIRE(replacement.has_value());
     auto const placed = utxoz::detail::place_stamp(
-        replacement, data_file,
+        **replacement, data_file,
         utxoz::detail::local_identity(config->database_id, kind, version));
     REQUIRE(placed.has_value());
 }
@@ -123,15 +132,18 @@ void rebuild_as_valid(fs::path const& dir, fs::path const& data_file, uint32_t k
 
     std::error_code ec;
     fs::remove(data_file, ec);
-    bip::managed_mapped_file segment(bip::create_only, data_file.c_str(), segment_bytes);
+    auto created = mapped_segment::create(data_file, segment_bytes);
+    REQUIRE(created.has_value());
+    auto& segment = **created;
     auto const placed = utxoz::detail::place_stamp(
         segment, data_file, utxoz::detail::local_identity(config->database_id, kind, version));
     REQUIRE(placed.has_value());
 
     using map_t = utxoz::detail::utxo_map<utxoz::container_sizes[0]>;
-    segment.construct<map_t>(utxoz::detail::map_object_name)(
+    REQUIRE(segment.construct<map_t>(
+        utxoz::detail::map_object_name,
         64, utxoz::detail::outpoint_hash{}, utxoz::detail::outpoint_equal{},
-        segment.get_allocator<map_t::value_type>());
+        segment.get_allocator<map_t::value_type>()) != nullptr);
 }
 
 /// Replaces a version file with a segment that opens and holds neither a stamp
@@ -139,18 +151,22 @@ void rebuild_as_valid(fs::path const& dir, fs::path const& data_file, uint32_t k
 void blank_the_map(fs::path const& data_file) {
     std::error_code ec;
     fs::remove(data_file, ec);
-    bip::managed_mapped_file replacement(bip::create_only, data_file.c_str(), segment_bytes);
-    replacement.construct<uint64_t>("not_the_map")(0);
+    auto replacement = mapped_segment::create(data_file, segment_bytes);
+    REQUIRE(replacement.has_value());
+    // A slot this store never reads, so the file is not simply empty.
+    REQUIRE((*replacement)->construct<uint64_t>(unused_slot, uint64_t(0)) != nullptr);
 }
 
 struct scratch_segment {
     fs::path path;
-    std::optional<bip::managed_mapped_file> segment;
+    std::unique_ptr<mapped_segment> segment;
 
     explicit scratch_segment(fs::path p) : path(std::move(p)) {
         std::error_code ec;
         fs::remove(path, ec);
-        segment.emplace(bip::create_only, path.c_str(), segment_bytes);
+        auto created = mapped_segment::create(path, segment_bytes);
+        REQUIRE(created.has_value());
+        segment = std::move(*created);
     }
 
     ~scratch_segment() {
@@ -163,7 +179,7 @@ struct scratch_segment {
         fs::remove(path, ec);
     }
 
-    bip::managed_mapped_file& operator*() { return *segment; }
+    mapped_segment& operator*() { return *segment; }
 };
 
 } // namespace
@@ -176,10 +192,10 @@ TEST_CASE("find_single_named refuses an object that is not there", "[guard]") {
     scratch_segment s(make_unique_path("absent").string() + ".dat");
 
     // Something else entirely, so the segment is not simply empty: the guard has
-    // to answer about the name it was asked for, not about the file.
-    (*s).construct<uint64_t>("something_else")(7);
+    // to answer about the slot it was asked for, not about the file.
+    REQUIRE((*s).construct<uint64_t>(unused_slot, uint64_t(7)) != nullptr);
 
-    auto const found = find_single_named<uint64_t>(*s, "db_map", s.path);
+    auto const found = find_single_named<uint64_t>(*s, segment_slot::map, s.path);
     REQUIRE_FALSE(found.has_value());
     CHECK(found.error() == utxoz::error_code::version_unreadable);
 }
@@ -187,9 +203,10 @@ TEST_CASE("find_single_named refuses an object that is not there", "[guard]") {
 TEST_CASE("find_single_named accepts exactly one instance", "[guard]") {
     scratch_segment s(make_unique_path("one").string() + ".dat");
 
-    auto* written = (*s).construct<uint64_t>("db_map")(0x5A5A5A5Au);
+    auto* written = (*s).construct<uint64_t>(segment_slot::map, uint64_t(0x5A5A5A5Au));
+    REQUIRE(written != nullptr);
 
-    auto const found = find_single_named<uint64_t>(*s, "db_map", s.path);
+    auto const found = find_single_named<uint64_t>(*s, segment_slot::map, s.path);
     REQUIRE(found.has_value());
     REQUIRE(*found == written);
     CHECK(**found == 0x5A5A5A5Au);
@@ -198,11 +215,11 @@ TEST_CASE("find_single_named accepts exactly one instance", "[guard]") {
 TEST_CASE("find_single_named refuses more than one instance", "[guard]") {
     scratch_segment s(make_unique_path("many").string() + ".dat");
 
-    // Three instances under the name. This is what a size change looks like from
+    // Three instances in the slot. This is what a size change looks like from
     // the inside: the stored byte count no longer divides into one object.
-    (*s).construct<uint64_t>("db_map")[3](0);
+    REQUIRE((*s).construct<std::array<uint64_t, 3>>(segment_slot::map) != nullptr);
 
-    auto const found = find_single_named<uint64_t>(*s, "db_map", s.path);
+    auto const found = find_single_named<uint64_t>(*s, segment_slot::map, s.path);
     REQUIRE_FALSE(found.has_value());
     CHECK(found.error() == utxoz::error_code::version_unreadable);
 }
@@ -315,6 +332,68 @@ TEST_CASE("open tells a version it cannot open from one it cannot read", "[guard
     auto const db = utxoz::full_db::open_for_testing(f.dir, false);
     REQUIRE_FALSE(db.has_value());
     CHECK(db.error() == utxoz::error_code::file_open_failed);
+}
+
+namespace {
+
+/// Moves the map slot of a closed version file one byte on, and nothing else.
+/// `map_alignment` is the alignment of the map type that file holds.
+/// The map's buckets follow it, so the object still lies inside what was
+/// allocated: the header agrees with the file and the segment opens. What is
+/// wrong is only that a map cannot begin at that address.
+void shift_the_map_one_byte(fs::path const& data_file, size_t map_alignment) {
+    using utxoz::detail::segment_header;
+    auto const field = std::streamoff(offsetof(segment_header, objects)
+        + size_t(segment_slot::map) * sizeof(segment_header::object)
+        + offsetof(segment_header::object, offset));
+
+    std::fstream f(data_file, std::ios::binary | std::ios::in | std::ios::out);
+    REQUIRE(f);
+    uint64_t offset = 0;
+    f.seekg(field);
+    f.read(reinterpret_cast<char*>(&offset), sizeof(offset));
+    REQUIRE(f);
+    REQUIRE(offset != 0);
+    // Where the map really is has to be somewhere a map can be, or moving it
+    // would prove nothing. Its own alignment, not the platform's widest: the
+    // segment aligns each object to its type.
+    REQUIRE(map_alignment > 1);
+    REQUIRE(offset % map_alignment == 0);
+    ++offset;
+    f.seekp(field);
+    f.write(reinterpret_cast<char const*>(&offset), sizeof(offset));
+    f.close();
+    REQUIRE_FALSE(f.fail());
+}
+
+} // namespace
+
+TEST_CASE("full: open refuses a version whose map does not begin where a map can", "[guard]") {
+    // Damage the size and bounds checks cannot see. Read as a map, the address
+    // is the middle of one; the open has to refuse it as a version it cannot
+    // read, before anything is asked of it.
+    two_versions f("open_misaligned");
+    shift_the_map_one_byte(f.historical(),
+        alignof(utxoz::detail::utxo_map<utxoz::container_sizes[0]>));
+
+    // The segment itself still opens: this is not the header being refused.
+    {
+        auto const segment = mapped_segment::open(f.historical());
+        REQUIRE(segment.has_value());
+    }
+
+    auto const db = utxoz::full_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::version_unreadable);
+}
+
+TEST_CASE("reference: open refuses a version whose map does not begin where a map can", "[guard]") {
+    two_reference_versions f("open_ref_misaligned");
+    shift_the_map_one_byte(f.historical(), alignof(utxoz::detail::reference_map_t));
+
+    auto const db = utxoz::reference_db::open_for_testing(f.dir, false);
+    REQUIRE_FALSE(db.has_value());
+    CHECK(db.error() == utxoz::error_code::version_unreadable);
 }
 
 TEST_CASE("an intact history opens and counts everything", "[guard]") {

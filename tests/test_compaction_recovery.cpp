@@ -1532,26 +1532,19 @@ TEST_CASE("a compaction that cannot reopen its active container says so",
 /**
  * A file at a canonical name that is not one of ours must be rejected at once.
  *
- * Boost, handed a mapped file whose header does not read as initialised,
- * assumes another process is midway through creating it and spins waiting —
- * `BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC`, five
- * minutes by default — before reporting corruption. Nothing here waits on
- * another process creating a segment, so that wait is pure delay: an open that
- * meets a truncated version file would stall for five minutes, and for five
- * minutes *per file* if several were damaged.
+ * A version file is mapped whole and its header read where it lies, so nothing
+ * about opening one waits: there is no other process whose half-made file this
+ * could be, and a file that does not begin as a segment does is refused on the
+ * spot. The size check comes before even that, and refuses a file too small to
+ * be one of ours without mapping it.
  *
- * Two things prevent it: the size check that refuses a file too small to be one
- * of ours before Boost ever sees it, and the build's cap on that timeout. They
- * are complementary — the first is instant and covers the common case, the
- * second bounds anything the first cannot recognise.
- *
- * The bound below is what distinguishes them from their absence. With the size
- * check the traversal takes milliseconds; with only the timeout cap it takes
- * about twenty seconds; with neither, five minutes. Five seconds is therefore
- * loose by three orders of magnitude against the real figure and still fails if
- * either protection is removed. It is not measuring performance — the outcome
- * is the same error either way, so elapsed time is the only observable that
- * changes.
+ * The bound below is what distinguishes that from an open that waits. An
+ * earlier segment layout treated a header it could not read as one still being
+ * written and spun for seconds to minutes before giving up, once per file. The
+ * traversal takes milliseconds, so five seconds is loose by three orders of
+ * magnitude and still fails if a wait of that kind ever returns. It is not
+ * measuring performance — the outcome is the same error either way, so elapsed
+ * time is the only observable that changes.
  */
 TEST_CASE("a truncated version file is refused promptly, not after a long wait",
           "[database][recovery]") {
@@ -1606,7 +1599,7 @@ TEST_CASE("a truncated version file is refused promptly, not after a long wait",
  * The same preflight, reached through the file cache.
  *
  * Historical resolution does not open version files directly — it goes through
- * the cache, which had its own `open_only` and so its own five-minute wait. The
+ * the cache, which opens them by itself and once did so without the check. The
  * property worth testing is not "database_impl checks" but "every opening of an
  * existing version goes through the same preflight", and the cache is the path
  * a node actually spends its time on: a deferred lookup or deletion sweeping
@@ -1785,21 +1778,26 @@ TEST_CASE("a truncated version reached through the file cache is refused promptl
  * The other half of the protection, on its own.
  *
  * The preflight recognises a file too small to be one of ours. It cannot
- * recognise a file of exactly the right size whose header happens not to say
- * "initialised" — and that is the state Boost interprets as *another process is
- * still creating this*, which is what it waits for.
+ * recognise a file of exactly the right size that is not a segment, and that
+ * one has to be refused by the mapping itself: on what its first bytes say,
+ * at once, and with the same error.
  *
- * This case builds precisely that: a version file of the configured size with
- * `InitializingSegment` written into its header word. The preflight passes it,
- * so what is left is the build's cap on Boost's timeout, and nothing else.
+ * This case builds precisely that: a version file of the configured size whose
+ * header no longer begins as a segment does. The preflight passes it, so what
+ * is left is the header check, and nothing else.
  *
  * Kept apart from the truncated-file case deliberately. That one pins the
- * preflight and finishes in milliseconds; this one pins the fallback and takes
- * about ten seconds. Folded together, whichever fired first would hide the
- * other, and a regression in either would still look green.
+ * preflight; this one pins what stands behind it. Folded together, whichever
+ * fired first would hide the other, and a regression in either would still
+ * look green.
+ *
+ * The bound is there for the same reason as above. An earlier segment layout
+ * read the value written here as "another process is still creating this" and
+ * waited on it — ten seconds as this project built it, five minutes by default.
+ * Nothing waits now, and a wait coming back is what the bound would catch.
  */
-TEST_CASE("a file whose header claims a creation in progress is not waited on for five minutes",
-          "[database][recovery][slow]") {
+TEST_CASE("a full-size version file that does not begin as a segment is refused at once",
+          "[database][recovery]") {
     auto const path = unique_path("initializing");
     fs::remove_all(path);
     scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
@@ -1818,9 +1816,6 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
     auto const victim = fs::path(path) / older.front();
     auto const original_size = fs::file_size(victim);
 
-    // Boost's states are Uninitialized, Initializing, Initialized, Corrupted —
-    // in that order, in a uint32 at offset zero. `Initializing` is the one it
-    // waits on; `Corrupted` it reports at once, which would not exercise this.
     REQUIRE(original_size >= utxoz::detail::smallest_configured_file);
 
     auto opened = utxoz::full_db::open_for_testing(path);
@@ -1835,14 +1830,16 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
     {
         std::fstream f(victim, std::ios::binary | std::ios::in | std::ios::out);
         REQUIRE(f);
-        uint32_t const initializing = 1;
+        // The first four bytes of the magic, and nothing after them: every
+        // other field of the header still describes the file truthfully.
+        uint32_t const not_a_segment = 1;
         f.seekp(0);
-        f.write(reinterpret_cast<char const*>(&initializing), sizeof(initializing));
+        f.write(reinterpret_cast<char const*>(&not_a_segment), sizeof(not_a_segment));
         REQUIRE(f);
     }
 
     // The size is untouched, so the preflight has nothing to object to — which
-    // is the point: this reaches Boost.
+    // is the point: this reaches the mapping.
     REQUIRE(fs::file_size(victim) == original_size);
 
     auto const start = std::chrono::steady_clock::now();
@@ -1852,13 +1849,9 @@ TEST_CASE("a file whose header claims a creation in progress is not waited on fo
     REQUIRE_FALSE(scanned);
     CHECK(scanned.error() == utxoz::error_code::file_open_failed);
 
-    auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-    INFO("the traversal took " << seconds << " seconds");
-
-    // Generous: the cap is ten seconds, the default it replaces is three
-    // hundred. Anything in between says the cap is in force; thirty leaves room
-    // for a slow machine without coming close to the default.
-    CHECK(seconds < 30);
+    auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    INFO("the traversal took " << millis << " ms");
+    CHECK(millis < 5000);
 
     db.close();
 }

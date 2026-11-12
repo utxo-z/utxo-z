@@ -290,7 +290,7 @@ struct failpoints {
     /// logical one, which is where "never a partial report" has to be proven.
     static inline std::atomic<uint64_t> fail_segment_open_after{0};
 
-    /// Makes the next N inserts throw `bip::bad_alloc` at the `emplace`, as a full
+    /// Makes the next N inserts throw `segment_full` at the `emplace`, as a full
     /// segment does. Zero disarms it.
     ///
     /// Filling a segment until the allocator happens to refuse is not a test: it
@@ -316,7 +316,7 @@ struct failpoints {
     /// The probe is only ever read to fill in a log line, and the code that reads
     /// it is the `catch` whose remaining job is to classify, latch and count. If a
     /// throw from the probe could escape that block, a diagnostic would be
-    /// replacing a decision. Nothing in the real segment manager throws there, so
+    /// replacing a decision. Nothing in the real segment throws there, so
     /// this is the only way to hold the store to that rule.
     static inline std::atomic<bool> fail_free_memory_probe{false};
 

@@ -28,7 +28,7 @@ add_executable(utxoz_tests
     test_sync_alongside_reads.cpp
     test_path_encoding.cpp
     test_named_object_guard.cpp
-    test_persisted_segment_lock.cpp
+    test_mapped_segment.cpp
     test_format_barrier.cpp
     test_shard_of.cpp
     test_container_selection.cpp
@@ -55,19 +55,11 @@ target_link_libraries(utxoz_tests
         Catch2::Catch2WithMain
 )
 
-# The same cap the library is built with. src/detail/segment_open.hpp defines an
-# inline function that bakes this value in, so a target including that header
-# without the definition would link a second, slower copy of it; the header
-# static_asserts on the value so the mistake is a compile error rather than a
-# five-minute wait on one platform. See CMakeLists.txt in the project root.
-#
-# BOOST_ALL_NO_LIB is there for a different reason: the compatibility cases parse
-# the manifest with Boost.JSON, which includes Boost.Container's pmr headers,
-# which ask MSVC for a Boost binary this project does not link. Also explained in
-# the root CMakeLists.txt.
+# The compatibility cases parse the manifest with Boost.JSON, which includes
+# Boost.Container's pmr headers, which ask MSVC for a Boost binary this project
+# does not link. Also explained in the root CMakeLists.txt.
 target_compile_definitions(utxoz_tests
-    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
-            BOOST_ALL_NO_LIB)
+    PRIVATE BOOST_ALL_NO_LIB)
 
 # Where the compatibility fixtures live. Passed in rather than discovered, so the
 # tests do not depend on the working directory ctest happens to give them.
@@ -82,8 +74,10 @@ target_compile_definitions(utxoz_tests
 # quietly still listed, with nothing to say so.
 #
 # Two sets. geometry4-lp64 is what a production build writes and must read back
-# (geometry 4: eight shards). epoch1-lp64 is geometry 3, written by master builds
-# before 1.0, and kept unchanged as the legacy set a production build must refuse.
+# (geometry 4: eight shards). epoch1-lp64 was written by master builds before
+# 1.0, over version files that kept Boost.Interprocess's segment manager inside
+# them (config format 2), and is kept unchanged as the legacy set every build
+# must refuse.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/geometry4-lp64/manifest.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/epoch1-lp64/manifest.json")
@@ -141,8 +135,7 @@ foreach(bad_tag 0 999)
     target_include_directories(utxoz_platform_tag_${bad_tag}
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
     target_compile_definitions(utxoz_platform_tag_${bad_tag}
-        PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
-                BOOST_ALL_NO_LIB
+        PRIVATE BOOST_ALL_NO_LIB
                 UTXOZ_PLATFORM_TAG=${bad_tag})
 
     add_test(NAME "a platform tag of ${bad_tag} does not compile"
@@ -162,8 +155,7 @@ add_library(utxoz_platform_tag_ok OBJECT EXCLUDE_FROM_ALL
 target_link_libraries(utxoz_platform_tag_ok PRIVATE utxoz::utxoz)
 target_include_directories(utxoz_platform_tag_ok PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(utxoz_platform_tag_ok
-    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
-            BOOST_ALL_NO_LIB
+    PRIVATE BOOST_ALL_NO_LIB
             UTXOZ_PLATFORM_TAG=1000)
 
 add_test(NAME "a platform tag at the floor compiles"
@@ -175,16 +167,15 @@ set_tests_properties("a platform tag at the floor compiles" PROPERTIES TIMEOUT 3
 #
 # With a timeout, because the alternative is not a slow suite but a stuck one: a
 # test that blocks takes the whole platform's job with it and CI reports nothing
-# except six hours of silence, naming nothing. The slowest legitimate case is the
-# one that waits out the mapped-file initialisation timeout, at eleven seconds;
-# three hundred leaves room for a loaded runner and still fails in minutes rather
-# than never — and names the test when it does.
+# except six hours of silence, naming nothing. The slowest legitimate cases take
+# seconds in an optimised build; three hundred leaves room for a loaded runner
+# and still fails in minutes rather than never — and names the test when it does.
 include(Catch)
 #
-# The budget is per configuration, not per project: the slowest legitimate case
-# takes eleven seconds in an optimised build and over three hundred under
-# address and undefined-behaviour sanitizers, where everything is instrumented
-# and unoptimised. One number for both would either fail honest work or stop
+# The budget is per configuration, not per project: a case that takes seconds in
+# an optimised build can take over three hundred under address and
+# undefined-behaviour sanitizers, where everything is instrumented and
+# unoptimised. One number for both would either fail honest work or stop
 # catching anything.
 if(UTXOZ_SANITIZER OR CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(UTXOZ_TEST_TIMEOUT 1200)
@@ -200,8 +191,7 @@ add_executable(utxoz_batch_alloc_tests test_batch_allocation.cpp)
 target_link_libraries(utxoz_batch_alloc_tests PRIVATE utxoz::utxoz Catch2::Catch2WithMain)
 target_include_directories(utxoz_batch_alloc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(utxoz_batch_alloc_tests
-    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
-            BOOST_ALL_NO_LIB)
+    PRIVATE BOOST_ALL_NO_LIB)
 if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
     # Both binaries exercise internal logging and capture height-range output.
     target_link_libraries(utxoz_tests PRIVATE spdlog::spdlog_header_only)
@@ -215,8 +205,7 @@ add_executable(utxoz_delete_alloc_tests test_delete_allocation.cpp)
 target_link_libraries(utxoz_delete_alloc_tests PRIVATE utxoz::utxoz Catch2::Catch2WithMain)
 target_include_directories(utxoz_delete_alloc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(utxoz_delete_alloc_tests
-    PRIVATE BOOST_INTERPROCESS_MANAGED_OPEN_OR_CREATE_INITIALIZE_TIMEOUT_SEC=10u
-            BOOST_ALL_NO_LIB)
+    PRIVATE BOOST_ALL_NO_LIB)
 if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
     target_link_libraries(utxoz_delete_alloc_tests PRIVATE spdlog::spdlog_header_only)
 endif()
