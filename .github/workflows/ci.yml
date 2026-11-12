@@ -230,11 +230,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-            sudo apt-get update
-            sudo apt-get install --yes gcc-16 g++-16
-            echo "CC=gcc-16" >> "$GITHUB_ENV"
-            echo "CXX=g++-16" >> "$GITHUB_ENV"
+            ci/install_gcc.sh 16
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
             echo "CC=clang" >> "$GITHUB_ENV"
@@ -531,11 +527,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-            sudo apt-get update
-            sudo apt-get install --yes gcc-16 g++-16
-            echo "CC=gcc-16" >> "$GITHUB_ENV"
-            echo "CXX=g++-16" >> "$GITHUB_ENV"
+            ci/install_gcc.sh 16
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
             echo "CC=clang" >> "$GITHUB_ENV"
@@ -761,11 +753,7 @@ jobs:
 
       - name: 🔧 Select GCC 16
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install --yes gcc-16 g++-16
-          echo "CC=gcc-16" >> "$GITHUB_ENV"
-          echo "CXX=g++-16" >> "$GITHUB_ENV"
+          ci/install_gcc.sh 16
 
       - name: 🐍 Install Conan
         run: |
@@ -829,11 +817,7 @@ jobs:
 
       - name: 🔧 Select GCC 16
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install --yes gcc-16 g++-16
-          echo "CC=gcc-16" >> "$GITHUB_ENV"
-          echo "CXX=g++-16" >> "$GITHUB_ENV"
+          ci/install_gcc.sh 16
 
       - name: 🐍 Install Conan
         run: |
@@ -910,11 +894,7 @@ jobs:
 
       - name: 🔧 Select GCC 16
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install --yes gcc-16 g++-16
-          echo "CC=gcc-16" >> "$GITHUB_ENV"
-          echo "CXX=g++-16" >> "$GITHUB_ENV"
+          ci/install_gcc.sh 16
 
       - name: 🐍 Install Conan
         run: |
@@ -1048,11 +1028,7 @@ jobs:
       - name: 🔧 Select GCC 16
         if: runner.os == 'Linux'
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install --yes gcc-16 g++-16
-          echo "CC=gcc-16" >> "$GITHUB_ENV"
-          echo "CXX=g++-16" >> "$GITHUB_ENV"
+          ci/install_gcc.sh 16
 
       - name: 🔧 Locate MSVC
         if: runner.os == 'Windows'
@@ -1260,11 +1236,7 @@ jobs:
 
       - name: 🔧 Select GCC 16
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install --yes gcc-16 g++-16
-          echo "CC=gcc-16" >> "$GITHUB_ENV"
-          echo "CXX=g++-16" >> "$GITHUB_ENV"
+          ci/install_gcc.sh 16
 
       - name: 🐍 Install Conan
         run: |
@@ -1412,11 +1384,7 @@ jobs:
       - name: 🔧 Select compiler
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-            sudo apt-get update
-            sudo apt-get install --yes gcc-16 g++-16
-            echo "CC=gcc-16" >> "$GITHUB_ENV"
-            echo "CXX=g++-16" >> "$GITHUB_ENV"
+            ci/install_gcc.sh 16
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
             echo "CC=clang" >> "$GITHUB_ENV"
@@ -1688,11 +1656,7 @@ jobs:
       - name: 🔧 Select GCC 16
         shell: bash
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install --yes gcc-16 g++-16
-          echo "CC=gcc-16" >> "$GITHUB_ENV"
-          echo "CXX=g++-16" >> "$GITHUB_ENV"
+          ci/install_gcc.sh 16
 
       - name: 🐍 Install Conan
         run: |
