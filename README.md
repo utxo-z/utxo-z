@@ -200,12 +200,14 @@ Rules to follow:
 
 A database instance supports **one mutating operation at a time**, with no other operation of any kind in flight. Mutating means `insert()`, `insert_batch()`, `apply_deletes()`, `compact_all()` and `close()`. Serialising those is the caller's job. `insert_batch()` uses several threads *inside* one call, but to every other caller it is one mutation like `insert()`.
 
-The read path is different, and only the read path:
+The read path is different, and so is the second half of the barrier:
 
 - **`resolve()` may be called concurrently.** The library serialises resolutions against each other with a lock of its own, held for the **whole call** rather than around the cache lookups — long enough to cover the lifetime of every mapping reference the call obtains. The file cache hands out references into segments it destroys on eviction, so a second resolution evicting one mid-read is a use-after-unmap. You arrange nothing.
 - **`find()` may run alongside `resolve()`.** They touch disjoint state: `find()` reads the active containers and writes only its own sharded probe counters, while a resolution reads the older versions through the file cache and writes only the resolution counters. Eviction inside the cache cannot reach the active containers — those are separate mappings. This is demonstrated rather than assumed: `tests/test_lookup_ownership.cpp` runs both pairings under ThreadSanitizer with **no lock of the caller's**.
 
-That is the whole of it. The lock covers **resolve-vs-resolve**; it does not make the database thread-safe. None of the above permits running either read concurrently with `insert()`, `apply_deletes()`, compaction, `close()`, or anything else that mutates the active maps or writes through the cache's mappings.
+- **The second half of a barrier may run alongside `find()` and `resolve()`.** `sync()` is `begin_sync()` followed by `finish()` on the `pending_sync` it returns. The first flushes what deletions wrote through the file cache and is excluded like a mutation; it is the small part. The second is the rest of the barrier — the active containers, the files and the directory — and shares nothing with a lookup: it takes no lock and makes no lookup wait. So once you have finished mutating and called `begin_sync()`, you can let your readers back in while `std::move(*pending).finish()` runs. What they read is then applied and not yet durable — whether that is acceptable is yours to say — and you must not mutate again until it has returned. Demonstrated in `tests/test_sync_alongside_reads.cpp`, under ThreadSanitizer, with no lock of the caller's.
+
+That is the whole of it. The lock covers **resolve-vs-resolve**; it does not make the database thread-safe. None of the above permits running either read, or `pending_sync::finish()`, concurrently with `insert()`, `apply_deletes()`, compaction, `close()`, or anything else that mutates the active maps or writes through the cache's mappings.
 
 `apply_deletes()` is on neither list. It erases from the active containers *and* writes through the cache's mappings, so it needs exclusion from `resolve()`, `find()`, `insert()`, compaction and `close()` alike — the resolve lock serialises resolutions against each other and knows nothing about a deletion writing through the same segments.
 

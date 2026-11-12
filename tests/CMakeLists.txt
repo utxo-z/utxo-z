@@ -25,6 +25,7 @@ add_executable(utxoz_tests
     test_compaction_recovery.cpp
     test_database_lock.cpp
     test_sync.cpp
+    test_sync_alongside_reads.cpp
     test_path_encoding.cpp
     test_named_object_guard.cpp
     test_persisted_segment_lock.cpp

@@ -107,6 +107,9 @@ struct database_impl {
 
     /// Puts everything written so far on stable storage. See db_base::sync().
     result<> sync();
+    /// The two halves of sync(). See db_base::begin_sync() and pending_sync::finish().
+    result<> begin_sync();
+    result<> finish_sync();
     result<> for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
     result<> for_each_entry_impl(void(*cb)(void*, raw_outpoint const&, uint32_t, std::span<uint8_t const>), void* ctx) const;
 
@@ -396,6 +399,11 @@ private:
     /// and rotate_for latches, so no generation is ever retired without its
     /// obligation on record.
     std::mutex dirty_mutex_;
+
+    /// A deletion wrote through a cache mapping and begin_sync() has not flushed
+    /// it since. Written by apply_deletes() and by begin_sync(), which exclude
+    /// everything; read by finish_sync(), which runs with no mutation in flight.
+    bool cache_pages_owed_ = false;
     void note_dirty(size_t container_index, size_t version) {
         std::scoped_lock const lock(dirty_mutex_);
         dirty_versions_.emplace(container_index, version);

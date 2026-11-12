@@ -29,6 +29,46 @@ namespace detail {
 struct database_impl;
 } // namespace detail
 
+struct db_base;
+
+/**
+ * @brief The second half of a durability barrier, owed since begin_sync().
+ *
+ * db_base::begin_sync() returns one, and finish() is the only way to make the
+ * rest of the barrier, so the halves cannot be taken out of order. Move-only:
+ * finish() consumes it.
+ *
+ * Dropping one without calling finish() makes nothing durable and breaks
+ * nothing: the barrier was simply not made, and the next sync() or
+ * begin_sync() starts it over. The destructor does not finish the barrier,
+ * because it could not report that it had failed.
+ *
+ * It does not keep the database open. finish() on a database closed since
+ * returns error_code::closed.
+ */
+struct [[nodiscard]] pending_sync {
+    pending_sync(pending_sync const&) = delete;
+    pending_sync& operator=(pending_sync const&) = delete;
+    pending_sync(pending_sync&&) noexcept;
+    pending_sync& operator=(pending_sync&&) noexcept;
+    ~pending_sync();
+
+    /**
+     * @brief Makes the rest of the barrier. May run while find() and resolve() do.
+     *
+     * See db_base::begin_sync(). On success everything written before
+     * begin_sync() was called is on stable storage. Consumes the object: a
+     * second call returns error_code::sync_failed.
+     */
+    [[nodiscard]]
+    result<> finish() &&;
+
+private:
+    friend struct db_base;
+    explicit pending_sync(std::weak_ptr<detail::database_impl> impl) noexcept;
+    std::weak_ptr<detail::database_impl> impl_;
+};
+
 /**
  * @page utxoz_path_contract Database paths
  *
@@ -255,7 +295,7 @@ struct insert_batch_result {
  * operation of any kind in flight. Mutating means insert(), apply_deletes(),
  * compact_all() and close(). Serialising those is the caller's job.
  *
- * The read path is different, and only the read path:
+ * The read path is different, and so is the second half of the barrier:
  *
  * - **resolve() may be called concurrently.** The library serialises
  *   resolutions against each other with a lock of its own, held for the whole
@@ -272,15 +312,24 @@ struct insert_batch_result {
  *   assumed — see the ThreadSanitizer cases in tests/test_lookup_ownership.cpp,
  *   which run both pairings with no lock of the caller's.
  *
- * apply_deletes() is on neither list. It mutates: it erases from the active
+ * - **pending_sync::finish() may run alongside find() and resolve().** It is the half
+ *   of the durability barrier that shares nothing with a lookup: it asks the
+ *   kernel to put the active containers' pages on stable storage, which find()
+ *   goes on reading meanwhile, and makes the file and directory barriers. It
+ *   takes no lock and touches neither the file cache nor any counter. The other
+ *   half, begin_sync(), flushes through the cache and is excluded like a
+ *   mutation. See tests/test_sync_alongside_reads.cpp.
+ *
+ * apply_deletes() is on none of these lists. It mutates: it erases from the active
  * containers and writes through the cache's mappings, so it needs exclusion from
  * resolve(), find(), insert(), compaction and close() alike. The resolve lock
  * does not extend to it — that lock serialises resolutions against each other
  * and knows nothing about a deletion writing through the same segments.
  *
  * That is the whole of it. The lock covers resolve-vs-resolve; it does not make
- * the database thread-safe. Nothing above permits running either read
- * concurrently with insert(), a deletion, compaction, close(), or anything else
+ * the database thread-safe. Nothing above permits running either read, or
+ * pending_sync::finish(), concurrently with insert(), a deletion, compaction, close(),
+ * sync(), begin_sync(), or anything else
  * that mutates the active maps or writes through the cache's mappings — a
  * rotation inside insert() unmaps the active segment outright, and
  * apply_deletes() writes through the very mappings a resolution reads.
@@ -478,6 +527,48 @@ struct db_base {
     result<> sync();
 
     /**
+     * @brief The same barrier in two steps, so that lookups need not wait for it.
+     *
+     * `sync()` is `begin_sync()` followed at once by `finish()` on what it
+     * returned, and excludes everything for as long as both take. Taken apart,
+     * only the first needs that:
+     *
+     * @code
+     * // nothing else in flight
+     * auto pending = db.begin_sync();
+     * if ( ! pending) return pending.error();
+     * // lookups may run from here on
+     * auto const durable = std::move(*pending).finish();
+     * // mutations may run again
+     * @endcode
+     *
+     * - **begin_sync()** flushes the pages of the mappings the file cache holds
+     *   — what a deletion wrote into older generations. It needs the exclusion a
+     *   mutation needs, lookups included, because a resolution evicts from that
+     *   cache and evicting unmaps. It is the small part: the cache holds one
+     *   mapping by default.
+     * - **pending_sync::finish()** is the rest, and most of it: the active containers,
+     *   the file of every generation written to, and the directory. It may run
+     *   while find() and resolve() do, from any number of threads; it takes no
+     *   lock and makes no lookup wait. Nothing that mutates may run until it has
+     *   returned, and one at a time.
+     *
+     * The barrier is whole when finish() returns success, and it covers
+     * what was written before begin_sync() was called. What a lookup reads in
+     * between is applied and not yet durable; whether that is acceptable is the
+     * caller's to say.
+     *
+     * finish() returns error_code::sync_failed, having made nothing
+     * durable, if a deletion ran after the last begin_sync(): its pages would be
+     * covered by nothing. Inserts in between are covered, since they write only
+     * the active containers. Everything said of sync() about platforms, closed
+     * databases and retrying holds for each half; a retry after a failed half
+     * starts again from begin_sync().
+     */
+    [[nodiscard]]
+    result<pending_sync> begin_sync();
+
+    /**
      * @brief Iterate over all keys in the database
      *
      * @param f Callable with signature void(raw_outpoint const&)
@@ -549,7 +640,9 @@ protected:
     ~db_base();
     [[nodiscard]]
     result<> for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
-    std::unique_ptr<detail::database_impl> impl_;
+    // Shared only so that a pending_sync can tell a closed database from an
+    // open one; nothing else ever holds it.
+    std::shared_ptr<detail::database_impl> impl_;
 };
 
 // =============================================================================

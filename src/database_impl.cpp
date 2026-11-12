@@ -1945,6 +1945,8 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
             }
 #endif
 
+            // Opened to be written through: its pages now owe begin_sync().
+            cache_pages_owed_ = true;
             auto [map, cache_hit] = file_cache_->get_or_open_reference_file(version);
             (void) cache_hit;
             // Reference mode has one container and no shards: every key is a
@@ -1999,6 +2001,8 @@ deletion_progress database_impl::apply_deletes(std::span<deferred_deletion_entry
             }
 #endif
 
+            // Opened to be written through: its pages now owe begin_sync().
+            cache_pages_owed_ = true;
             auto [map, cache_hit] = file_cache_->get_or_open_file<Index>(slot, version);
             (void) cache_hit;
             auto const admits = [&](size_t idx) { return request_may_be_in(key_shards, idx, slot); };
@@ -3094,8 +3098,59 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
  * is that the entries are there.
  */
 result<> database_impl::sync() {
+    if (auto const begun = begin_sync(); ! begun) return begun;
+    return finish_sync();
+}
+
+/**
+ * The part of the barrier that needs the exclusion a mutation needs.
+ *
+ * The file cache owns its mappings and unmaps on eviction, and a resolution
+ * evicts. So the pages of the mappings it holds are flushed here, with no
+ * lookup in flight, rather than under a lock a resolution would then have to
+ * wait for with the disk on the other side of it. It is a small part: the cache
+ * holds one mapping by default, and only a deletion writes through it.
+ *
+ * The file barriers of those same generations are not made here. They are
+ * driven by the dirty register and belong to finish_sync(), which is where the
+ * obligation is discharged; a mapping flushed here and evicted afterwards is
+ * exactly the case the register exists for.
+ */
+result<> database_impl::begin_sync() {
     if (auto const ready = refuse_if_recovery_pending(); ! ready) {
         return std::unexpected(ready.error());
+    }
+    if constexpr (platform_sync_support() == sync_support::none) {
+        return std::unexpected(error_code::sync_unsupported);
+    }
+    if (file_cache_) {
+        if (auto const r = file_cache_->sync_mappings();
+            ! r && r.error() != error_code::sync_unsupported) {
+            return r;
+        }
+    }
+    // Only now: a failure above leaves the pages owed.
+    cache_pages_owed_ = false;
+    return {};
+}
+
+/**
+ * The rest of the barrier, which shares nothing with a lookup and takes no
+ * lock: the active containers' pages and files, the file of every generation
+ * the dirty register names, and the directory. find() reads the mappings this
+ * flushes and nothing here writes them; the register is written only by
+ * mutations, of which there are none; and the file cache is not touched.
+ *
+ * Refused while a deletion has written through the cache since the last
+ * begin_sync(): those pages would be covered by nothing, and calling the
+ * database durable over them is the one thing a barrier may not do.
+ */
+result<> database_impl::finish_sync() {
+    if (auto const ready = refuse_if_recovery_pending(); ! ready) {
+        return std::unexpected(ready.error());
+    }
+    if (cache_pages_owed_) {
+        return std::unexpected(error_code::sync_failed);
     }
 
     if constexpr (platform_sync_support() == sync_support::none) {
@@ -3142,12 +3197,10 @@ result<> database_impl::sync() {
         if ( ! outcome.has_value()) return outcome;
     }
 
-    // The pages of whatever mappings are still resident. Only the resident ones
-    // can be flushed this way — the rest were unmapped, and unmapping is not a
-    // barrier, which is why the file barriers below are driven by the dirty
-    // register and not by what the cache happens to be holding.
-    if (file_cache_) {
-        if (auto const r = barrier(file_cache_->sync_mappings()); ! r) return r;
+    // Between the page barriers and the file barriers: the barrier is under
+    // way and has not finished.
+    if (auto const hook = failpoints::inside_finish_sync.load(std::memory_order_relaxed)) {
+        hook();
     }
 
     // Every version this instance wrote to and has not yet made durable,
