@@ -40,6 +40,7 @@
 
 #include "detail/durability.hpp"
 #include "support/batch_workload.hpp"
+#include "support/sync_barrier.hpp"
 
 using namespace utxoz;
 using namespace utxoz::testing::batch;
@@ -279,7 +280,7 @@ void check_after(Db& db, fs::path const& dir, bool history,
     // not of what reached the disk.
     if (history) {
         failpoints::sync_file_calls.store(0);
-        REQUIRE(db.sync());
+        REQUIRE(utxoz::testing::sync_barrier(db));
         bool const owed = before.already_dirty || historical_gone != 0;
         CHECK(failpoints::sync_file_calls.load() == before.active_barriers + (owed ? 1 : 0));
     }
@@ -318,7 +319,7 @@ sweep_totals sweep(Db (*make)(fs::path const&, bool, bool), Db (*reopen)(fs::pat
         REQUIRE(history == ! before.historical.empty());
         before.active_barriers = std::is_same_v<Db, full_db> ? utxoz::detail::slot_count : 1;
         before.already_dirty = history && ! synced;
-        if (synced) REQUIRE(db.sync());
+        if (synced) REQUIRE(utxoz::testing::sync_barrier(db));
         failpoints::full_metadata_deletes.store(0);
         failpoints::reference_metadata_deletes.store(0);
 

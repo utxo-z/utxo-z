@@ -52,6 +52,7 @@
 #include "detail/insert_transition.hpp"
 #include "detail/segment_open.hpp"
 #include "detail/utxo_value.hpp"
+#include "support/sync_barrier.hpp"
 
 namespace fs = std::filesystem;
 using namespace utxoz;
@@ -594,7 +595,7 @@ TEST_CASE("a map that moved under a failed allocation latches the instance",
     std::vector<lookup_request> const batch{{key_of(1), 800002}};
     refused_with("resolve", db.resolve(batch), latched);
     refused_with("compact_all", db.compact_all(), latched);
-    refused_with("sync", db.sync(), latched);
+    refused_with("sync", utxoz::testing::sync_barrier(db), latched);
     refused_with("census", db.census(), latched);
     refused_with("verify_unique_outpoints", db.verify_unique_outpoints(), latched);
     refused_with("for_each_key", db.for_each_key([](raw_outpoint const&) {}), latched);

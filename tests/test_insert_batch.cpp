@@ -37,6 +37,7 @@
 
 #include "detail/durability.hpp"
 #include "support/batch_workload.hpp"
+#include "support/sync_barrier.hpp"
 
 namespace fs = std::filesystem;
 using namespace utxoz;
@@ -586,7 +587,7 @@ TEST_CASE("sync after a batch that rotated several slots succeeds, and the reope
         auto db = open_db(t.dir, true);
         auto const r = db.insert_batch(w.requests, {.workers = 8});
         REQUIRE_FALSE(r.error.has_value());
-        REQUIRE(db.sync().has_value());
+        REQUIRE(utxoz::testing::sync_barrier(db).has_value());
         want = content_of(db);
         db.close();
     }

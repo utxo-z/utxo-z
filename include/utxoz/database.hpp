@@ -39,9 +39,9 @@ struct db_base;
  * finish() consumes it.
  *
  * Dropping one without calling finish() makes nothing durable and breaks
- * nothing: the barrier was simply not made, and the next sync() or
- * begin_sync() starts it over. The destructor does not finish the barrier,
- * because it could not report that it had failed.
+ * nothing: the barrier was simply not made, and the next begin_sync() starts
+ * it over. The destructor does not finish the barrier, because it could not
+ * report that it had failed.
  *
  * It does not keep the database open. finish() on a database closed since
  * returns error_code::closed.
@@ -56,9 +56,17 @@ struct [[nodiscard]] pending_sync {
     /**
      * @brief Makes the rest of the barrier. May run while find() and resolve() do.
      *
-     * See db_base::begin_sync(). On success everything written before
-     * begin_sync() was called is on stable storage. Consumes the object: a
-     * second call returns error_code::sync_failed.
+     * See db_base::begin_sync(), which documents the whole barrier: what it
+     * covers, failure and retrying, closed databases and platforms. On success
+     * everything written before begin_sync() was called is on stable storage.
+     * Consumes the object: a second call returns error_code::sync_failed.
+     *
+     * @return empty on success; sync_failed if a barrier was attempted and
+     *         failed, if a deletion ran after begin_sync(), or on a second
+     *         call; sync_unsupported where the platform has none; closed if
+     *         the database was closed since. The refusals db_base::begin_sync()
+     *         lists — recovery_required, entry_corrupt or file_open_failed, and
+     *         inspection_only — are returned here for the same reasons.
      */
     [[nodiscard]]
     result<> finish() &&;
@@ -467,71 +475,10 @@ struct db_base {
     result<> compact_all();
 
     /**
-     * @brief Puts everything written so far on stable storage.
+     * @brief Begins a durability barrier: puts everything written so far on
+     *        stable storage, in two steps.
      *
-     * Returns once the entries this database holds have reached the disk: the
-     * active container of each size class, the older generations a batch's
-     * deletions reached through the file cache, and the directory
-     * entries that name them. Until it returns, a power cut can lose writes
-     * that every earlier call reported as successful — that is not a defect,
-     * it is what buffered I/O is, and this is the call that ends it.
-     *
-     * @par How often
-     * Not decided here. The store has no idea what a caller is willing to lose,
-     * and a policy baked into it would be wrong for everyone: a node syncing
-     * per block pays for durability it may not need below a checkpoint, and one
-     * syncing per hour may not be able to answer what it has. The caller knows
-     * the answer and calls this when it wants the guarantee.
-     *
-     * @par What it does not cover
-     * Derived metadata. Losing a record costs a rescan and nothing else — an
-     * absent or damaged one degrades to "unknown", which every consumer already
-     * handles — so a barrier per record would buy nothing usable. What this
-     * promises is that the entries are there.
-     *
-     * @par Retrying
-     * A failure discharges nothing: every barrier this call owed is still owed
-     * afterwards, so calling again is well defined and attempts all of them —
-     * including the ones that had already succeeded, since a partial result is
-     * not recorded. What retrying cannot do is make a disk that refused to
-     * flush agree to. Treat a failure as fatal to whatever depended on the
-     * guarantee rather than as a transient to spin on; a caller that does retry
-     * is not left with a half-kept promise, which is the point.
-     *
-     * @par On a closed database
-     * error_code::closed. There is nothing mapped and nothing this object still
-     * holds, so reporting a successful sync would suggest a guarantee about a
-     * database it has let go of. Note that closing does **not** make anything
-     * durable: sync() before close() if the guarantee is wanted.
-     *
-     * @par Per platform
-     * On POSIX the file and directory barriers both exist and this is a full
-     * guarantee. On Windows the file contents are flushed and there is no
-     * directory barrier, so the ordering between a rotation and the data it
-     * publishes is weaker than POSIX gives — documented rather than assumed
-     * equivalent. Under Emscripten the filesystem is virtual and there is no
-     * stable storage to reach, so this returns error_code::sync_unsupported
-     * rather than a success it cannot honour.
-     *
-     * Ask platform_durability() for that difference rather than inferring it:
-     * success here means every barrier this platform *has* was crossed, which
-     * under durability_level::contents_only is not the same as every barrier
-     * the guarantee would need. A caller recording a checkpoint on the strength
-     * of a sync should know which of the two it got.
-     *
-     * @return empty on success; sync_failed if a barrier was attempted and
-     *         failed; sync_unsupported where the platform has none;
-     *         recovery_required if this instance is latched.
-     */
-    [[nodiscard]]
-    result<> sync();
-
-    /**
-     * @brief The same barrier in two steps, so that lookups need not wait for it.
-     *
-     * `sync()` is `begin_sync()` followed at once by `finish()` on what it
-     * returned, and excludes everything for as long as both take. Taken apart,
-     * only the first needs that:
+     * The barrier is made by this call and by `finish()` on what it returns:
      *
      * @code
      * // nothing else in flight
@@ -541,6 +488,18 @@ struct db_base {
      * auto const durable = std::move(*pending).finish();
      * // mutations may run again
      * @endcode
+     *
+     * Once finish() has returned success, the entries this database holds have
+     * reached the disk: the active container of each size class, the older
+     * generations a batch's deletions reached through the file cache, and the
+     * directory entries that name them. Until then, a power cut can lose
+     * writes that every earlier call reported as successful — that is not a
+     * defect, it is what buffered I/O is, and this pair of calls is what ends
+     * it.
+     *
+     * @par Why two steps
+     * So that lookups need not wait for it. Only the first step needs
+     * everything else excluded:
      *
      * - **begin_sync()** flushes the pages of the mappings the file cache holds
      *   — what a deletion wrote into older generations. It needs the exclusion a
@@ -556,14 +515,71 @@ struct db_base {
      * The barrier is whole when finish() returns success, and it covers
      * what was written before begin_sync() was called. What a lookup reads in
      * between is applied and not yet durable; whether that is acceptable is the
-     * caller's to say.
+     * caller's to say. A caller with no lookups to let in calls finish() at
+     * once, and the pair then excludes everything for as long as both take.
      *
      * finish() returns error_code::sync_failed, having made nothing
      * durable, if a deletion ran after the last begin_sync(): its pages would be
      * covered by nothing. Inserts in between are covered, since they write only
-     * the active containers. Everything said of sync() about platforms, closed
-     * databases and retrying holds for each half; a retry after a failed half
-     * starts again from begin_sync().
+     * the active containers.
+     *
+     * @par How often
+     * Not decided here. The store has no idea what a caller is willing to lose,
+     * and a policy baked into it would be wrong for everyone: a node syncing
+     * per block pays for durability it may not need below a checkpoint, and one
+     * syncing per hour may not be able to answer what it has. The caller knows
+     * the answer and makes the barrier when it wants the guarantee.
+     *
+     * @par What it does not cover
+     * Derived metadata. Losing a record costs a rescan and nothing else — an
+     * absent or damaged one degrades to "unknown", which every consumer already
+     * handles — so a barrier per record would buy nothing usable. What the
+     * barrier promises is that the entries are there.
+     *
+     * @par Retrying
+     * A failure of either half discharges nothing: every barrier that was owed
+     * is still owed afterwards, so starting again from begin_sync() is well
+     * defined and attempts all of them — including the ones that had already
+     * succeeded, since a partial result is not recorded. What retrying cannot
+     * do is make a disk that refused to flush agree to. Treat a failure as
+     * fatal to whatever depended on the guarantee rather than as a transient to
+     * spin on; a caller that does retry is not left with a half-kept promise,
+     * which is the point.
+     *
+     * @par On a closed database
+     * error_code::closed, from either half. There is nothing mapped and nothing
+     * this object still holds, so reporting a successful sync would suggest a
+     * guarantee about a database it has let go of. Note that closing does
+     * **not** make anything durable: begin_sync() and finish() before close()
+     * if the guarantee is wanted.
+     *
+     * @par Per platform
+     * On POSIX the file and directory barriers both exist and this is a full
+     * guarantee. On Windows the file contents are flushed and there is no
+     * directory barrier, so the ordering between a rotation and the data it
+     * publishes is weaker than POSIX gives — documented rather than assumed
+     * equivalent. Under Emscripten the filesystem is virtual and there is no
+     * stable storage to reach, so each half returns
+     * error_code::sync_unsupported rather than a success it cannot honour.
+     *
+     * Ask platform_durability() for that difference rather than inferring it:
+     * success from finish() means every barrier this platform *has* was
+     * crossed, which under durability_level::contents_only is not the same as
+     * every barrier the guarantee would need. A caller recording a checkpoint
+     * on the strength of a sync should know which of the two it got.
+     *
+     * @return the second half of the barrier, to be finished, on success. From
+     *         either half: sync_failed if a barrier was attempted and failed;
+     *         sync_unsupported where the platform has none; closed on a closed
+     *         database. And three refusals that are not about the barrier:
+     *         - recovery_required while a cleanup is pending. Closing and
+     *           reopening runs it.
+     *         - entry_corrupt or file_open_failed once this instance has found
+     *           a map that is not what it claims, whichever it found. Reopening
+     *           does not repair that: making the state durable is the one thing
+     *           not worth doing with it.
+     *         - inspection_only on a database opened for inspection, which has
+     *           nothing to make durable that it did not find already durable.
      */
     [[nodiscard]]
     result<pending_sync> begin_sync();
@@ -773,7 +789,7 @@ struct full_db : db_base {
      * in any worker stops the others before their *next* request: a request
      * another worker is already applying when the latch is set runs to its end
      * and is reported for how it ended, never as `not_applied`. Durability is as
-     * for `insert`: nothing here syncs, and a later sync() covers every slot the
+     * for `insert`: nothing here syncs, and a later barrier covers every slot the
      * batch rotated.
      *
      * **Memory.** Everything the batch needs for its own bookkeeping - the

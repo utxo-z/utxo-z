@@ -51,6 +51,7 @@
 
 #include "detail/database_lock.hpp"
 #include "detail/durability.hpp"
+#include "support/sync_barrier.hpp"
 
 namespace fs = std::filesystem;
 using namespace utxoz;
@@ -197,7 +198,7 @@ TEST_CASE("an inspection refuses everything that is not inspecting", "[open]") {
     REQUIRE_FALSE(compacted.has_value());
     CHECK(compacted.error() == error_code::inspection_only);
 
-    auto const synced = db.sync();
+    auto const synced = utxoz::testing::sync_barrier(db);
     REQUIRE_FALSE(synced.has_value());
     CHECK(synced.error() == error_code::inspection_only);
 
