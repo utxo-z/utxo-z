@@ -1,3 +1,19 @@
+# version 1.1.0
+
+## What's Changed
+* fix: harden package consumption, database opening and deletion OOM handling by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/153
+* chore: update Catch2 to 3.15.3 by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/154
+* docs: refresh installation examples and remove README changelog by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/155
+* fix: refresh documentation versions in release preparation by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/156
+* fix: scope release clone tags to the matching repository by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/157
+* ci: publish releases from one authoritative branch run by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/158
+* build: update Emscripten to 6.0.13 with a shared Conan profile by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/159
+* fix: never wait for the lock a version file persists by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/161
+* feat: split sync() so lookups need not wait for the barrier by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/160
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v1.0.0...d5237a7226af5e386986d1a31e0b769f2390c488
+
 # version 1.0.0
 
 ## What's Changed
