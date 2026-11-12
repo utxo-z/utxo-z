@@ -63,24 +63,13 @@ durability_level platform_durability() noexcept {
     return durability_level::none;
 }
 
-result<> db_base::sync() {
+result<pending_sync> db_base::begin_sync() {
     if ( ! impl_) return std::unexpected(error_code::closed);
-    // No recovery guard here — sync() is what a caller reaches for *because*
+    // No recovery guard here — a barrier is what a caller reaches for *because*
     // something went wrong — but the integrity latch is different: it says a map
     // is not what it claims, and making that durable is the one thing not worth
     // doing. An inspection, likewise, has nothing to make durable that it did not
     // find already durable.
-    if (auto const intact = impl_->refuse_if_integrity_latched(); ! intact) {
-        return std::unexpected(intact.error());
-    }
-    if (auto const usable = impl_->refuse_if_inspection_only(); ! usable) {
-        return std::unexpected(usable.error());
-    }
-    return impl_->sync();
-}
-
-result<pending_sync> db_base::begin_sync() {
-    if ( ! impl_) return std::unexpected(error_code::closed);
     if (auto const intact = impl_->refuse_if_integrity_latched(); ! intact) {
         return std::unexpected(intact.error());
     }
@@ -143,7 +132,7 @@ void db_base::print_statistics() {
 result<census_report> db_base::census(census_options const& options) const {
     if ( ! impl_) return std::unexpected(error_code::closed);
     // The integrity latch and not the recovery one, which is the same split
-    // sync() makes. A census over a half-applied compaction is honest — it says
+    // the barrier makes. A census over a half-applied compaction is honest — it says
     // what is stored, and what is stored is two copies. A census over a map that
     // contradicted its own guarantee is not: its figures are read out of a
     // structure that has stopped describing anything.

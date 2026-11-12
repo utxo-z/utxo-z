@@ -3077,7 +3077,8 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
 }
 
 /**
- * Puts everything written so far on stable storage.
+ * The barrier puts everything written so far on stable storage, in two halves:
+ * begin_sync() and finish_sync().
  *
  * Three things carry writes and all three are covered. The active container of
  * each size class, obviously. The mappings the file cache holds, less
@@ -3094,13 +3095,9 @@ result<> database_impl::for_each_entry_impl(void(*cb)(void*, raw_outpoint const&
  * Derived metadata is deliberately **not** part of the promise. Losing a
  * metadata record costs a rescan and nothing else — an absent or damaged one
  * degrades to "unknown", which every consumer already handles — so paying a
- * barrier per record would buy nothing a caller could use. What sync() promises
- * is that the entries are there.
+ * barrier per record would buy nothing a caller could use. What the barrier
+ * promises is that the entries are there.
  */
-result<> database_impl::sync() {
-    if (auto const begun = begin_sync(); ! begun) return begun;
-    return finish_sync();
-}
 
 /**
  * The part of the barrier that needs the exclusion a mutation needs.
@@ -4223,7 +4220,7 @@ result<> database_impl::save_config_to_disk() {
     };
 
     // Contents before the name that publishes them. Reported rather than
-    // warned about: sync() leaves this file out of its promise on the grounds
+    // warned about: the barrier leaves this file out of its promise on the grounds
     // that it was made durable here, so if that did not happen, open is the
     // only place anyone finds out.
     if (auto const synced = sync_file(temp_path);

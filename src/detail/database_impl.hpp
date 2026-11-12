@@ -105,9 +105,8 @@ struct database_impl {
 
     result<> compact_all();
 
-    /// Puts everything written so far on stable storage. See db_base::sync().
-    result<> sync();
-    /// The two halves of sync(). See db_base::begin_sync() and pending_sync::finish().
+    /// The two halves of the durability barrier, which puts everything written
+    /// so far on stable storage. See db_base::begin_sync() and pending_sync::finish().
     result<> begin_sync();
     result<> finish_sync();
     result<> for_each_key_impl(void(*cb)(void*, raw_outpoint const&), void* ctx) const;
@@ -380,7 +379,7 @@ private:
      * deletions nowhere but in pages the kernel had not been asked to write.
      *
      * So the obligation is recorded by identity and outlives the mapping. It is
-     * discharged by a successful sync(), or by compaction retiring the file —
+     * discharged by a successful barrier, or by compaction retiring the file —
      * a version that no longer exists cannot owe anything. A partial sync
      * clears nothing: an obligation half met is an obligation.
      */
@@ -390,8 +389,8 @@ private:
     ///
     /// Locked because a batch rotates several slots at once and each rotation
     /// records the version it retires. Once per rotation, never per insert. The
-    /// readers - sync() and compaction - run with nothing else in flight, as the
-    /// threading contract requires, so they do not need it.
+    /// readers - finish_sync() and compaction - run with nothing else in flight,
+    /// as the threading contract requires, so they do not need it.
     ///
     /// It allocates a node, and it is called before the retiring generation is
     /// closed (see new_version). An allocation that fails throws there, with the
@@ -415,7 +414,7 @@ private:
     /// note_dirty() allocates on every call, an entry already there included:
     /// emplace builds its node before it looks. A deletion from a historical
     /// file that called it after the erase, and failed to allocate, left the file
-    /// modified and off the register, and the next sync() returned success
+    /// modified and off the register, and the next barrier returned success
     /// without the barrier that file was owed. So the node is made here, before
     /// the file is touched, and handed over afterwards without allocating.
     using dirty_entry = std::set<std::pair<size_t, size_t>>::node_type;

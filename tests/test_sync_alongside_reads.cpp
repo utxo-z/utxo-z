@@ -48,6 +48,7 @@
 #include "detail/durability.hpp"
 #include "detail/scope_exit.hpp"
 #include "detail/shard.hpp"
+#include "support/sync_barrier.hpp"
 
 using utxoz::detail::failpoints;
 using utxoz::detail::scope_exit;
@@ -148,7 +149,7 @@ TEST_CASE("full: the second half of a barrier may run while find() and resolve()
     }
     uint64_t const stored = next - first;
 
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
 
     constexpr uint64_t stride = 997;
     // Residue 0 is what the resolver asks for and nothing ever deletes.
@@ -255,7 +256,7 @@ TEST_CASE("full: the second half of a barrier may run while find() and resolve()
     // discharged by the sync of its round, so one more has only the active
     // containers left to cover.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
     CHECK(failpoints::sync_file_calls.load(std::memory_order_relaxed) == utxoz::detail::slot_count);
 
     db.close();
@@ -286,7 +287,7 @@ TEST_CASE("full: a pending barrier refuses to skip a deletion's pages",
         }
         REQUIRE(next < 4'000'000);
     }
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
 
     // A deletion in the oldest generation writes through the cache.
     std::vector<utxoz::deferred_deletion_entry> owed{{outpoint_of(first), 400}};
@@ -337,7 +338,7 @@ TEST_CASE("full: a pending barrier refuses to skip a deletion's pages",
         auto dropped = db.begin_sync();
         REQUIRE(dropped.has_value());
     }
-    CHECK(db.sync());
+    CHECK(utxoz::testing::sync_barrier(db));
 
     // It does not keep the database open.
     auto late = db.begin_sync();

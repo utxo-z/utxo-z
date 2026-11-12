@@ -298,10 +298,11 @@ enum class error_code : uint8_t {
 };
 
 /**
- * @brief What sync() can promise on this platform.
+ * @brief What a durability barrier can promise on this platform.
  *
- * A caller that needs the difference has to be able to ask for it. `sync()`
- * returning success under `contents_only` means the entries are on the disk and
+ * A caller that needs the difference has to be able to ask for it. A barrier
+ * (`begin_sync()` then `pending_sync::finish()`) returning success under
+ * `contents_only` means the entries are on the disk and
  * the directory entries that name them are not — the ordering between a
  * rotation and the data it publishes is then weaker than POSIX gives, and a
  * caller recording a checkpoint on the strength of it should know that.

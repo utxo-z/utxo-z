@@ -4,7 +4,7 @@
 
 /**
  * @file test_sync.cpp
- * @brief What sync() covers, and what it refuses to claim.
+ * @brief What the durability barrier covers, and what it refuses to claim.
  *
  * Durability against power loss cannot be tested here. Killing a process leaves
  * the page cache intact, so a file whose barrier was skipped is still there
@@ -47,6 +47,7 @@
 
 #include "detail/durability.hpp"
 #include "detail/scope_exit.hpp"
+#include "support/sync_barrier.hpp"
 
 namespace fs = std::filesystem;
 using utxoz::detail::failpoints;
@@ -85,7 +86,7 @@ size_t count_data_files(std::string const& path) {
 
 } // anonymous namespace
 
-TEST_CASE("sync() succeeds on a database that has been written to", "[database][sync]") {
+TEST_CASE("the barrier succeeds on a database that has been written to", "[database][sync]") {
     auto const path = unique_path("basic");
     fs::remove_all(path);
     scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
@@ -98,7 +99,7 @@ TEST_CASE("sync() succeeds on a database that has been written to", "[database][
         REQUIRE(db.insert(make_key(i), make_value(33, 1), 100).value());
     }
 
-    auto const synced = db.sync();
+    auto const synced = utxoz::testing::sync_barrier(db);
 
     if constexpr (platform_sync_support() == sync_support::none) {
         // Nothing here can reach stable storage, and saying otherwise would be
@@ -117,7 +118,7 @@ TEST_CASE("sync() succeeds on a database that has been written to", "[database][
     db.close();
 }
 
-TEST_CASE("sync() on an untouched database is not an error", "[database][sync]") {
+TEST_CASE("the barrier on an untouched database is not an error", "[database][sync]") {
     auto const path = unique_path("clean");
     fs::remove_all(path);
     scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
@@ -127,14 +128,14 @@ TEST_CASE("sync() on an untouched database is not an error", "[database][sync]")
     auto db = std::move(*opened);
 
     if constexpr (platform_sync_support() != sync_support::none) {
-        REQUIRE(db.sync());
-        REQUIRE(db.sync());   // and again, with nothing to do
+        REQUIRE(utxoz::testing::sync_barrier(db));
+        REQUIRE(utxoz::testing::sync_barrier(db));   // and again, with nothing to do
     }
 
     db.close();
 }
 
-TEST_CASE("sync() covers every generation written to, not the ones still mapped",
+TEST_CASE("the barrier covers every generation written to, not the ones still mapped",
           "[database][sync][failpoint]") {
     if (utxoz::platform_durability() == utxoz::durability_level::none) return;
 
@@ -168,7 +169,7 @@ TEST_CASE("sync() covers every generation written to, not the ones still mapped"
     }
     auto const files_before = count_data_files(path);
     REQUIRE(files_before == 4);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
 
     // Erase across all of them. These defer and the sweep applies them file by
     // file, evicting as it goes.
@@ -190,7 +191,7 @@ TEST_CASE("sync() covers every generation written to, not the ones still mapped"
     // Count the file barriers a sync performs. There has to be one for every
     // generation that was written to, not one for the survivor.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
     auto const barriers = failpoints::sync_file_calls.load(std::memory_order_relaxed);
 
     // Exactly one barrier per distinct thing that owes one: the active
@@ -212,7 +213,7 @@ TEST_CASE("sync() covers every generation written to, not the ones still mapped"
 
     // And a second sync has nothing left to do: the obligation was discharged.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
     auto const after = failpoints::sync_file_calls.load(std::memory_order_relaxed);
     INFO("file barriers on the second sync: " << after);
     CHECK(after < barriers);
@@ -240,7 +241,7 @@ TEST_CASE("a failed sync discharges nothing", "[database][sync][failpoint]") {
         REQUIRE(db.insert(make_key(next++), make_value(8, 1), 100).value());
         REQUIRE(next < 2'000'000);
     }
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
 
     std::vector<utxoz::deferred_deletion_entry> batch;
     for (uint64_t i = 0; i < next; i += 2) batch.emplace_back(make_key(i), 400);
@@ -254,14 +255,14 @@ TEST_CASE("a failed sync discharges nothing", "[database][sync][failpoint]") {
     }
 
     failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
-    auto const failed_sync = db.sync();
+    auto const failed_sync = utxoz::testing::sync_barrier(db);
     failpoints::clear();
     REQUIRE_FALSE(failed_sync);
 
     // An obligation half met is an obligation. The next sync has to attempt all
     // of them again, so it performs at least as many barriers as it would have.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
     auto const retried = failpoints::sync_file_calls.load(std::memory_order_relaxed);
     INFO("barriers on the sync after the failure: " << retried);
     CHECK(retried >= 3);
@@ -287,7 +288,7 @@ TEST_CASE("a barrier that fails comes back as a value", "[database][sync][failpo
 
     SECTION("the page barrier") {
         failpoints::fail_sync_mapped_region.store(true, std::memory_order_relaxed);
-        auto const synced = db.sync();
+        auto const synced = utxoz::testing::sync_barrier(db);
         failpoints::clear();
 
         REQUIRE_FALSE(synced);
@@ -296,7 +297,7 @@ TEST_CASE("a barrier that fails comes back as a value", "[database][sync][failpo
 
     SECTION("the file barrier") {
         failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
-        auto const synced = db.sync();
+        auto const synced = utxoz::testing::sync_barrier(db);
         failpoints::clear();
 
         REQUIRE_FALSE(synced);
@@ -306,7 +307,7 @@ TEST_CASE("a barrier that fails comes back as a value", "[database][sync][failpo
     SECTION("the directory barrier") {
         if constexpr (platform_sync_support() == sync_support::full) {
             failpoints::fail_sync_directory.store(true, std::memory_order_relaxed);
-            auto const synced = db.sync();
+            auto const synced = utxoz::testing::sync_barrier(db);
             failpoints::clear();
 
             REQUIRE_FALSE(synced);
@@ -317,7 +318,7 @@ TEST_CASE("a barrier that fails comes back as a value", "[database][sync][failpo
     db.close();
 }
 
-TEST_CASE("sync() works the same way in reference mode", "[database][sync][reference]") {
+TEST_CASE("the barrier works the same way in reference mode", "[database][sync][reference]") {
     auto const path = unique_path("reference");
     fs::remove_all(path);
     scope_exit const cleanup([&] {
@@ -334,7 +335,7 @@ TEST_CASE("sync() works the same way in reference mode", "[database][sync][refer
         REQUIRE(db.insert(make_key(i), uint32_t(i % 100), uint32_t(i), 100).value());
     }
 
-    auto const synced = db.sync();
+    auto const synced = utxoz::testing::sync_barrier(db);
 
     if constexpr (platform_sync_support() == sync_support::none) {
         REQUIRE_FALSE(synced);
@@ -343,7 +344,7 @@ TEST_CASE("sync() works the same way in reference mode", "[database][sync][refer
         REQUIRE(synced);
 
         failpoints::fail_sync_file.store(true, std::memory_order_relaxed);
-        auto const failing = db.sync();
+        auto const failing = utxoz::testing::sync_barrier(db);
         failpoints::clear();
 
         REQUIRE_FALSE(failing);
@@ -353,7 +354,7 @@ TEST_CASE("sync() works the same way in reference mode", "[database][sync][refer
     db.close();
 }
 
-TEST_CASE("sync() on a closed database says so", "[database][sync]") {
+TEST_CASE("the barrier on a closed database says so", "[database][sync]") {
     auto const path = unique_path("closed");
     fs::remove_all(path);
     scope_exit const cleanup([&] { std::error_code ec; fs::remove_all(path, ec); });
@@ -368,7 +369,7 @@ TEST_CASE("sync() on a closed database says so", "[database][sync]") {
     // Not success. There is nothing mapped and nothing this object still holds,
     // so reporting a successful sync would suggest a guarantee about a database
     // it has let go of. The answer is the same one every other operation gives.
-    auto const synced = db.sync();
+    auto const synced = utxoz::testing::sync_barrier(db);
     REQUIRE_FALSE(synced);
     CHECK(synced.error() == utxoz::error_code::closed);
 }
@@ -397,7 +398,7 @@ TEST_CASE("a version that rotated out still gets a barrier", "[database][sync][f
     REQUIRE(opened);
     auto db = std::move(*opened);
 
-    REQUIRE(db.sync());   // a clean start, so the count below is only this batch
+    REQUIRE(utxoz::testing::sync_barrier(db));   // a clean start, so the count below is only this batch
 
     uint64_t next = 0;
     while (count_data_files(path) < 4) {
@@ -411,7 +412,7 @@ TEST_CASE("a version that rotated out still gets a barrier", "[database][sync][f
     REQUIRE(db.get_cached_file_info().empty());
 
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
     auto const barriers = failpoints::sync_file_calls.load(std::memory_order_relaxed);
 
     // One barrier per active container, plus one per generation that rotated out
@@ -427,7 +428,7 @@ TEST_CASE("a version that rotated out still gets a barrier", "[database][sync][f
 
     // Discharged: a second sync covers the actives and nothing else.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
     // One barrier per open container, and a sharded class is several.
     CHECK(failpoints::sync_file_calls.load(std::memory_order_relaxed)
           == utxoz::detail::slot_count);
@@ -454,7 +455,7 @@ TEST_CASE("a barrier failing partway through keeps every obligation",
     auto opened = utxoz::full_db::open_for_testing(path, true);
     REQUIRE(opened);
     auto db = std::move(*opened);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
 
     uint64_t next = 0;
     while (count_data_files(path) < 4) {
@@ -474,7 +475,7 @@ TEST_CASE("a barrier failing partway through keeps every obligation",
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
     failpoints::fail_sync_file_at.store(first_historical, std::memory_order_relaxed);
 
-    auto const failed_sync = db.sync();
+    auto const failed_sync = utxoz::testing::sync_barrier(db);
     auto const attempted = failpoints::sync_file_calls.load(std::memory_order_relaxed);
     failpoints::clear();
 
@@ -489,7 +490,7 @@ TEST_CASE("a barrier failing partway through keeps every obligation",
     // And nothing was discharged — not the actives that succeeded, not the
     // historical ones that were never reached. The next sync owes all of them.
     failpoints::sync_file_calls.store(0, std::memory_order_relaxed);
-    REQUIRE(db.sync());
+    REQUIRE(utxoz::testing::sync_barrier(db));
     auto const retried = failpoints::sync_file_calls.load(std::memory_order_relaxed);
     INFO("barriers on the retry: " << retried << ", expected " << expected);
     CHECK(retried == expected);
@@ -500,9 +501,9 @@ TEST_CASE("a barrier failing partway through keeps every obligation",
 TEST_CASE("a config that cannot be made durable stops the open", "[database][sync][failpoint]") {
     if (utxoz::platform_durability() == durability_level::none) return;
 
-    // The config says whether a database is full or reference, so sync() leaves
-    // it out of its promise on the grounds that creation made it durable. If
-    // that did not happen, creation is the only place anyone can be told.
+    // The config says whether a database is full or reference, so the barrier
+    // leaves it out of its promise on the grounds that creation made it durable.
+    // If that did not happen, creation is the only place anyone can be told.
     SECTION("the file barrier") {
         auto const path = unique_path("configfilebarrier");
         fs::remove_all(path);
