@@ -112,15 +112,27 @@ case "${verb}" in
         # The output folder is what the consumer configures against, so the
         # toolchain file has to exist for the next layer to be reached at all.
         out=""
+        graph=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -of) out="$2"; shift 2 ;;
+                --out-file) graph="$2"; shift 2 ;;
                 *) shift ;;
             esac
         done
         [[ -n "${out}" ]] || { echo "the install had no -of" >&2; exit 70; }
         mkdir -p "${out}"
         echo "# fake toolchain" > "${out}/conan_toolchain.cmake"
+        if [[ -n "${graph}" ]]; then
+            origin="$(behaviour binary_remote)"
+            [[ "${origin}" != ok ]] || origin="${UTXOZ_REMOTE}"
+            if [[ "${origin}" == missing ]]; then
+                printf '{}' > "${graph}"
+            else
+                printf '{"graph":{"nodes":{"1":{"ref":"utxoz/%s#%s","context":"host","binary_remote":"%s"}}}}' \
+                    "${UTXOZ_BUILD_VERSION}" "${UTXOZ_RECIPE_REVISION}" "${origin}" > "${graph}"
+            fi
+        fi
         echo "Install finished successfully"
         exit 0
         ;;
@@ -291,6 +303,7 @@ check "all three layers pass" ${EXIT_OK} "ok: utxoz/${VERSION}#${REVISION} is on
       "${PUBLISHED}" "${work}/consumer-ok"
 check_result "all three layers pass" recipe "PUBLISHED"
 check_result "all three layers pass" binary "retrieved with --build=never"
+check_result "binary origin is the verified remote" binary "from ${REMOTE}"
 check_result "all three layers pass" consumer "compiles, links and runs"
 
 echo
@@ -331,6 +344,14 @@ check "no binary under --build=never" ${EXIT_BINARY_MISSING} "NOT RETRIEVED" "AB
 # The layer that matters: the release still published, and the verdict says so.
 check_result "no binary: recipe still published" recipe "PUBLISHED"
 check_result "no binary: consumer not reached" consumer "not attempted"
+
+echo
+check "a binary from another remote is not attributed to this release" ${EXIT_BINARY_MISSING} \
+      "NOT RETRIEVED" "ABSENT" "${PUBLISHED}" "${work}/consumer-ok" "binary_remote=kth-deps"
+check_result "wrong binary origin: recipe still published" recipe "PUBLISHED"
+check_result "wrong binary origin: consumer not reached" consumer "not attempted"
+check "missing binary-origin evidence is not success" ${EXIT_BINARY_MISSING} \
+      "NOT RETRIEVED" "ABSENT" "${PUBLISHED}" "${work}/consumer-ok" "binary_remote=missing"
 
 echo
 echo "== the diagnostic consumer, which is not the gate either =="

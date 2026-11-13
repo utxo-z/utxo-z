@@ -161,7 +161,7 @@ readonly PACKAGE_OPTIONS=(
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 export CONAN_HOME="${work}/conan"
-conan profile detect --force > /dev/null
+"${ROOT}/ci/configure_conan.sh" > /dev/null
 
 if [[ -n "${UTXOZ_REMOTE_URL:-}" ]]; then
     # This server publishes Knuth packages; it is not a mirror of ConanCenter.
@@ -169,7 +169,7 @@ if [[ -n "${UTXOZ_REMOTE_URL:-}" ]]; then
     # dependency use it too, so a correctly published utxoz failed verification
     # when fmt was (correctly) absent there. Give the publishing remote priority
     # and limit it to utxoz: the root can only come from the server under test,
-    # while fmt, Boost and the other public dependencies use ConanCenter.
+    # while dependencies can use both ConanCenter and our public kth-deps remote.
     conan remote add conancenter https://center2.conan.io --force > /dev/null
     conan remote add "${REMOTE}" "${UTXOZ_REMOTE_URL}" --force --index=0 \
         --allowed-packages="utxoz/*" > /dev/null
@@ -241,7 +241,7 @@ echo "the recipe is in the empty cache at: $(cat "${work}/cache-path")"
 # must not happen is this layer's failure being read as the recipe's.
 # ---------------------------------------------------------------------------
 echo
-echo "installing ${REFERENCE}#${REVISION} from ${REMOTE}, with public dependencies from ConanCenter and --build=never"
+echo "installing ${REFERENCE}#${REVISION} from ${REMOTE}, with public dependencies from configured remotes and --build=never"
 readonly CONSUMER_BUILD="${work}/consumer"
 mkdir -p "${CONSUMER_BUILD}"
 # --lockfile-partial keeps the repository's pinned dependencies while admitting
@@ -250,13 +250,36 @@ mkdir -p "${CONSUMER_BUILD}"
 install=0
 conan install --requires="${REFERENCE}#${REVISION}" --build=never --lockfile-partial \
     "${PACKAGE_OPTIONS[@]}" -g CMakeDeps -g CMakeToolchain -of "${CONSUMER_BUILD}" \
+    --format=json --out-file "${work}/install.json" \
     > "${work}/install.log" 2>&1 || install=$?
 cat "${work}/install.log"
 if (( install != 0 )); then
     binary_state="NOT RETRIEVED — no prebuilt binary came back under --build=never (conan install exited ${install})"
     report ${EXIT_BINARY_MISSING}
 fi
-binary_state="retrieved with --build=never"
+# Dependency remotes stay unrestricted. Check Conan's actual binary origin,
+# rather than crediting a fallback download to the server under verification.
+if ! python3 - "${work}/install.json" "${REFERENCE}#${REVISION}" "${REMOTE}" <<'PYTHON'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as stream:
+        nodes = json.load(stream)["graph"]["nodes"].values()
+    matches = [node for node in nodes
+               if node.get("ref") == sys.argv[2] and node.get("context") == "host"]
+    if len(matches) != 1 or matches[0].get("binary_remote") != sys.argv[3]:
+        raise ValueError("expected binary remote " + sys.argv[3] + ", got "
+                         + repr([node.get("binary_remote") for node in matches]))
+except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+    print("Cannot verify binary origin:", error, file=sys.stderr)
+    sys.exit(1)
+PYTHON
+then
+    binary_state="NOT RETRIEVED — the requested binary was not proven to come from ${REMOTE}"
+    report ${EXIT_BINARY_MISSING}
+fi
+binary_state="retrieved with --build=never from ${REMOTE}"
 
 # ---------------------------------------------------------------------------
 # DIAGNOSTIC. A consumer compiles and runs against what came back.
