@@ -1,3 +1,13 @@
+# version 2.0.0
+
+## What's Changed
+* ci: install GCC without asking Launchpad for the archive key by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/164
+* feat!: remove sync(); the barrier is begin_sync() and finish() by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/165
+* feat!: version files of our own, without Boost.Interprocess by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/162
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v1.1.0...c832dac2c4e04154921209a4bf10de7e79490dda
+
 # version 1.1.0
 
 ## What's Changed
