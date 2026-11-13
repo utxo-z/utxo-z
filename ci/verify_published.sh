@@ -59,6 +59,9 @@
 #                          the utxoz dependency removed and prove that layer 3
 #                          fails when it should — a check that cannot fail is
 #                          not a check.
+#   UTXOZ_BINARY_TIMEOUT     seconds to wait for the binary; default 300
+#   UTXOZ_BINARY_POLL_INITIAL first retry gap in seconds; default 2
+#   UTXOZ_BINARY_POLL_MAX     largest retry gap in seconds; default 30
 #   UTXOZ_VERIFY_RESULT_FILE  where to write the three verdicts as key=value
 #
 # Run from the repository root:  ci/verify_published.sh
@@ -248,13 +251,16 @@ mkdir -p "${CONSUMER_BUILD}"
 # utxoz itself as a new root; dropping the lockfile lets them float and changes
 # the package id, asking for a binary nobody built.
 install=0
-conan install --requires="${REFERENCE}#${REVISION}" --build=never --lockfile-partial \
+# Other platforms may already have published the recipe while this binary is
+# still in staging. Wait for an actual no-build install, not just the recipe.
+python3 "${ROOT}/ci/await_binary.py" \
+    conan install --requires="${REFERENCE}#${REVISION}" --build=never --lockfile-partial \
     "${PACKAGE_OPTIONS[@]}" -g CMakeDeps -g CMakeToolchain -of "${CONSUMER_BUILD}" \
     --format=json --out-file "${work}/install.json" \
     > "${work}/install.log" 2>&1 || install=$?
 cat "${work}/install.log"
 if (( install != 0 )); then
-    binary_state="NOT RETRIEVED — no prebuilt binary came back under --build=never (conan install exited ${install})"
+    binary_state="NOT RETRIEVED — no prebuilt binary came back under --build=never (bounded install exited ${install})"
     report ${EXIT_BINARY_MISSING}
 fi
 # Dependency remotes stay unrestricted. Check Conan's actual binary origin,

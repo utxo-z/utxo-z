@@ -104,7 +104,13 @@ case "${verb}" in
         exit 0
         ;;
     install)
-        if [[ "$(behaviour install)" != "ok" ]]; then
+        attempt_file="${case_dir}/install-attempts"
+        attempt=0
+        [[ ! -f "${attempt_file}" ]] || attempt="$(cat "${attempt_file}")"
+        attempt=$((attempt + 1))
+        printf '%s' "${attempt}" > "${attempt_file}"
+        mode="$(behaviour install)"
+        if [[ "${mode}" != "ok" && ( "${mode}" != delayed || ${attempt} -lt 3 ) ]]; then
             echo "ERROR: Missing binary: utxoz/VERSION" >&2
             echo "ERROR: Try to build from sources with '--build=utxoz'" >&2
             exit 1
@@ -247,6 +253,9 @@ run() {
         UTXOZ_CONSUMER_DIR="${consumer}" \
         UTXOZ_VERIFY_RESULT_FILE="${work}/result" \
         UTXOZ_PUBLISH_TIMEOUT=1 \
+        UTXOZ_BINARY_TIMEOUT=3 \
+        UTXOZ_BINARY_POLL_INITIAL=0.05 \
+        UTXOZ_BINARY_POLL_MAX=0.1 \
         "${SCRIPT}" 2>&1
 }
 
@@ -338,6 +347,13 @@ check "downloaded but not in the cache" ${EXIT_RECIPE_UNRETRIEVABLE} "not in the
 
 echo
 echo "== the optional binary, which is not the gate =="
+
+check "recipe visible before its delayed binary" ${EXIT_OK} "ok: utxoz/${VERSION}#${REVISION} is on" "" \
+      "${PUBLISHED}" "${work}/consumer-ok" "install=delayed"
+if [[ "$(cat "${work}/case/install-attempts")" != 3 ]]; then
+    echo "FAIL: delayed binary must succeed on the third install attempt"
+    failures=$((failures + 1))
+fi
 
 check "no binary under --build=never" ${EXIT_BINARY_MISSING} "NOT RETRIEVED" "ABSENT" \
       "${PUBLISHED}" "${work}/consumer-ok" "install=fail"
