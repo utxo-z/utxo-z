@@ -37,6 +37,23 @@ and that every entry comes back, canonically ordered and digested. Neither half 
 sufficient. `open()` succeeding says nothing about the values, and a matching
 entry count stays green while every one of them is wrong.
 
+### Boost 1.92 certification
+
+Boost 1.92.0, using the Knuth recipe revision
+`d713722c43fa43d090bb14511e42ba0f`, was checked on macOS arm64 with Apple
+Clang 21 and C++23 against the same source built with Boost 1.91.0.
+The compatibility suite passed 498 assertions in 13 cases, covering fixture
+reads, content digests, writes and reopening. The case requiring a different
+geometry was skipped because these fixtures use this build's geometry; the
+format-barrier suite separately covers geometry rejection.
+
+For the writer check, both builds generated the same fixtures with the same
+fixed database identity. All 29 `.dat` files matched byte for byte after
+normalising only the config's diagnostic Boost version and its checksum. Two
+independent runs of the 1.91 writer also matched, establishing the baseline's
+reproducibility. `map_layout_epoch` remains 1. This is evidence for that platform;
+Linux and Windows builds must still run their compatibility suites in CI.
+
 ### What a green run does not prove
 
 A fixture written under epoch 1 proves that the **reader** still reads epoch 1. It

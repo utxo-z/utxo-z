@@ -277,7 +277,7 @@ jobs:
 
       - name: 🔧 Configure Conan
         run: |
-          conan profile detect --force
+          ./ci/configure_conan.sh
 
       - name: 🔧 Use selected MSVC with Ninja
         if: runner.os == 'Windows'
@@ -569,8 +569,8 @@ jobs:
           CONAN_LOGIN_USERNAME: ${{ secrets.CONAN_LOGIN_USERNAME }}
           CONAN_PASSWORD: ${{ secrets.CONAN_PASSWORD }}
         run: |
-          conan profile detect --force
-          conan remote add kth https://packages.kth.cash/api/
+          ./ci/configure_conan.sh
+          conan remote add kth https://packages.kth.cash/api/ --force
           conan remote login kth $CONAN_LOGIN_USERNAME -p $CONAN_PASSWORD
 
       - name: 🔧 Use selected MSVC with Ninja
@@ -687,7 +687,7 @@ jobs:
 
       - name: 🔧 Setup Conan profiles
         run: |
-          conan profile detect --force
+          ./ci/configure_conan.sh
           conan remote add conan-toolchains "$GITHUB_WORKSPACE/.conan-toolchains"
           conan profile show -pr:h ./ci/conan-ems6 -pr:b default
 
@@ -758,7 +758,7 @@ jobs:
       - name: 🐍 Install Conan
         run: |
           pipx install conan==${{ env.CONAN_VERSION }}
-          conan profile detect --force
+          ./ci/configure_conan.sh
 
       # The pinned build first: the probe needs the generated config.hpp, and the
       # other dependencies come from the ordinary resolution. Only Boost is
@@ -826,7 +826,7 @@ jobs:
 
       - name: 🔧 Configure Conan
         run: |
-          conan profile detect --force
+          ./ci/configure_conan.sh
 
       - name: 🧪 Verify toolchain
         env:
@@ -903,7 +903,7 @@ jobs:
 
       - name: 🔧 Configure Conan
         run: |
-          conan profile detect --force
+          ./ci/configure_conan.sh
 
       - name: 📦 Install dependencies
         env:
@@ -1065,7 +1065,7 @@ jobs:
           conan --version
 
       - name: 🔧 Configure Conan
-        run: conan profile detect --force
+        run: ./ci/configure_conan.sh
 
       # The same two settings the main matrix gives Windows. Without them Conan
       # asks for the "Visual Studio 17 2022" generator and toolset v143, which
@@ -1147,7 +1147,7 @@ jobs:
           conan --version
 
       - name: 🔧 Configure Conan
-        run: conan profile detect --force
+        run: ./ci/configure_conan.sh
 
       - name: 📦 Install dependencies
         env:
@@ -1245,7 +1245,7 @@ jobs:
 
       - name: 🔧 Configure Conan
         run: |
-          conan profile detect --force
+          ./ci/configure_conan.sh
 
       - name: 📦 Install dependencies
         env:
@@ -1429,7 +1429,7 @@ jobs:
 
       - name: 🔧 Detect the profile
         run: |
-          conan profile detect --force
+          ./ci/configure_conan.sh
 
       - name: 🔧 Use selected MSVC with Ninja
         if: runner.os == 'Windows'
@@ -1476,7 +1476,7 @@ jobs:
           path: toolchain-publish-dry-run-${{ runner.os }}.json
 
       # Everything the real publish does before it touches the network. It cannot
-      # upload: this cache has no `kth` remote to write to, which the next step
+      # upload: this cache has no `kth` publishing remote, which the next step
       # asserts rather than assumes.
       - name: 📦 Create the package and prove a consumer can use it
         env:
@@ -1485,12 +1485,12 @@ jobs:
 
       - name: 🚫 Nothing was published
         run: |
-          if conan remote list | grep -qi 'kth'; then
+          if conan remote list | grep -qi '^kth:'; then
             echo "the dry run has a publishing remote configured; it must not" >&2
             conan remote list >&2
             exit 1
           fi
-          echo "ok: no publishing remote exists in this cache, so no upload was possible"
+          echo "ok: no utxoz publishing remote is configured"
 
       # The diagnostic layer of the release verification, run for real on every
       # platform the release runs on — Windows included, which is where it broke
@@ -1665,7 +1665,7 @@ jobs:
 
       - name: 🔧 Configure Conan
         run: |
-          conan profile detect --force
+          ./ci/configure_conan.sh
 
       - name: 📦 Install dependencies
         env:

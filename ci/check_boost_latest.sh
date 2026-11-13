@@ -132,6 +132,14 @@ normalise_config() {
     printf '\0\0\0\0\0\0\0\0' | dd of="$2" bs=1 seek=44 count=8 conv=notrunc status=none 2>/dev/null
 }
 
+# Find a complete static Catch2 package in either Conan cache layout.
+find_catch_package() {
+    find "$1" -maxdepth 3 -type d -name 'p' -path '*catch*' \
+        -exec test -f '{}/lib/libCatch2Main.a' \; \
+        -exec test -f '{}/lib/libCatch2.a' \; \
+        -print -quit 2>/dev/null || true
+}
+
 # ---- the comparison, checked against known answers ---------------------------
 #
 # A comparison is only worth what it can fail on. `--self-test` builds trees whose
@@ -199,8 +207,23 @@ if [[ "${1:-}" == "--self-test" ]]; then
     expect "a config differing elsewhere" "1 1 0 0" \
         "${identical} ${differing} ${only_candidate} ${only_baseline}"
 
+    expect "an absent Catch2 cache" "" "$(find_catch_package "${work}/missing-cache")"
+    mkdir -p "${work}/cache/catch-incomplete/p/lib"
+    touch "${work}/cache/catch-incomplete/p/lib/libCatch2Main.a"
+    expect "Catch2 without its second archive is not usable" "" "$(find_catch_package "${work}/cache")"
+    mkdir -p "${work}/cache/b/catch-complete/p/lib"
+    touch "${work}/cache/b/catch-complete/p/lib/libCatch2Main.a" \
+          "${work}/cache/b/catch-complete/p/lib/libCatch2.a"
+    expect "a complete built Catch2 wins over an incomplete package" \
+        "${work}/cache/b/catch-complete/p" "$(find_catch_package "${work}/cache")"
+    mkdir -p "${work}/downloaded/catch-complete/p/lib"
+    touch "${work}/downloaded/catch-complete/p/lib/libCatch2Main.a" \
+          "${work}/downloaded/catch-complete/p/lib/libCatch2.a"
+    expect "a complete downloaded Catch2 is usable" \
+        "${work}/downloaded/catch-complete/p" "$(find_catch_package "${work}/downloaded")"
+
     if (( failures )); then echo "${failures} self-test failures" >&2; exit 1; fi
-    echo "the comparison classifies all six cases correctly"
+    echo "all comparison and Catch2 lookup controls passed"
     exit 0
 fi
 
@@ -311,7 +334,11 @@ if (( build_failed )); then
     exit 0
 fi
 
-catch_root="$(find "${HOME}/.conan2/p/b" -maxdepth 3 -type d -name 'p' -path '*catch*' -print -quit 2>/dev/null)"
+# A package built here lives under p/b/<name>/p and a downloaded one under
+# p/<name>/p, and p/b does not exist at all when nothing was built. Search from
+# the cache root, and let a missing directory mean "not found" rather than end
+# the script under `set -e` without a verdict.
+catch_root="$(find_catch_package "${HOME}/.conan2/p")"
 if [[ -z "${catch_root}" || ! -f "${catch_root}/lib/libCatch2Main.a" ]]; then
     verdict "BUILDS_ONLY" "${described}" \
         "The library compiled against this Boost; Catch2 was not found, so the compatibility cases could not be run. Compilation is not compatibility."
