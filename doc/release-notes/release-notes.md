@@ -1,3 +1,11 @@
+# version 2.1.0
+
+## What's Changed
+* deps: use the Knuth Boost 1.92.0 recipe by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/167
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v2.0.0...9159631305e796560e3fbe32640b9cc5b56f47bd
+
 # version 2.0.0
 
 ## What's Changed
