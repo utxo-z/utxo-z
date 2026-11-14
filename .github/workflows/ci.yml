@@ -1453,6 +1453,7 @@ jobs:
           ./ci/test_remote_revisions.sh
           ./ci/test_one_revision.sh
           ./ci/test_await_published.sh
+          python3 ci/test_await_binary.py
           ./ci/test_verify_published.sh
           ./ci/test_verify_consumer.sh
 
