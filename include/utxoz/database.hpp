@@ -642,10 +642,10 @@ struct db_base {
 
     // Statistics
     [[nodiscard]] database_statistics get_statistics();
-    void print_statistics();
+    void print_statistics();  ///< Emit the formatted report at debug level.
     [[nodiscard]] sizing_report get_sizing_report() const;
-    void print_sizing_report() const;
-    void print_height_range_stats() const;
+    void print_sizing_report() const;  ///< Emit the formatted report at debug level.
+    void print_height_range_stats() const;  ///< Emit the formatted report at debug level.
     void reset_all_statistics();
     void reset_search_stats();  ///< Clears the probe and resolution counters
     [[nodiscard]] float get_cache_hit_rate() const;

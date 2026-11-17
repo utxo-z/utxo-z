@@ -3480,15 +3480,15 @@ namespace {
 /// happened, which is every ordinary run: a line of zeros in a report read by a
 /// person is noise, and the figure that matters is the one that is not zero.
 void log_rotation_causes(rotation_causes const& causes) {
-    log::info("    preventive: {}", causes.preventive);
+    log::debug("    preventive: {}", causes.preventive);
     if (causes.capacity_exception != 0) {
-        log::info("    after a failed allocation: {}", causes.capacity_exception);
+        log::debug("    after a failed allocation: {}", causes.capacity_exception);
     }
     if (causes.failed != 0) {
-        log::info("    could not rotate: {} (not counted above)", causes.failed);
+        log::debug("    could not rotate: {} (not counted above)", causes.failed);
     }
     if (causes.unexpected_post_exception != 0) {
-        log::info("    map changed after a failed allocation: {} (no rotation)",
+        log::debug("    map changed after a failed allocation: {} (no rotation)",
                   causes.unexpected_post_exception);
     }
 }
@@ -3498,72 +3498,72 @@ void log_rotation_causes(rotation_causes const& causes) {
 void database_impl::print_statistics() {
     auto stats = get_statistics();
 
-    log::info("=== UTXO Database Statistics ===");
-    log::info("Storage mode: {}", stats.mode == storage_mode::reference ? "reference" : "full");
-    log::info("Total entries: {}", stats.total_entries);
-    log::info("Total inserts: {}", stats.total_inserts);
-    log::info("Total deletes: {}", stats.total_deletes);
+    log::debug("=== UTXO Database Statistics ===");
+    log::debug("Storage mode: {}", stats.mode == storage_mode::reference ? "reference" : "full");
+    log::debug("Total entries: {}", stats.total_entries);
+    log::debug("Total inserts: {}", stats.total_inserts);
+    log::debug("Total deletes: {}", stats.total_deletes);
 
-    log::info("--- Container Statistics ---");
+    log::debug("--- Container Statistics ---");
     if (stats.mode == storage_mode::reference) {
-        log::info("Reference container ({} bytes per entry):", sizeof(reference_value));
-        log::info("  Current entries: {}", stats.containers[0].current_size);
-        log::info("  Total inserts: {}", stats.containers[0].total_inserts);
-        log::info("  Total deletes: {}", stats.containers[0].total_deletes);
-        log::info("  File rotations: {}", stats.rotations_per_container[0]);
+        log::debug("Reference container ({} bytes per entry):", sizeof(reference_value));
+        log::debug("  Current entries: {}", stats.containers[0].current_size);
+        log::debug("  Total inserts: {}", stats.containers[0].total_inserts);
+        log::debug("  Total deletes: {}", stats.containers[0].total_deletes);
+        log::debug("  File rotations: {}", stats.rotations_per_container[0]);
         log_rotation_causes(stats.rotations_by_cause[0]);
-        log::info("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[0] / (1024.0*1024.0));
+        log::debug("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[0] / (1024.0*1024.0));
     } else {
         for (size_t i = 0; i < container_count; ++i) {
-            log::info("Container {} (size <= {} bytes):", i, container_sizes[i]);
-            log::info("  Current entries: {}", stats.containers[i].current_size);
-            log::info("  Total inserts: {}", stats.containers[i].total_inserts);
-            log::info("  Total deletes: {}", stats.containers[i].total_deletes);
-            log::info("  File rotations: {}", stats.rotations_per_container[i]);
+            log::debug("Container {} (size <= {} bytes):", i, container_sizes[i]);
+            log::debug("  Current entries: {}", stats.containers[i].current_size);
+            log::debug("  Total inserts: {}", stats.containers[i].total_inserts);
+            log::debug("  Total deletes: {}", stats.containers[i].total_deletes);
+            log::debug("  File rotations: {}", stats.rotations_per_container[i]);
             log_rotation_causes(stats.rotations_by_cause[i]);
-            log::info("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[i] / (1024.0*1024.0));
+            log::debug("  Est. memory: {:.2f} MB", stats.memory_usage_per_container[i] / (1024.0*1024.0));
         }
     }
 
-    log::info("--- Cache Statistics ---");
-    log::info("Cache hit rate: {:.2f}%", stats.cache_hit_rate * 100);
-    log::info("Cached files: {}", stats.cached_files_count);
+    log::debug("--- Cache Statistics ---");
+    log::debug("Cache hit rate: {:.2f}%", stats.cache_hit_rate * 100);
+    log::debug("Cached files: {}", stats.cached_files_count);
 
     // The read path, per class. Printed before the probe summary because it is
     // the finer answer to the same question, and because the two numbers a
     // reader will want to compare — how often a class was asked and how often it
     // answered — are next to each other here.
-    log::info("--- Lookups, by class ---");
-    log::info("  statistics level: {}", stats.lookups.statistics_level);
+    log::debug("--- Lookups, by class ---");
+    log::debug("  statistics level: {}", stats.lookups.statistics_level);
     if (stats.lookups.classes.empty()) {
-        log::info("  this build carries no per-class lookup telemetry, so there is");
-        log::info("  nothing below — which is not the same as a database that");
-        log::info("  answered nothing. Build with -DUTXOZ_STATISTICS_LEVEL=lookup.");
+        log::debug("  this build carries no per-class lookup telemetry, so there is");
+        log::debug("  nothing below — which is not the same as a database that");
+        log::debug("  answered nothing. Build with -DUTXOZ_STATISTICS_LEVEL=lookup.");
     }
-    log::info("  {:>9} {:>12} {:>12} {:>12} {:>12} {:>10} {:>8} {:>8}",
+    log::debug("  {:>9} {:>12} {:>12} {:>12} {:>12} {:>10} {:>8} {:>8}",
               "class", "maps probed", "answered", "from history", "gen probes",
               "files", "cache", "avg ord");
     for (auto const& c : stats.lookups.classes) {
         auto const name = c.container_class == reference_class
             ? std::string("reference") : fmt::format("{}", c.container_class);
-        log::info("  {:>9} {:>12} {:>12} {:>12} {:>12} {:>10} {:>8} {:>8.2f}",
+        log::debug("  {:>9} {:>12} {:>12} {:>12} {:>12} {:>10} {:>8} {:>8.2f}",
                   name, c.active_maps_probed, c.answered_from_active,
                   c.resolved_historical, c.generations_probed, c.files_opened,
                   c.cache_hits, c.avg_probe_ordinal);
     }
-    log::info("  received {}, deferred {}, absent {} — these three have no class:",
+    log::debug("  received {}, deferred {}, absent {} — these three have no class:",
               stats.lookups.lookups_received, stats.lookups.deferred, stats.lookups.absent);
-    log::info("  a lookup arrives with a key and no size, and an absent one was");
-    log::info("  refused by every class");
-    log::info("  probe ordinal is how many generation files a key was searched in;");
-    log::info("  version distance is how far back the answering generation was.");
-    log::info("  They are different numbers: compaction leaves gaps in the");
-    log::info("  numbering and the cache is searched before the catalogue.");
+    log::debug("  a lookup arrives with a key and no size, and an absent one was");
+    log::debug("  refused by every class");
+    log::debug("  probe ordinal is how many generation files a key was searched in;");
+    log::debug("  version distance is how far back the answering generation was.");
+    log::debug("  They are different numbers: compaction leaves gaps in the");
+    log::debug("  numbering and the cache is searched before the catalogue.");
     for (auto const& c : stats.lookups.classes) {
         if (c.resolved_historical == 0) continue;
         auto const name = c.container_class == reference_class
             ? std::string("reference") : fmt::format("{}", c.container_class);
-        log::info("  class {} ordinal 1/2/3/4/5-8/9+: {}/{}/{}/{}/{}/{}  distance: {}/{}/{}/{}/{}/{}",
+        log::debug("  class {} ordinal 1/2/3/4/5-8/9+: {}/{}/{}/{}/{}/{}  distance: {}/{}/{}/{}/{}/{}",
                   name,
                   c.probe_ordinal_histogram[0], c.probe_ordinal_histogram[1],
                   c.probe_ordinal_histogram[2], c.probe_ordinal_histogram[3],
@@ -3572,22 +3572,22 @@ void database_impl::print_statistics() {
                   c.version_distance_histogram[2], c.version_distance_histogram[3],
                   c.version_distance_histogram[4], c.version_distance_histogram[5]);
     }
-    log::info("");
+    log::debug("");
 
-    log::info("--- Probes ---");
-    log::info("Probes: {}", stats.probes.probes);
-    log::info("Answered from the active map: {} ({:.2f}%)",
+    log::debug("--- Probes ---");
+    log::debug("Probes: {}", stats.probes.probes);
+    log::debug("Answered from the active map: {} ({:.2f}%)",
         stats.probes.answered_from_active, stats.probes.active_map_hit_rate * 100);
-    log::info("Deferred to historical resolution: {}", stats.probes.deferred);
-    log::info("Avg age of answered probes: {:.1f} blocks", stats.probes.avg_age_answered);
+    log::debug("Deferred to historical resolution: {}", stats.probes.deferred);
+    log::debug("Avg age of answered probes: {:.1f} blocks", stats.probes.avg_age_answered);
 
-    log::info("--- Historical resolution ---");
-    log::info("Resolved: {}   absent: {}", stats.resolution.resolved, stats.resolution.absent);
-    log::info("Avg depth: {:.2f} versions", stats.resolution.avg_depth);
-    log::info("Files visited: {}  cache hit rate: {:.2f}%",
+    log::debug("--- Historical resolution ---");
+    log::debug("Resolved: {}   absent: {}", stats.resolution.resolved, stats.resolution.absent);
+    log::debug("Avg depth: {:.2f} versions", stats.resolution.avg_depth);
+    log::debug("Files visited: {}  cache hit rate: {:.2f}%",
         stats.resolution.files_visited, stats.resolution.cache_hit_rate * 100);
 
-    log::info("================================");
+    log::debug("================================");
 }
 
 sizing_report database_impl::get_sizing_report() const {
@@ -3671,19 +3671,19 @@ void database_impl::print_sizing_report() const {
     //
     // The file size is not a measurement either: it is the setting a new segment
     // is created with, not what any file occupies.
-    log::info("=== UTXO-Z Sizing Report ===");
-    log::info("Session counters since this process opened the database, not the");
-    log::info("contents of the files. For what is stored, run census().");
-    log::info("");
+    log::debug("=== UTXO-Z Sizing Report ===");
+    log::debug("Session counters since this process opened the database, not the");
+    log::debug("contents of the files. For what is stored, run census().");
+    log::debug("");
 
     // Reference mode fills one container and leaves the rest at zero. Printing
     // five would be printing four containers that do not exist, in a report whose
     // whole subject is how much space things take.
     size_t const printed = (mode_ == storage_mode::reference) ? 1 : container_count;
     if (mode_ == storage_mode::reference) {
-        log::info("Reference mode: one class of fixed {}-byte records.",
+        log::debug("Reference mode: one class of fixed {}-byte records.",
                   sizeof(reference_value));
-        log::info("");
+        log::debug("");
     }
 
     for (size_t i = 0; i < printed; ++i) {
@@ -3692,21 +3692,21 @@ void database_impl::print_sizing_report() const {
         double file_size_mib = double(c.file_size_setting) / (1024.0 * 1024.0);
 
         if (file_size_gib >= 1.0) {
-            log::info("--- Container {} (max {} bytes, file size: {:.2f} GiB) ---",
+            log::debug("--- Container {} (max {} bytes, file size: {:.2f} GiB) ---",
                       i, c.container_size, file_size_gib);
         } else {
-            log::info("--- Container {} (max {} bytes, file size: {:.2f} MiB) ---",
+            log::debug("--- Container {} (max {} bytes, file size: {:.2f} MiB) ---",
                       i, c.container_size, file_size_mib);
         }
 
-        log::info("  Files (catalogued now): {}", c.file_count);
-        log::info("  Entries inserted by this process and not yet deleted by it: {:L}",
+        log::debug("  Files (catalogued now): {}", c.file_count);
+        log::debug("  Entries inserted by this process and not yet deleted by it: {:L}",
                   c.current_entries);
-        log::info("  Inserts by this process: {:L}", c.historical_inserts);
-        log::info("  Deletes by this process: {:L}", c.historical_deletes);
-        log::info("  Payload capacity left unused by those inserts: {:L} ({:.2f} bytes/entry avg)",
+        log::debug("  Inserts by this process: {:L}", c.historical_inserts);
+        log::debug("  Deletes by this process: {:L}", c.historical_deletes);
+        log::debug("  Payload capacity left unused by those inserts: {:L} ({:.2f} bytes/entry avg)",
                   c.total_wasted_bytes, c.avg_waste_per_entry);
-        log::info("");
+        log::debug("");
     }
 
     // Build sorted histogram (by count descending)
@@ -3724,21 +3724,21 @@ void database_impl::print_sizing_report() const {
         total_count += cnt;
     }
 
-    log::info("--- Sizes of the values this process inserted ({} distinct sizes) ---",
+    log::debug("--- Sizes of the values this process inserted ({} distinct sizes) ---",
               sorted_histogram.size());
     for (auto const& [value_size, count] : sorted_histogram) {
         double pct = total_count > 0 ? double(count) / double(total_count) * 100.0 : 0.0;
-        log::info("  {} bytes: {:L} ({:.1f}%)", value_size, count, pct);
+        log::debug("  {} bytes: {:L} ({:.1f}%)", value_size, count, pct);
     }
 
-    log::info("");
-    log::info("=== End Sizing Report ===");
+    log::debug("");
+    log::debug("=== End Sizing Report ===");
 }
 
 void database_impl::print_height_range_stats() const {
     auto const& stats = height_range_stats_;
     if (stats.ranges.empty()) {
-        log::info("No height range statistics collected.");
+        log::debug("No height range statistics collected.");
         return;
     }
 
@@ -3749,8 +3749,8 @@ void database_impl::print_height_range_stats() const {
     }
     std::ranges::sort(sorted_keys);
 
-    log::info("=== UTXO-Z Height Range Statistics (per {:L} blocks) ===", height_range_stats::range_size);
-    log::info("");
+    log::debug("=== UTXO-Z Height Range Statistics (per {:L} blocks) ===", height_range_stats::range_size);
+    log::debug("");
 
     // Header
     std::string header = fmt::format("  {:>14}", "Range");
@@ -3758,10 +3758,10 @@ void database_impl::print_height_range_stats() const {
         header += fmt::format(" | C{}({:>5})", i, container_sizes[i]);
     }
     header += fmt::format(" | {:>12}", "Total");
-    log::info("{}", header);
+    log::debug("{}", header);
 
     // Inserts
-    log::info("--- Inserts ---");
+    log::debug("--- Inserts ---");
     for (uint32_t key : sorted_keys) {
         auto const& data = stats.ranges.at(key);
         uint32_t start = key * height_range_stats::range_size;
@@ -3774,13 +3774,13 @@ void database_impl::print_height_range_stats() const {
             total += data.inserts[i];
         }
         row += fmt::format(" | {:>12L}", total);
-        log::info("{}", row);
+        log::debug("{}", row);
     }
 
-    log::info("");
+    log::debug("");
 
     // Deletes
-    log::info("--- Deletes ---");
+    log::debug("--- Deletes ---");
     for (uint32_t key : sorted_keys) {
         auto const& data = stats.ranges.at(key);
         uint32_t start = key * height_range_stats::range_size;
@@ -3793,11 +3793,11 @@ void database_impl::print_height_range_stats() const {
             total += data.deletes[i];
         }
         row += fmt::format(" | {:>12L}", total);
-        log::info("{}", row);
+        log::debug("{}", row);
     }
 
-    log::info("");
-    log::info("=== End Height Range Statistics ===");
+    log::debug("");
+    log::debug("=== End Height Range Statistics ===");
 }
 
 void database_impl::reset_all_statistics() {
