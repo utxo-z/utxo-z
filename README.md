@@ -34,7 +34,7 @@ Add to your `conanfile.py`:
 <!-- utxoz:current-release:start -->
 ```python
 def requirements(self):
-    self.requires("utxoz/2.1.0")
+    self.requires("utxoz/2.1.1")
 ```
 <!-- utxoz:current-release:end -->
 
