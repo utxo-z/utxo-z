@@ -1,3 +1,11 @@
+# version 2.1.1
+
+## What's Changed
+* log: emit diagnostic database reports at debug level by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/169
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v2.1.0...7eda6a59d52dd91b35e200fb750f0af9ed3ecd0a
+
 # version 2.1.0
 
 ## What's Changed
