@@ -23,6 +23,10 @@
 #include <utxoz/logging.hpp>
 #include <utxoz/utils.hpp>
 
+#ifdef UTXOZ_LOG_SPDLOG
+#include <spdlog/spdlog.h>
+#endif
+
 void do_some_operations(utxoz::db& db, uint32_t base_height) {
     for (int i = 0; i < 50; ++i) {
         std::array<uint8_t, 32> tx_hash{};
@@ -94,6 +98,9 @@ int main() {
         // =====================================================================
         // Spdlog backend: messages go directly to spdlog
         // =====================================================================
+        // This demonstration opts into diagnostic reports; normal consoles can
+        // stay at info while a separate debug file sink retains the reports.
+        spdlog::set_level(spdlog::level::debug);
         fmt::println("=== Part 1: No prefix ===\n");
 
         do_some_operations(db, 100);

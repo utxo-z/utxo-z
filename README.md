@@ -325,10 +325,19 @@ db_base                    — shared methods (close, size, apply_deletes, stati
 | `for_each_key(callback)` | Iterate over all stored keys |
 | `compact_all()` | Optimize storage |
 | `get_statistics()` | Get performance stats |
-| `print_statistics()` | Log formatted stats |
+| `print_statistics()` | Log formatted stats at `debug` level |
 | `get_sizing_report()` | Get container sizing analysis |
-| `print_height_range_stats()` | Log per-height-range insert/delete statistics |
+| `print_sizing_report()` | Log container sizing analysis at `debug` level |
+| `print_height_range_stats()` | Log per-height-range insert/delete statistics at `debug` level |
 | `reset_all_statistics()` | Reset all counters |
+
+The three `print_*` reports, including their headings and rotation-cause details,
+are diagnostic output. With the spdlog backend, keep the logger at `debug` (or
+`trace`) and filter each sink independently: a file sink at `debug` retains the
+reports while a console sink at `info` omits them. Custom logging callbacks
+receive these messages as `log_level::debug` and choose their own destinations.
+The `none` backend remains silent. Operational messages, warnings and errors keep
+their existing levels.
 
 ### `full_db` (aliased as `db`)
 

@@ -22,3 +22,6 @@ target_link_libraries(adapted_benchmark PRIVATE utxoz::utxoz)
 # Logging example
 add_executable(logging_example logging_example.cpp)
 target_link_libraries(logging_example PRIVATE utxoz::utxoz)
+if(UTXOZ_LOG_BACKEND STREQUAL "spdlog")
+    target_link_libraries(logging_example PRIVATE spdlog::spdlog_header_only)
+endif()
