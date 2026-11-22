@@ -166,6 +166,13 @@ int main() {
             return EXIT_FAILURE;
         }
 
+        // What a caller sizes its own copy of the value with.
+        utxoz::reference_location const location{found->file_number, found->offset};
+        if (sizeof(location) != utxoz::reference_value_size) {
+            std::cout << "reference_db: the value size is not the location's\n";
+            return EXIT_FAILURE;
+        }
+
         db.close();
         std::filesystem::remove_all(path);
         std::cout << "reference_db: ok\n";
