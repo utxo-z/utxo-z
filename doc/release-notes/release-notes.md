@@ -1,3 +1,11 @@
+# version 2.2.0
+
+## What's Changed
+* types: publish the size of a reference-mode value by @fpelliccioni in https://github.com/utxo-z/utxo-z/pull/172
+
+
+**Full Changelog**: https://github.com/utxo-z/utxo-z/compare/v2.1.1...e30b3d7f4ec8f6870cb68a806bc5ef75fd9404e4
+
 # version 2.1.1
 
 ## What's Changed
