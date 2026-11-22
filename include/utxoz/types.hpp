@@ -343,6 +343,20 @@ struct reference_find_result {
 /// Backward-compatible alias.
 using find_result = full_find_result;
 
+/// Where a reference-mode entry points: the two fields a caller gives
+/// reference_db::insert() and gets back from find(), without the height the
+/// database keeps beside them.
+struct reference_location {
+    uint32_t file_number;
+    uint32_t offset;
+};
+
+/// Bytes of a reference-mode value as its caller holds it: a file number and an
+/// offset. A caller that writes the value somewhere of its own, an undo record
+/// for one, sizes that field with this.
+inline constexpr size_t reference_value_size = sizeof(reference_location);
+static_assert(reference_value_size == 8);
+
 /**
  * @brief File size for reference mode (production)
  */

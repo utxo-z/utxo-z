@@ -140,6 +140,13 @@ struct reference_value {
     uint32_t offset;
 };
 
+// What is stored is the height and the caller's value, and nothing else. The
+// size alone would not notice a narrower field that padding makes up for, so
+// each stored field is held to the type of the public one.
+static_assert(sizeof(reference_value) == sizeof(uint32_t) + reference_value_size);
+static_assert(std::is_same_v<decltype(reference_value::file_number), decltype(reference_location::file_number)>);
+static_assert(std::is_same_v<decltype(reference_value::offset), decltype(reference_location::offset)>);
+
 using reference_map_t = boost::unordered_flat_map<
     raw_outpoint,
     reference_value,
